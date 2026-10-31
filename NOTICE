@@ -1,0 +1,10 @@
+Tradewind
+Copyright 2026 Papers With Backtest
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this software except in compliance with the License. You may obtain a copy of
+the License at http://www.apache.org/licenses/LICENSE-2.0.
+
+Tradewind is an independent, clean-room implementation. It is compatible with the
+public API of backtrader but shares no code with it. Where its design follows
+QuantConnect's Lean (Apache License 2.0), the attribution is recorded in this file.
