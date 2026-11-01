@@ -79,6 +79,9 @@ def main():
                 "status": order.getstatusname(), "size": float(order.size),
                 "exec_size": float(order.executed.size), "exec_price": float(order.executed.price),
                 "cash": round(float(self.broker.getcash()), 4), "value": round(float(self.broker.getvalue()), 4),
+                "pos": float(self.getposition(order.data).size),
+                "close_prev": float(order.data.close[-1]) if len(order.data) > 1 else None,
+                "open_now": float(order.data.open[0]),
             })
             return original(self, order)
 

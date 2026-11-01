@@ -206,6 +206,36 @@ def build(bt):
                 self.sell(data=d2, size=int(0.8 * cash / d2.close[0]))
                 self.buy(data=d1, size=int(1.3 * cash / d1.close[0]))
 
+    class DeficitCarry(Recorder):
+        """A batch whose running cash goes negative: does the deficit of a refused order
+        weigh on the orders after it, and can a sell that reduces a long be refused?"""
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1, d2 = self.datas[0], self.datas[1], self.datas[2]
+            cash = self.broker.getcash()
+            if n == 3:
+                self.buy(data=d0, size=int(0.5 * cash / d0.close[0]))
+                self.buy(data=d1, size=int(0.3 * cash / d1.close[0]))
+            if n == 12:
+                # nearly everything into S2, then: a buy that overshoots, a tiny buy that
+                # alone would fit, a small reduction of S0, a large reduction of S0, then a
+                # buy only the large sale can fund, then another overshoot
+                self.buy(data=d2, size=int(0.98 * cash / d2.close[0]))
+                self.buy(data=d1, size=int(0.10 * cash / d1.close[0]))
+                self.buy(data=d1, size=1)
+                self.sell(data=d0, size=2)
+                self.sell(data=d0, size=int(0.6 * self.getposition(d0).size))
+                self.buy(data=d2, size=int(0.05 * cash / d2.close[0]))
+                self.buy(data=d1, size=int(2.0 * cash / d1.close[0]))
+            if n == 25:
+                # the same shape with an opening short sale inside the deficit
+                self.buy(data=d1, size=int(3.0 * cash / d1.close[0]))
+                self.sell(data=d2, size=int(0.2 * self.getposition(d2).size))
+                self.sell(data=d1, size=int(1.5 * self.getposition(d1).size))
+                self.buy(data=d0, size=1)
+
     class CloseThenTarget(Recorder):
         """close() and order_target_percent on the same data in the same bar."""
 
@@ -249,6 +279,7 @@ def build(bt):
     return {
         "foreign_feed": ForeignFeed,
         "batch_funding": BatchFunding,
+        "deficit_carry": DeficitCarry,
         "close_then_target": CloseThenTarget,
         "monthly_equal_weight": MonthlyEqualWeight,
         "target_size_ladder": TargetSizeLadder,

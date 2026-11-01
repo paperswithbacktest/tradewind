@@ -241,7 +241,13 @@ class BackBroker(BrokerBase):
 
         Observed on the oracle: the submitted orders of a bar are checked as a batch, in
         submission order, against a *running* cash -- a sell earlier in the batch funds a
-        buy later in it -- and each is Accepted or Margin before any fill happens.
+        buy later in it -- and each is Accepted or Margin before any fill happens. The
+        running cash takes the cash flow of **every** order, refused ones included: an
+        order is Accepted when the running cash is still non-negative after it, Margin
+        otherwise. So the deficit of a refused buy weighs on the orders after it, and a
+        sell -- even one reducing a long -- is refused while the running cash stays
+        below zero after its proceeds (``a_new_anomaly…``, 2020-05-28: 48 orders, the
+        deficit-carrying rule is the only one that reproduces the 20 refusals).
         """
         cash = self.cash
         pseudo = {}
@@ -255,13 +261,13 @@ class BackBroker(BrokerBase):
             pos = pseudo.get(data)
             if pos is None:
                 pos = pseudo[data] = self.positions[data].clone()
-            if order._check and self.p.checksubmit and price is not None and not self._affordable(order, price, cash, pos):
-                order.margin()
-                self.notify(order)
-                continue
             if price is not None:
                 cash += self._cash_delta(order, price, pos)
                 pos.update(order.size, price)
+            if order._check and self.p.checksubmit and price is not None and cash < 0:
+                order.margin()
+                self.notify(order)
+                continue
             order.accept(self)
             self.notify(order)
             self.pending.append(order)
