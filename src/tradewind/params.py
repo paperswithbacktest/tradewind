@@ -67,6 +67,12 @@ class MetaParams(type):
         pre = getattr(cls, "_before_init", None)
         if pre is not None:
             pre(obj)
+        # A class may consume the positional arguments itself (an indicator takes its
+        # input lines this way), so that a user ``__init__(self)`` written without
+        # arguments still works, as the corpus writes them.
+        consume = getattr(cls, "_consume_args", None)
+        if consume is not None:
+            args = consume(obj, *args)
         obj.__init__(*args, **kwargs)
         post = getattr(cls, "_after_init", None)
         if post is not None:

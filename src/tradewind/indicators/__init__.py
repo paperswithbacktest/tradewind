@@ -11,8 +11,8 @@ class SimpleMovingAverage(Indicator):
     lines = ("sma",)
     params = (("period", 30),)
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period)
 
     def once(self, start, end):
@@ -26,8 +26,8 @@ class ExponentialMovingAverage(Indicator):
     lines = ("ema",)
     params = (("period", 30), ("alpha", None))
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period)
 
     def once(self, start, end):
@@ -41,8 +41,8 @@ class Highest(Indicator):
     lines = ("highest",)
     params = (("period", 1),)
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period)
 
     def once(self, start, end):
@@ -56,8 +56,8 @@ class Lowest(Indicator):
     lines = ("lowest",)
     params = (("period", 1),)
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period)
 
     def once(self, start, end):
@@ -73,8 +73,8 @@ class RateOfChange(Indicator):
     lines = ("roc",)
     params = (("period", 12),)
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period + 1)
 
     def once(self, start, end):
@@ -92,8 +92,8 @@ ROC = RateOfChange
 class TrueRange(Indicator):
     lines = ("tr",)
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(2)
 
     def once(self, start, end):
@@ -111,8 +111,8 @@ class AverageTrueRange(Indicator):
     lines = ("atr",)
     params = (("period", 14),)
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period + 1)
 
     def once(self, start, end):
@@ -140,8 +140,8 @@ class RelativeStrengthIndex(Indicator):
     lines = ("rsi",)
     params = (("period", 14), ("safediv", False), ("safehigh", 100.0), ("safelow", 50.0))
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period + 1)
 
     def once(self, start, end):
@@ -179,8 +179,8 @@ class MACD(Indicator):
     lines = ("macd", "signal")
     params = (("period_me1", 12), ("period_me2", 26), ("period_signal", 9))
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period_me2 + self.p.period_signal - 1)
 
     def once(self, start, end):
@@ -202,10 +202,10 @@ class CrossOver(Indicator):
 
     lines = ("crossover",)
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(2)
-        for inp in inputs:
+        for inp in self.datas:
             if isinstance(inp, Indicator):
                 self.addminperiod(inp._minperiod + 1)
 
@@ -251,8 +251,8 @@ class StandardDeviation(Indicator):
     lines = ("stddev",)
     params = (("period", 20), ("movav", None), ("safepow", True))
 
-    def __init__(self, *inputs):
-        super().__init__(*inputs)
+    def __init__(self):
+        super().__init__()
         self.addminperiod(self.p.period)
 
     def once(self, start, end):

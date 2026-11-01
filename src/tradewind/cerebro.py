@@ -141,18 +141,17 @@ class Cerebro(ParamsBase):
 
         broker = self._broker
         for dtnum in clock:
-            # The broker fills the previous bar's orders on the bar about to arrive (it
-            # peeks at it), the feeds then move to that bar, and the strategy is notified
-            # before next(): observed on the oracle, the date read inside notify_order is
-            # the fill bar's.
+            # The feeds move to the new bar first, then the broker fills the previous
+            # bar's orders against it, then the strategy is notified and steps. Observed
+            # on the oracle: inside notify_order the date is the fill bar's, and a
+            # commission scheme that reads the bar's date (the toolbox's yearly schedule)
+            # prices a fill on 1 January at the new year's rate -- two corpus strategies
+            # rebalancing at year-end diverged when fills were priced before the move.
             upcoming = {}
             for d in self.datas:
-                bar = d._peek_bar(dtnum)
-                if bar is not None:
-                    upcoming[d] = bar
+                if d._advance_to(dtnum):
+                    upcoming[d] = (d.open[0], d.high[0], d.low[0], d.close[0], dtnum)
             broker.next(upcoming)
-            for d in upcoming:
-                d._advance_to(dtnum)
             date = num2date(dtnum).date()
             for strat in strategies:
                 for ind in strat._indicators:

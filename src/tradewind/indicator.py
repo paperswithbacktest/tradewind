@@ -56,7 +56,9 @@ class Indicator(ParamsBase):
         self._clock = None
         self._strategy = None
 
-    def __init__(self, *inputs, **kwargs):
+    def _consume_args(self, *inputs):
+        """Bind the input lines before the user's ``__init__`` runs; nothing is passed on,
+        so a corpus indicator written as ``def __init__(self)`` works."""
         self.datas = list(inputs)
         self.data = self.datas[0] if self.datas else None
         for i, d in enumerate(self.datas):
@@ -70,6 +72,10 @@ class Indicator(ParamsBase):
         for name, buf in zip(names, buffers):
             setattr(self, name, buf)
         self._register()
+        return ()
+
+    def __init__(self):
+        pass
 
     def _register(self):
         """Attach to the running strategy so the engine syncs the cursor and reads the
@@ -136,18 +142,39 @@ class Indicator(ParamsBase):
         return self.lines[0][0] / float(other)
 
     # -- computation ------------------------------------------------------------------
+    def _input_lines(self):
+        """Every LineBuffer of every input (a feed's lines, an indicator's lines)."""
+        out = []
+        for inp in self.datas:
+            owner = inp._owner if isinstance(inp, LineBuffer) else inp
+            lines = getattr(owner, "lines", None)
+            if lines is not None:
+                out.extend(list(lines))
+            elif isinstance(inp, LineBuffer):
+                out.append(inp)
+        return out
+
     def once(self, start: int, end: int):
-        """Fill ``[start, end)`` of every line from the inputs; default: bar by bar."""
-        clock = self._clock
-        for i in range(start, end):
-            for buf in self.lines:
-                buf.idx = i
-            clock_idx = clock.idx
-            clock.idx = i
-            try:
+        """Fill ``[start, end)`` of every line from the inputs; default: bar by bar.
+
+        The inputs' cursors are moved along so that ``self.data.close[0]``,
+        ``self.data.high[-1]`` or ``self.data.datetime.date(0)`` inside ``next()`` read
+        the bar being computed, then restored.
+        """
+        inputs = self._input_lines()
+        saved = [buf.idx for buf in inputs]
+        try:
+            for i in range(start, end):
+                for buf in self.lines:
+                    buf.idx = i
+                for buf in inputs:
+                    buf.idx = i
+                if i + 1 < self._minperiod:
+                    continue
                 self.next()
-            finally:
-                clock.idx = clock_idx
+        finally:
+            for buf, idx in zip(inputs, saved):
+                buf.idx = idx
 
     def next(self):
         raise NotImplementedError(f"{type(self).__name__} defines neither once() nor next()")
