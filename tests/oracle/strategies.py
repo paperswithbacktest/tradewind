@@ -279,6 +279,26 @@ def build(bt):
                 except IndexError:
                     self.sell(data=d0, size=4)
 
+    class ReverseShortfall(Recorder):
+        """A short, then buys sized to 99.9 % of the cash at the close that both close the
+        short and open a long: when the next open gaps up, what fills?"""
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0 = self.datas[0]
+            cash = self.broker.getcash()
+            if n == 3:
+                self.sell(data=d0, size=int(0.5 * cash / d0.close[0]))
+            if n in (10, 20, 30, 40, 50, 60, 70, 80, 90, 100):
+                pos = self.getposition(d0).size
+                if pos < 0:
+                    self.buy(data=d0, size=int(0.999 * cash / d0.close[0]))
+                elif pos > 0:
+                    self.sell(data=d0, size=pos + int(0.5 * cash / d0.close[0]))
+                else:
+                    self.sell(data=d0, size=int(0.5 * cash / d0.close[0]))
+
     class CloseThenTarget(Recorder):
         """close() and order_target_percent on the same data in the same bar."""
 
@@ -324,6 +344,7 @@ def build(bt):
         "batch_funding": BatchFunding,
         "deficit_carry": DeficitCarry,
         "line_edges": LineEdges,
+        "reverse_shortfall": ReverseShortfall,
         "close_then_target": CloseThenTarget,
         "monthly_equal_weight": MonthlyEqualWeight,
         "target_size_ladder": TargetSizeLadder,

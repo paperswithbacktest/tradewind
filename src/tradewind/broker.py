@@ -365,6 +365,31 @@ class BackBroker(BrokerBase):
             return
         if dt is None:
             dt = data.datetime[0]
+        reversing = pos.size and ((pos.size > 0) != (size > 0)) and abs(size) > abs(pos.size)
+        if reversing and comminfo.stocklike:
+            # Observed on the oracle (breaking_bad_trends, 1993-04-02: short 1 998, buy 3 947):
+            # the closing part of a reversing order always fills; the opening part fills
+            # only if the cash left after closing covers it, otherwise the order ends
+            # Partial (closing part executed) then Margin, the opening part untouched.
+            closed = -pos.size
+            opened = size - closed
+            comm_closed = comminfo.getcommission(closed, price)
+            comm_opened = comminfo.getcommission(opened, price)
+            cash_after_close = self.cash - closed * price - comm_closed
+            if cash_after_close - opened * price - comm_opened < 0:
+                oldprice = pos.price
+                newsize, _newprice, _o, c = pos.update(closed, price)
+                pnl = comminfo.profitandloss(-c, oldprice, price)
+                self.cash -= closed * price
+                self.cash -= comm_closed
+                comm_final = comminfo.confirmexec(closed, price)
+                order.execute(dt, closed, price, c, c * price, comm_final, 0.0, 0.0, 0.0, 0.0, pnl)
+                order.partial()
+                self.notify(order)
+                order.margin()
+                self.notify(order)
+                self._update_trade(order, data, closed, price, 0.0, c, pnl, comm_final, dt, newsize)
+                return
         oldprice = pos.price
         newsize, _newprice, opened, closed = pos.update(size, price)
         pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0
