@@ -156,12 +156,11 @@ class Cerebro(ParamsBase):
                     else:
                         an.next()
                 strat._check_timers(date, Timer.SESSION_END)
-            # notifications produced by orders placed in next() (Submitted/Accepted, coc fills)
-            for strat in strategies:
-                self._deliver(strat)
 
+        # Observed on the oracle: notifications are delivered at the start of the next
+        # bar only, so what an order placed on the last bar produced is never notified,
+        # and nothing is delivered after the loop.
         for strat in strategies:
-            self._deliver(strat)
             strat.stop()
             for an in strat.analyzers:
                 an.stop()

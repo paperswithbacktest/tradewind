@@ -144,7 +144,9 @@ def test_margin_when_cash_is_short():
             self.statuses.append(order.getstatusname())
 
     _, strat = run(TooBig, fr)
-    assert strat.statuses == ["Submitted", "Accepted", "Margin"]
+    # Observed on the oracle: the cash pre-check at submission rejects the order before
+    # it is ever Accepted.
+    assert strat.statuses == ["Submitted", "Margin"]
 
 
 def test_num2date_roundtrip():

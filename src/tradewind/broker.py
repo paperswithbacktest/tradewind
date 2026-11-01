@@ -65,6 +65,7 @@ class BackBroker(BrokerBase):
         self.cash = self.startingcash = float(self.p.cash)
         self.positions: dict = collections.defaultdict(Position)
         self.orders: list[Order] = []          # every order ever submitted
+        self.submitted: collections.deque = collections.deque()  # submitted, accepted on the next bar
         self.pending: collections.deque = collections.deque()  # accepted, not yet executed
         self.notifs: collections.deque = collections.deque()
         self.trades: dict = {}
@@ -166,20 +167,53 @@ class BackBroker(BrokerBase):
         return self.submit(order, check=_checksubmit)
 
     def submit(self, order, check=True):
+        """Submitted now; accepted, as a batch, when the next bar arrives.
+
+        Observed on the oracle: the notifications of a bar arrive as all the Submitted,
+        then all the Accepted, then the fills -- acceptance is a broker step at the next
+        bar, not part of submission. With ``checksubmit`` the order is pre-checked
+        against the cash at the current close and goes straight to ``Margin`` when it
+        cannot be afforded, without ever being Accepted.
+        """
         order.comminfo = self.getcommissioninfo(order.data)
         order.submit(self)
         self.orders.append(order)
         self.notify(order)
-        order.accept(self)
-        self.notify(order)
-        if self._coc and order.exectype == Order.Market and len(order.data):
-            # cheat-on-close: the market order fills at the close of the bar it was placed on
-            self._try_exec(order, order.data.close[0])
+        data = order.data
+        if check and self.p.checksubmit and len(data) and not self._affordable(order, data.close[0]):
+            order.margin()
+            self.notify(order)
             return order
-        self.pending.append(order)
+        if self._coc and order.exectype == Order.Market and len(data):
+            # cheat-on-close: the market order fills at the close of the bar it was placed on
+            order.accept(self)
+            self.notify(order)
+            self._try_exec(order, data.close[0])
+            return order
+        self.submitted.append(order)
         return order
 
+    def _affordable(self, order, price):
+        """Can the cash cover the order at ``price``, commission included? Closing or
+        reducing a position never fails; stock-like sells never fail."""
+        comminfo = order.comminfo
+        size = order.size
+        pos = self.positions[order.data]
+        opening = (pos.size == 0) or ((pos.size > 0) == (size > 0))
+        if not opening:
+            return True
+        if comminfo.stocklike and not order.isbuy():
+            return True
+        comm = comminfo.getcommission(size, price)
+        cost = comminfo.getoperationcost(size, price)
+        return self.cash - cost - comm >= 0
+
     def cancel(self, order, bracket=False):
+        if order in self.submitted:
+            self.submitted.remove(order)
+            order.cancel()
+            self.notify(order)
+            return True
         if order in self.pending:
             self.pending.remove(order)
             order.cancel()
@@ -194,6 +228,11 @@ class BackBroker(BrokerBase):
         ``advanced`` is the set of feeds that have a new bar at this clock tick; an order
         on a feed with no bar today waits.
         """
+        while self.submitted:
+            order = self.submitted.popleft()
+            order.accept(self)
+            self.notify(order)
+            self.pending.append(order)
         remaining = collections.deque()
         while self.pending:
             order = self.pending.popleft()
@@ -266,15 +305,10 @@ class BackBroker(BrokerBase):
         size = order.size
         pos = self.positions[data]
         comm = comminfo.getcommission(size, price)
-        # cash check: the operation cost plus commission must be covered when it opens or
-        # increases exposure; closing a position never fails on cash.
-        opening = (pos.size == 0) or ((pos.size > 0) == (size > 0))
-        if order.isbuy() or (opening and not comminfo.stocklike):
-            cost = comminfo.getoperationcost(size, price) if order.isbuy() else 0.0
-            if self.p.checksubmit and self.cash - cost - comm < 0 and opening:
-                order.margin()
-                self.notify(order)
-                return
+        if not self._affordable(order, price):
+            order.margin()
+            self.notify(order)
+            return
         oldprice = pos.price
         newsize, _newprice, opened, closed = pos.update(size, price)
         pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0

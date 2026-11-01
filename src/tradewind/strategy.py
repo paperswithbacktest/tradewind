@@ -190,15 +190,26 @@ class Strategy(ParamsBase):
         return None
 
     def order_target_value(self, data=None, target=0.0, price=None, **kwargs):
+        """Size the *difference* between the target value and the position's value.
+
+        Observed on the oracle: the integer truncation applies to the value gap, not to
+        the target size -- truncating the target and subtracting the position overshoots
+        by one share whenever the fractional parts straddle an integer.
+        """
         data = self.data if data is None else self._resolve(data)
         price = data.close[0] if price is None else price
         possize = self.getposition(data).size
         comminfo = self.broker.getcommissioninfo(data)
         if not target and possize:
             return self.close(data=data, size=possize, **kwargs)
-        size = comminfo.getsize(price, abs(target))
-        size = size if target >= 0 else -size
-        return self.order_target_size(data=data, target=size, **kwargs)
+        value = possize * price
+        if target > value:
+            size = comminfo.getsize(price, target - value)
+            return self.buy(data=data, size=size, **kwargs) if size else None
+        if target < value:
+            size = comminfo.getsize(price, value - target)
+            return self.sell(data=data, size=size, **kwargs) if size else None
+        return None
 
     def order_target_percent(self, data=None, target=0.0, **kwargs):
         data = self.data if data is None else self._resolve(data)
