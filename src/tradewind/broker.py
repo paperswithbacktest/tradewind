@@ -248,10 +248,10 @@ class BackBroker(BrokerBase):
         while self.submitted:
             order = self.submitted.popleft()
             data = order.data
-            bar = upcoming.get(data)
-            price = self._fill_price(order, bar) if bar is not None else None
-            if price is None:
-                price = data.close[0] if len(data) else None
+            # The pre-check prices the order at what was known when it was placed: the
+            # close of the submission bar for a market order, the limit or stop price
+            # otherwise -- not at the fill price of the bar that just arrived.
+            price = self._check_price(order, data)
             pos = pseudo.get(data)
             if pos is None:
                 pos = pseudo[data] = self.positions[data].clone()
@@ -283,6 +283,21 @@ class BackBroker(BrokerBase):
                 continue
             self._try_exec(order, price, bar[4])
         self.pending = remaining
+
+    def _check_price(self, order, data):
+        et = order.exectype
+        if et in (Order.Limit, Order.StopLimit) and order.pricelimit is not None:
+            return order.pricelimit if et == Order.StopLimit else order.price
+        if et in (Order.Stop,) and order.price is not None:
+            return order.price
+        if et == Order.Limit and order.price is not None:
+            return order.price
+        n = len(data)
+        if n >= 2:
+            return data.close[-1]
+        if n == 1:
+            return data.close[0]
+        return None
 
     def _slip(self, price, order, is_open):
         if self._slip_perc:

@@ -152,7 +152,104 @@ def build(bt):
             elif self.macd.macd[0] < self.macd.signal[0] and self.getposition(self.datas[1]).size:
                 self.close(self.datas[1])
 
+    class BatchFunding(Recorder):
+        """Buys that only the sells of the same bar can fund, in both submission orders,
+        and two unaffordable buys in a row."""
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1, d2 = self.datas[0], self.datas[1], self.datas[2]
+            cash = self.broker.getcash()
+            if n == 3:
+                self.buy(data=d0, size=int(0.6 * cash / d0.close[0]))      # affordable
+            if n == 10:
+                # two buys of 70 % of cash each: only the first can pass
+                self.buy(data=d1, size=int(0.7 * cash / d1.close[0]))
+                self.buy(data=d2, size=int(0.7 * cash / d2.close[0]))
+            if n == 20:
+                # buy first (unaffordable alone), then the sell that would fund it
+                self.buy(data=d2, size=int(1.5 * cash / d2.close[0]))
+                self.sell(data=d0, size=self.getposition(d0).size)
+            if n == 30:
+                # sell first, then a buy that only the proceeds can fund
+                pos1 = self.getposition(d1).size
+                if pos1:
+                    self.sell(data=d1, size=pos1)
+                    self.buy(data=d0, size=int((cash + pos1 * d1.close[0]) * 0.9 / d0.close[0]))
+            if n == 40:
+                # submission order S2 then S0: which fills first?
+                self.buy(data=d2, size=5)
+                self.buy(data=d0, size=5)
+            if n == 50:
+                # an opening short sale, then a buy: does the short consume cash in the
+                # batch check, or fund the buy with its proceeds?
+                self.sell(data=d2, size=int(0.8 * cash / d2.close[0]))
+                self.buy(data=d1, size=int(0.5 * cash / d1.close[0]))
+            if n == 60:
+                # a short sale alone, larger than the cash: accepted or Margin?
+                self.sell(data=d1, size=int(3.0 * cash / d1.close[0]))
+            if n == 70:
+                # closing the short of S2, then a buy funded by nothing but the cash
+                pos2 = self.getposition(d2).size
+                if pos2 < 0:
+                    self.buy(data=d2, size=-pos2)
+                self.buy(data=d0, size=int(0.5 * cash / d0.close[0]))
+            if n == 80:
+                # nearly all the cash into S0, then a small opening short and a small
+                # reduction of S0: which of the two sells survive a near-zero running cash?
+                self.buy(data=d0, size=int(0.99 * cash / d0.close[0]))
+                self.sell(data=d2, size=10)
+                self.sell(data=d0, size=5)
+            if n == 90:
+                # an opening short, then a buy only its proceeds could fund
+                self.sell(data=d2, size=int(0.8 * cash / d2.close[0]))
+                self.buy(data=d1, size=int(1.3 * cash / d1.close[0]))
+
+    class CloseThenTarget(Recorder):
+        """close() and order_target_percent on the same data in the same bar."""
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            if n == 2:
+                self.order_target_percent(d0, target=0.5)
+                self.order_target_percent(d1, target=0.3)
+            if n == 15:
+                self.close(d0)
+                self.order_target_percent(d0, target=0.45)
+                self.close(d1)
+                self.order_target_percent(d1, target=0.35)
+            if n == 30:
+                self.order_target_percent(d0, target=0.2)
+                self.close(d0)
+
+    class ForeignRead(bt.Indicator):
+        """A next-only indicator that reads a feed it was not given as input."""
+
+        lines = ("x",)
+        params = (("other", None),)
+
+        def __init__(self):
+            pass
+
+        def next(self):
+            self.lines.x[0] = self.p.other.close[0]
+
+    class ForeignFeed(Recorder):
+        def __init__(self):
+            super().__init__()
+            self.ind = ForeignRead(self.datas[0], other=self.datas[1])
+
+        def next(self):
+            super().next()
+            self.statuses.append((0, "IND", round(float(self.ind[0]), 6), self.datas[0].datetime.date(0).isoformat()))
+
     return {
+        "foreign_feed": ForeignFeed,
+        "batch_funding": BatchFunding,
+        "close_then_target": CloseThenTarget,
         "monthly_equal_weight": MonthlyEqualWeight,
         "target_size_ladder": TargetSizeLadder,
         "long_short_close": LongShortClose,

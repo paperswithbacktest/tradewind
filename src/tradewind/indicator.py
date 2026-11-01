@@ -179,6 +179,18 @@ class Indicator(ParamsBase):
     def next(self):
         raise NotImplementedError(f"{type(self).__name__} defines neither once() nor next()")
 
+    @property
+    def _vectorised(self) -> bool:
+        """Does the class provide its own ``once``? Then it is computed in one pass at
+        start. Otherwise it is stepped bar by bar with the strategy, like the oracle
+        runs a ``next``-only indicator, so its ``next()`` may read any feed of the run
+        (a corpus indicator reads a VIX feed it was not given as input)."""
+        return type(self).once is not Indicator.once
+
+    def _runonce(self) -> bool:
+        env = self._env
+        return bool(getattr(getattr(env, "p", None), "runonce", True)) if env is not None else True
+
     def _compute(self):
         if self._computed:
             return
@@ -186,17 +198,44 @@ class Indicator(ParamsBase):
             if isinstance(inp, Indicator):
                 inp._compute()
         n = self._clock.buflen()
-        self.once(0, n)
+        if self._vectorised:
+            self.once(0, n)
+            self.lines.home()
+        elif self._runonce():
+            # Observed on the oracle (runonce, its default): a next-only indicator is
+            # computed in one pre-pass before the run, during which every feed that is
+            # not one of its inputs sits at its LAST bar. An indicator reading such a
+            # feed through a parameter therefore sees one frozen value for the whole
+            # series (a corpus VIX-gated allocation reads VIX = 15.86 on every bar).
+            # Reproduced here because the reference NAVs embed it; ``runonce=False``
+            # steps the indicator live instead.
+            foreign = []
+            inputs = {id(b) for b in self._input_lines()}
+            for d in getattr(self._env, "datas", []):
+                for buf in getattr(d, "lines", []):
+                    if id(buf) not in inputs:
+                        foreign.append((buf, buf.idx))
+                        buf.idx = buf.buflen() - 1
+            try:
+                self.once(0, n)
+            finally:
+                for buf, idx in foreign:
+                    buf.idx = idx
+            self.lines.home()
         self._computed = True
-        self.lines.home()
+        self._stepped = -1
 
     def _sync(self):
-        """Align the cursor with the clock feed's cursor."""
+        """Align the cursor with the clock feed's cursor; step a live next-only indicator."""
         if not self._computed:
             self._compute()
         idx = self._clock.idx
         for buf in self.lines:
             buf.idx = idx
+        if not self._vectorised and not self._runonce() and idx > self._stepped:
+            self._stepped = idx
+            if idx + 1 >= self._minperiod:
+                self.next()
 
 
 # -- helpers for the built-ins ---------------------------------------------------------
