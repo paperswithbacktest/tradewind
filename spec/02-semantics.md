@@ -1,10 +1,25 @@
-# 02. Semantics: kept and corrected (draft for validation)
+# 02. Semantics: kept and corrected
 
-Each line is a behaviour the corpus relies on, described from backtrader's public
-documentation and from what the oracle NAVs show, never from its source. "Kept" means
+**Status: awaiting validation** (PR "spec: semantics to validate"). Each line is a
+behaviour the corpus relies on, described from backtrader's public documentation and from
+what the oracle shows (NAV paths, order logs), never from its source. "Kept" means
 Tradewind reproduces it bit for bit in compatibility mode; "corrected" means the default
 changes, the compatibility switch restores it, and the oracle is regenerated with a
-documented delta. **To be validated by Édouard before chantier 2 codes anything.**
+documented delta. The "kept" lines are implemented and verified (9/9 synthetic oracle
+strategies, 3/3 corpus strategies identical); the "corrected" lines are proposals and
+nothing in the engine depends on them yet.
+
+## Observed on the oracle and reproduced (2026-11-01)
+
+Four behaviours the public documentation does not state, learned from order logs:
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| Orders are `Submitted` at placement and `Accepted` **as a batch when the next bar arrives**; a bar's notifications arrive as all Submitted, then all Accepted, then the fills; an order placed on the last bar is never notified | kept | status sequences of the oracle strategies |
+| The submitted orders of a bar are checked **in submission order against a running cash**: a sell earlier in the batch funds a buy later in it; each is Accepted or `Margin` before any fill | kept | `a_volatility_driven_asset_allocation_vdaa`: a 168-share buy accepted by the oracle, refused by the first Tradewind build |
+| An order the cash cannot cover goes `Submitted → Margin`, never `Accepted` | kept | `add_cash_and_margin` |
+| `order_target_value` truncates the **value gap** to a size, not the target size: `getsize(price, target - position_value)` | kept | one share of difference on a third of the rebalances of `monthly_equal_weight` |
+| Inside `notify_order` the strategy reads the **fill bar's** date and the portfolio value marked at that bar's close | kept | values and dates recorded in the oracle statuses |
 
 ## Clock and bars
 
@@ -52,5 +67,16 @@ documented delta. **To be validated by Édouard before chantier 2 codes anything
 ## Numbers
 
 Float64 everywhere; the oracle tolerance is 1e-9 relative on the NAV path for "kept"
-behaviours (measured: identical to the cent on 18 of 20 strategies between PandasData and
-the array feed, two non-deterministic because they call `random` without a seed).
+behaviours. Measured on 2026-11-01: 9/9 synthetic strategies and 3/3 corpus strategies
+(9 545 daily bars each) identical, worst relative error 4e-16.
+
+## Decisions requested
+
+1. The "kept" table above and in the sections: agreed as the compatibility contract?
+2. Each "corrected" line: agreed as a *default* change (with a compat switch), to be
+   delivered in chantier 4 with a regenerated oracle, or to be kept as is?
+3. Partial fills and volume participation: agree to make them the default, knowing the
+   published NAVs move for thin names?
+4. Delisting liquidation at the last close: agree, knowing it changes the NAVs of the
+   survivor-biased universes the most?
+5. Anything in Tier 3 of `01-scope.md` that must become a commitment?
