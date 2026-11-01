@@ -1,6 +1,7 @@
 # 02. Semantics: kept and corrected
 
-**Status: awaiting validation** (PR "spec: semantics to validate"). Each line is a
+**Status: validated by Édouard on 2026-11-01** (PR #1 merged). Later additions to the
+"observed" table are proposed through their own PR. Each line is a
 behaviour the corpus relies on, described from backtrader's public documentation and from
 what the oracle shows (NAV paths, order logs), never from its source. "Kept" means
 Tradewind reproduces it bit for bit in compatibility mode; "corrected" means the default
@@ -20,6 +21,8 @@ Four behaviours the public documentation does not state, learned from order logs
 | An order the cash cannot cover goes `Submitted → Margin`, never `Accepted` | kept | `add_cash_and_margin` |
 | `order_target_value` truncates the **value gap** to a size, not the target size: `getsize(price, target - position_value)` | kept | one share of difference on a third of the rebalances of `monthly_equal_weight` |
 | Inside `notify_order` the strategy reads the **fill bar's** date and the portfolio value marked at that bar's close | kept | values and dates recorded in the oracle statuses |
+| The batch pre-check prices a market order at the **close of its submission bar**, a limit or stop order at its own price; the fill is then re-checked at the fill price (an order Accepted at the pre-check can still end `Margin`) | kept | `a_new_anomaly…`: order logs, 2020-04-08 |
+| **runonce (default)**: a `next`-only indicator is computed in one pre-pass before the run, during which every feed that is **not one of its inputs sits at its last bar**; an indicator reading such a feed through a parameter sees one frozen value for the whole series. `runonce=False` steps it live. | kept, flagged | probe `foreign_feed`; corpus `a_study_in_portfolio_diversification_using_vix_options` reads VIX = 15.86 on all 9 601 bars. **The reference NAVs embed this defect**; the corrected default (chantier 4) is to step `next`-only indicators live and regenerate those NAVs. |
 
 ## Clock and bars
 
