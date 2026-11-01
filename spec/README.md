@@ -1,0 +1,12 @@
+# Tradewind specification
+
+The engine is specified before it is coded. Each document here states a contract the
+engine must honour, the backtrader behaviour it reproduces (observed, not read), the Lean
+concept it borrows where backtrader has none, and the tests that prove it.
+
+| file | what it fixes |
+|---|---|
+| `inventory/backtrader-surface.md` | what the 4 300 corpus strategies and pwb-toolbox actually call (generated) |
+| `01-scope.md` | the compatible surface Tradewind commits to, in three tiers |
+| `02-semantics.md` | event order, fills, sizing, notifications: kept vs corrected (to be validated) |
+| `03-oracle.md` | the equivalence oracle: reference NAVs, tolerances, CI subset |
