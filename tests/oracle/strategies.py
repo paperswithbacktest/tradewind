@@ -18,7 +18,8 @@ def build(bt):
             self.values.append((self.datas[0].datetime.date(0).isoformat(), round(self.broker.getvalue(), 6)))
 
         def notify_order(self, order):
-            self.statuses.append((order.ref, order.getstatusname()))
+            self.statuses.append((order.ref, order.getstatusname(), round(self.broker.getvalue(), 6),
+                                  self.datas[0].datetime.date(0).isoformat()))
             if order.status == order.Completed:
                 self.fills.append((self.datas[0].datetime.date(0).isoformat(), order.data._name,
                                    float(order.executed.size), round(float(order.executed.price), 8)))

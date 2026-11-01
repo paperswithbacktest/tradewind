@@ -75,6 +75,7 @@ class Order:
         self.parent = None
         self.transmit = True
         self.triggered = False
+        self._check = True
         self._status_log = [Order.Created]
 
     # -- queries ----------------------------------------------------------------

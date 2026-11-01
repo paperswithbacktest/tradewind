@@ -50,7 +50,8 @@ def test_market_order_fills_at_next_open():
     cerebro, strat = run(BuyOnce, fr)
     f = fr["S0"]
     date, price, size = strat.fills[0]
-    assert date == f.index[3].date()          # placed on bar 3 (len==3), filled on bar 4
+    # Placed on bar 3 (len==3), filled at the open of bar 4 and notified on bar 4.
+    assert date == f.index[3].date()
     assert price == f["open"].iloc[3]
     assert size == 10
     # value marked at the close of each bar

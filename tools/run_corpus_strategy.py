@@ -41,10 +41,16 @@ def main():
     p.add_argument("--nav-dir", default=os.path.expanduser(
         "~/.claude/projects/-Users-edarchimbaud-dev-pwb/handover-scripts/nav_0138"))
     p.add_argument("--out", default=None)
+    p.add_argument("--engine", choices=["tradewind", "backtrader"], default="tradewind",
+                   help="backtrader: no alias, run the reference engine (in its own environment)")
+    p.add_argument("--fills", default=None, help="dump every order notification to this JSON")
     args = p.parse_args()
 
     os.environ.setdefault("TQDM_DISABLE", "1")
-    tradewind = install_alias()
+    if args.engine == "tradewind":
+        tradewind = install_alias()
+    else:
+        import backtrader as tradewind
     sys.path.insert(0, args.papers)
     os.chdir(args.papers)
     import matplotlib
@@ -61,6 +67,23 @@ def main():
     if path is None:
         raise SystemExit(f"no strategy.py for {args.slug}")
 
+    fills = []
+    if args.fills:
+        import pwb_toolbox.backtesting as pwb_bt
+
+        original = pwb_bt.BaseStrategy.notify_order
+
+        def recording(self, order):
+            fills.append({
+                "date": str(self.datas[0].datetime.date(0)), "ref": order.ref, "data": order.data._name,
+                "status": order.getstatusname(), "size": float(order.size),
+                "exec_size": float(order.executed.size), "exec_price": float(order.executed.price),
+                "cash": round(float(self.broker.getcash()), 4), "value": round(float(self.broker.getvalue()), 4),
+            })
+            return original(self, order)
+
+        pwb_bt.BaseStrategy.notify_order = recording
+
     t0 = time.time()
     buf = io.StringIO()
     with open(path, encoding="utf-8") as fh:
@@ -70,8 +93,12 @@ def main():
         b.backtest(code)
     log = b.strategy.log_data
     seconds = time.time() - t0
-    print(f"tradewind {tradewind.__version__}: {len(log)} bars in {seconds:.1f} s, "
+    print(f"{args.engine} {tradewind.__version__}: {len(log)} bars in {seconds:.1f} s, "
           f"final {log[-1]['value']:.2f}, sharpe {float(b.metrics.get('sharpeRatio', float('nan'))):.4f}")
+    if args.fills:
+        with open(args.fills, "w") as fh:
+            json.dump(fills, fh)
+        print(f"{len(fills)} order notifications -> {args.fills}")
     if args.out:
         with open(args.out, "w") as fh:
             json.dump({"slug": args.slug, "log": [{"date": str(x["date"]), "value": float(x["value"])} for x in log]}, fh)

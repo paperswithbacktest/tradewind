@@ -91,6 +91,19 @@ class DataBase(ParamsBase):
         nxt = self.lines.datetime.idx + 1
         return self._dtnum[nxt] if nxt < len(self._dtnum) else None
 
+    def _peek_bar(self, dtnum: float):
+        """The upcoming bar's (open, high, low, close, dtnum) if it is dated ``dtnum``.
+
+        The broker reads it to execute the orders of the previous bar *before* the
+        strategy sees the new bar -- observed on the oracle: inside ``notify_order`` the
+        strategy still reads the previous bar's date and value.
+        """
+        nxt = self.lines.datetime.idx + 1
+        if nxt < len(self._dtnum) and self._dtnum[nxt] == dtnum:
+            a = self._arrays
+            return (a["open"][nxt], a["high"][nxt], a["low"][nxt], a["close"][nxt], dtnum)
+        return None
+
     # -- public surface ----------------------------------------------------------------------
     def __len__(self):
         return len(self.lines.datetime) if self._started else 0

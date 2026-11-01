@@ -39,8 +39,13 @@ def main(a_path, b_path, tol=1e-9):
             k = next((i for i in range(n) if ra["fills"][i] != rb["fills"][i]), n)
             issues.append(f"fills differ at #{k}: {ra['fills'][k] if k < len(ra['fills']) else None} vs "
                           f"{rb['fills'][k] if k < len(rb['fills']) else None} ({len(ra['fills'])} vs {len(rb['fills'])})")
-        if [s[1] for s in ra["statuses"]] != [s[1] for s in rb["statuses"]]:
-            issues.append(f"status sequence differs ({len(ra['statuses'])} vs {len(rb['statuses'])})")
+        if [tuple(s[1:]) for s in ra["statuses"]] != [tuple(s[1:]) for s in rb["statuses"]]:
+            n = min(len(ra["statuses"]), len(rb["statuses"]))
+            k = next((i for i in range(n) if tuple(ra["statuses"][i][1:]) != tuple(rb["statuses"][i][1:])), n)
+            issues.append(f"status/value/date sequence differs at #{k}: "
+                          f"{ra['statuses'][k] if k < len(ra['statuses']) else None} vs "
+                          f"{rb['statuses'][k] if k < len(rb['statuses']) else None} "
+                          f"({len(ra['statuses'])} vs {len(rb['statuses'])})")
         if issues:
             bad += 1
             print(f"FAIL {name}")

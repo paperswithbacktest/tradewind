@@ -148,8 +148,10 @@ class BackBroker(BrokerBase):
     def notify(self, order):
         # A notification carries the status at the moment it was raised: the strategy
         # sees Submitted then Accepted, not Accepted twice, even though the live order
-        # object has already moved on.
-        self.notifs.append(copy.copy(order))
+        # object has already moved on; ``executed`` is frozen with it.
+        clone = copy.copy(order)
+        clone.executed = copy.copy(order.executed)
+        self.notifs.append(clone)
 
     # -- order entry -------------------------------------------------------------------------
     def buy(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None,
@@ -180,33 +182,42 @@ class BackBroker(BrokerBase):
         self.orders.append(order)
         self.notify(order)
         data = order.data
-        if check and self.p.checksubmit and len(data) and not self._affordable(order, data.close[0]):
-            order.margin()
-            self.notify(order)
-            return order
+        order._check = check
         if self._coc and order.exectype == Order.Market and len(data):
             # cheat-on-close: the market order fills at the close of the bar it was placed on
             order.accept(self)
             self.notify(order)
-            self._try_exec(order, data.close[0])
+            self._try_exec(order, data.close[0], data.datetime[0])
             return order
         self.submitted.append(order)
         return order
 
-    def _affordable(self, order, price):
-        """Can the cash cover the order at ``price``, commission included? Closing or
-        reducing a position never fails; stock-like sells never fail."""
+    def _cash_delta(self, order, price, pos):
+        """Cash flow of filling ``order`` at ``price`` against position ``pos``
+        (negative when cash goes out), commission included."""
         comminfo = order.comminfo
         size = order.size
-        pos = self.positions[order.data]
+        comm = comminfo.getcommission(size, price)
+        if comminfo.stocklike:
+            return -size * price - comm
+        opening = (pos.size == 0) or ((pos.size > 0) == (size > 0))
+        if opening:
+            return -comminfo.getoperationcost(size, price) - comm
+        return -comm
+
+    def _affordable(self, order, price, cash=None, pos=None):
+        """Can ``cash`` cover the order at ``price``, commission included? Closing or
+        reducing a position never fails; stock-like sells never fail."""
+        cash = self.cash if cash is None else cash
+        pos = self.positions[order.data] if pos is None else pos
+        comminfo = order.comminfo
+        size = order.size
         opening = (pos.size == 0) or ((pos.size > 0) == (size > 0))
         if not opening:
             return True
         if comminfo.stocklike and not order.isbuy():
             return True
-        comm = comminfo.getcommission(size, price)
-        cost = comminfo.getoperationcost(size, price)
-        return self.cash - cost - comm >= 0
+        return cash + self._cash_delta(order, price, pos) >= 0
 
     def cancel(self, order, bracket=False):
         if order in self.submitted:
@@ -222,14 +233,35 @@ class BackBroker(BrokerBase):
         return False
 
     # -- execution ---------------------------------------------------------------------------
-    def next(self, advanced):
-        """Execute the pending orders against the bars that just arrived.
+    def next(self, upcoming):
+        """Accept the submitted orders, then execute against the bars about to arrive.
 
-        ``advanced`` is the set of feeds that have a new bar at this clock tick; an order
-        on a feed with no bar today waits.
+        ``upcoming`` maps each feed that has a bar at this clock tick to that bar's
+        ``(open, high, low, close, dtnum)``; an order on a feed with no bar waits.
+
+        Observed on the oracle: the submitted orders of a bar are checked as a batch, in
+        submission order, against a *running* cash -- a sell earlier in the batch funds a
+        buy later in it -- and each is Accepted or Margin before any fill happens.
         """
+        cash = self.cash
+        pseudo = {}
         while self.submitted:
             order = self.submitted.popleft()
+            data = order.data
+            bar = upcoming.get(data)
+            price = self._fill_price(order, bar) if bar is not None else None
+            if price is None:
+                price = data.close[0] if len(data) else None
+            pos = pseudo.get(data)
+            if pos is None:
+                pos = pseudo[data] = self.positions[data].clone()
+            if order._check and self.p.checksubmit and price is not None and not self._affordable(order, price, cash, pos):
+                order.margin()
+                self.notify(order)
+                continue
+            if price is not None:
+                cash += self._cash_delta(order, price, pos)
+                pos.update(order.size, price)
             order.accept(self)
             self.notify(order)
             self.pending.append(order)
@@ -237,18 +269,19 @@ class BackBroker(BrokerBase):
         while self.pending:
             order = self.pending.popleft()
             data = order.data
-            if data not in advanced:
+            bar = upcoming.get(data)
+            if bar is None:
                 remaining.append(order)
                 continue
-            if order.valid is not None and data.datetime[0] > order.valid:
+            if order.valid is not None and bar[4] > order.valid:
                 order.expire()
                 self.notify(order)
                 continue
-            price = self._fill_price(order, data)
+            price = self._fill_price(order, bar)
             if price is None:
                 remaining.append(order)
                 continue
-            self._try_exec(order, price)
+            self._try_exec(order, price, bar[4])
         self.pending = remaining
 
     def _slip(self, price, order, is_open):
@@ -262,8 +295,8 @@ class BackBroker(BrokerBase):
             return price
         return price + adj if order.isbuy() else price - adj
 
-    def _fill_price(self, order, data):
-        o, h, lo, c = data.open[0], data.high[0], data.low[0], data.close[0]
+    def _fill_price(self, order, bar):
+        o, h, lo, c = bar[0], bar[1], bar[2], bar[3]
         et = order.exectype
         if et == Order.Market:
             return self._slip(o, order, True)
@@ -299,7 +332,7 @@ class BackBroker(BrokerBase):
             return lim if h >= lim else None
         raise NotImplementedError(f"execution type {order.getordername()} is not supported")
 
-    def _try_exec(self, order, price):
+    def _try_exec(self, order, price, dt=None):
         data = order.data
         comminfo = order.comminfo
         size = order.size
@@ -309,6 +342,8 @@ class BackBroker(BrokerBase):
             order.margin()
             self.notify(order)
             return
+        if dt is None:
+            dt = data.datetime[0]
         oldprice = pos.price
         newsize, _newprice, opened, closed = pos.update(size, price)
         pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0
@@ -319,7 +354,6 @@ class BackBroker(BrokerBase):
             self.cash += pnl
         self.cash -= comm
         comm_final = comminfo.confirmexec(size, price)
-        dt = data.datetime[0]
         order.execute(dt, size, price, closed, closed * price, comm_final if closed else 0.0,
                       opened, opened * price, comm_final if not closed else 0.0, 0.0, pnl)
         order.completed()
