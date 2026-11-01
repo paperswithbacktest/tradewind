@@ -236,6 +236,49 @@ def build(bt):
                 self.sell(data=d1, size=int(1.5 * self.getposition(d1).size))
                 self.buy(data=d0, size=1)
 
+    class LineEdges(Recorder):
+        """Reads at the edges of a line buffer: a bar ahead, before the first bar, the raw
+        array, a feed that has not listed yet (from prenext). Each reading steers a distinct
+        trade so the NAV tells which semantics the engine has."""
+
+        def prenext(self):
+            d0, d3 = self.datas[0], self.datas[3]
+            if len(self) == 3:
+                try:
+                    late = d3.close[0]                      # S3 lists 30 bars late
+                    self.buy(data=d0, size=int(late) % 5 + 1)
+                except IndexError:
+                    self.sell(data=d0, size=2)
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0 = self.datas[0]
+            if n == 35:
+                try:
+                    ahead = d0.close[1] > d0.close[0]       # a bar that has not arrived
+                except IndexError:
+                    ahead = None
+                if ahead is True:
+                    self.buy(data=d0, size=10)
+                elif ahead is False:
+                    self.sell(data=d0, size=10)
+            if n == 37:
+                try:
+                    before = d0.close[-40]                  # before the first bar
+                    self.buy(data=d0, size=int(before) % 7 + 1)
+                except IndexError:
+                    self.sell(data=d0, size=3)
+            if n == 39:
+                size = len(d0.close.array) % 50 + 1        # raw buffer length during the run
+                self.buy(data=d0, size=size)
+            if n == 60:
+                try:
+                    d0.datetime.date(len(d0.close.array) - len(d0) + 1)   # past the buffer
+                    self.buy(data=d0, size=4)
+                except IndexError:
+                    self.sell(data=d0, size=4)
+
     class CloseThenTarget(Recorder):
         """close() and order_target_percent on the same data in the same bar."""
 
@@ -280,6 +323,7 @@ def build(bt):
         "foreign_feed": ForeignFeed,
         "batch_funding": BatchFunding,
         "deficit_carry": DeficitCarry,
+        "line_edges": LineEdges,
         "close_then_target": CloseThenTarget,
         "monthly_equal_weight": MonthlyEqualWeight,
         "target_size_ladder": TargetSizeLadder,

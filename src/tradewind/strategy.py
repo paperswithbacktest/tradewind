@@ -241,9 +241,17 @@ class Strategy(ParamsBase):
             if timer.when == when and timer.check(date):
                 self.notify_timer(timer, date, *timer.args, **timer.kwargs)
 
+    def _ready(self) -> bool:
+        """``next`` runs once the min period is reached **and every feed has delivered a
+        bar**: observed on the oracle, a feed listing 30 bars after the others holds the
+        strategy in ``prenext`` for those 30 bars."""
+        if len(self) < self._minperiod:
+            return False
+        return all(len(d) > 0 for d in self.datas)
+
     def _step(self):
         """prenext / nextstart / next by the clock feed's length against the min period."""
-        if len(self) < self._minperiod:
+        if not self._ready():
             self.prenext()
         elif not self._nextstarted:
             self._nextstarted = True

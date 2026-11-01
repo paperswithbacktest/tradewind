@@ -160,7 +160,7 @@ class Cerebro(ParamsBase):
                 self._deliver(strat)
                 strat._step()
                 for an in strat.analyzers:
-                    if len(strat) < strat._minperiod:
+                    if not strat._ready():
                         an.prenext()
                     else:
                         an.next()

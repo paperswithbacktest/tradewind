@@ -37,6 +37,9 @@ def frames(n_sym=3, n_bars=120, seed=11):
         out[f"S{i}"] = pd.DataFrame(
             {"open": openp, "high": high, "low": low, "close": close, "volume": 1e5}, index=index
         )
+    # One feed that lists 30 bars after the others, for the probes that read a feed before
+    # its first bar or place orders on it.
+    out[f"S{n_sym}"] = out["S0"].iloc[30:].copy() * 1.5
     return out
 
 

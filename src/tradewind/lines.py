@@ -36,10 +36,15 @@ class LineBuffer:
 
     # -- reads -----------------------------------------------------------------
     def __getitem__(self, ago: int) -> float:
-        i = self.idx + ago
-        if i < 0 or i > self.idx:
-            raise IndexError(f"line {self._name!r}: ago={ago} at len={len(self)}")
-        return float(self.array[i])
+        # Plain sequence indexing on the preloaded buffer, as the oracle does: a positive
+        # ``ago`` reads a bar that has not arrived yet (a documented look-ahead the corpus
+        # relies on, e.g. ``datetime.date(1)`` to spot a month's last session), and an
+        # ``ago`` reaching before the first bar wraps around to the end of the buffer.
+        # Only a position outside the buffer raises.
+        try:
+            return float(self.array[self.idx + ago])
+        except IndexError:
+            raise IndexError(f"line {self._name!r}: ago={ago} at len={len(self)} of {self.buflen()}") from None
 
     def __call__(self, ago: int = 0) -> float:
         return self[ago]
