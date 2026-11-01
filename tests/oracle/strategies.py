@@ -299,6 +299,38 @@ def build(bt):
                 else:
                     self.sell(data=d0, size=int(0.5 * cash / d0.close[0]))
 
+    class CheatOnClose(Recorder):
+        """``set_coc(True)``: market orders placed in ``next`` fill at that bar's close. When
+        are they notified, what do close() and order_target_percent do, and what of a buy
+        the cash cannot cover at that close?"""
+
+        def __init__(self):
+            super().__init__()
+            self.broker.set_coc(True)
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            cash = self.broker.getcash()
+            if n == 33:
+                self.buy(data=d0, size=100)
+            if n == 34:
+                self.sell(data=d0, size=40)
+            if n == 36:
+                self.close(d0)
+            if n == 38:
+                self.order_target_percent(d1, target=0.6)
+            if n == 42:
+                self.order_target_percent(d1, target=0.0)
+                self.buy(data=d0, size=int(1.5 * cash / d0.close[0]))      # unaffordable
+            if n == 45:
+                self.buy(data=d0, size=int(0.5 * cash / d0.close[0]))
+                self.sell(data=d1, size=50)                                 # opening short
+            if n == 50:
+                self.close(d0)
+                self.close(d1)
+
     class CloseThenTarget(Recorder):
         """close() and order_target_percent on the same data in the same bar."""
 
@@ -345,6 +377,7 @@ def build(bt):
         "deficit_carry": DeficitCarry,
         "line_edges": LineEdges,
         "reverse_shortfall": ReverseShortfall,
+        "cheat_on_close": CheatOnClose,
         "close_then_target": CloseThenTarget,
         "monthly_equal_weight": MonthlyEqualWeight,
         "target_size_ladder": TargetSizeLadder,

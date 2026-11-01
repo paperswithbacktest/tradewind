@@ -181,14 +181,10 @@ class BackBroker(BrokerBase):
         order.submit(self)
         self.orders.append(order)
         self.notify(order)
-        data = order.data
         order._check = check
-        if self._coc and order.exectype == Order.Market and len(data):
-            # cheat-on-close: the market order fills at the close of the bar it was placed on
-            order.accept(self)
-            self.notify(order)
-            self._try_exec(order, data.close[0], data.datetime[0])
-            return order
+        # Cheat-on-close changes nothing here: observed on the oracle, the batch is still
+        # accepted and notified when the next bar arrives; only the fill price of a market
+        # order becomes the close of the bar it was placed on (see ``next``).
         self.submitted.append(order)
         return order
 
@@ -283,7 +279,13 @@ class BackBroker(BrokerBase):
                 order.expire()
                 self.notify(order)
                 continue
-            price = self._fill_price(order, bar)
+            if self._coc and order.exectype == Order.Market and len(data) >= 2:
+                # cheat-on-close (observed): the market order fills at the close of the bar
+                # it was placed on, everything else -- batch acceptance, notification at
+                # the next bar, the pre-check at that same close -- unchanged
+                price = self._slip(data.close[-1], order, True)
+            else:
+                price = self._fill_price(order, bar)
             if price is None:
                 remaining.append(order)
                 continue
