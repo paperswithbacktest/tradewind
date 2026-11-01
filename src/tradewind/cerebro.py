@@ -187,6 +187,7 @@ class Cerebro(ParamsBase):
             obj._bind(env, datas, broker)
             if original is not None:
                 original(obj)
+            env._building = obj
 
         # MetaParams calls cls._before_init(obj) before __init__; install the binding
         # on a throwaway subclass so the user's class is untouched.
@@ -194,6 +195,9 @@ class Cerebro(ParamsBase):
                                            "__qualname__": cls.__qualname__})
         strat = bound(*args, **skwargs)
         strat.__class__ = cls
+        env._building = None
+        for ind in strat._indicators:
+            ind._compute()
         for ancls, aargs, akwargs in self.analyzers:
             akwargs = dict(akwargs)
             name = akwargs.pop("_name", None) or ancls.__name__.lower()

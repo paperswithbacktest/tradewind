@@ -107,6 +107,50 @@ def build(bt):
     class Commissioned(MonthlyEqualWeight):
         pass
 
+    class SmaCross(Recorder):
+        params = (("fast", 5), ("slow", 20))
+
+        def __init__(self):
+            super().__init__()
+            self.fast = bt.indicators.SMA(self.datas[0], period=self.p.fast)
+            self.slow = bt.indicators.SMA(self.datas[0], period=self.p.slow)
+            self.cross = bt.indicators.CrossOver(self.fast, self.slow)
+            self.hi = bt.indicators.Highest(self.datas[1].close, period=10)
+            self.roc = bt.indicators.ROC(self.datas[2], period=5)
+
+        def next(self):
+            super().next()
+            d = self.datas[0]
+            if self.cross[0] > 0:
+                self.order_target_percent(d, target=0.6)
+            elif self.cross[0] < 0:
+                self.order_target_percent(d, target=0.0)
+            if self.datas[1].close[0] >= self.hi[0] and not self.getposition(self.datas[1]).size:
+                self.buy(data=self.datas[1], size=20)
+            if self.roc[0] < -0.05 and self.getposition(self.datas[1]).size:
+                self.close(self.datas[1])
+
+    class Rsi(Recorder):
+        def __init__(self):
+            super().__init__()
+            self.rsi = bt.indicators.RSI(self.datas[0], period=14)
+            self.ema = bt.indicators.EMA(self.datas[0], period=10)
+            self.atr = bt.indicators.ATR(self.datas[0], period=14)
+            self.macd = bt.indicators.MACD(self.datas[1])
+
+        def next(self):
+            super().next()
+            self.values[-1] = self.values[-1]
+            d = self.datas[0]
+            if self.rsi[0] < 45 and not self.getposition(d).size:
+                self.buy(data=d, size=int(1000 / self.atr[0]))
+            elif self.rsi[0] > 55 and self.getposition(d).size:
+                self.close(d)
+            if self.macd.macd[0] > self.macd.signal[0] and not self.getposition(self.datas[1]).size:
+                self.buy(data=self.datas[1], size=10)
+            elif self.macd.macd[0] < self.macd.signal[0] and self.getposition(self.datas[1]).size:
+                self.close(self.datas[1])
+
     return {
         "monthly_equal_weight": MonthlyEqualWeight,
         "target_size_ladder": TargetSizeLadder,
@@ -115,4 +159,6 @@ def build(bt):
         "lookback": Lookback,
         "add_cash_and_margin": AddCashAndMargin,
         "commissioned": Commissioned,
+        "sma_cross": SmaCross,
+        "rsi": Rsi,
     }

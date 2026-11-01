@@ -20,3 +20,17 @@ jobs:
       - name: clean-room guard (no backtrader in the engine)
         run: |
           ! grep -rnE "^\s*(import backtrader|from backtrader(\.[a-z_.]+)? import)" src/ || (echo "backtrader must never be imported by the engine" && exit 1)
+
+  oracle:
+    # backtrader lives only here, in a throwaway environment, as the equivalence oracle.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - run: python tools/run_oracle.py --engine tradewind --out /tmp/oracle_tw.json
+      - run: python -m venv /tmp/oracle-env && /tmp/oracle-env/bin/pip install -q backtrader numpy pandas
+      - run: /tmp/oracle-env/bin/python tools/run_oracle.py --engine backtrader --out /tmp/oracle_bt.json
+      - run: python tools/oracle_diff.py /tmp/oracle_bt.json /tmp/oracle_tw.json

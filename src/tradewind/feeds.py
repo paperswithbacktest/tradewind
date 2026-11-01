@@ -70,9 +70,9 @@ class DataBase(ParamsBase):
         arrays = {k: v[lo:hi] for k, v in arrays.items()}
         self._dtnum = dtnum
         self._arrays = arrays
-        buffers = [DatetimeLine(dtnum, "datetime")]
+        buffers = [DatetimeLine(dtnum, "datetime", owner=self)]
         for alias in LINE_ALIASES[1:]:
-            buffers.append(LineBuffer(arrays[alias], alias))
+            buffers.append(LineBuffer(arrays[alias], alias, owner=self))
         self.lines = Lines(LINE_ALIASES, buffers)
         for alias, buf in zip(LINE_ALIASES, buffers):
             setattr(self, alias, buf)

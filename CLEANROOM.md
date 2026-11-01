@@ -24,3 +24,5 @@ from backtrader's source code. This file is the record that keeps it so.
 |---|---|---|---|---|
 | 2026-11-01 | `tools/inventory.py` | the corpus' own `strategy.py` files (ast) | Claude (Fable 5.1) for PWB | static inventory, no backtrader source read |
 | 2026-11-01 | `spec/` | inventory output, backtrader public docs (API names only) | Claude for PWB | specification started |
+| 2026-11-01 | `src/tradewind/*` (lines, feeds, order, position, comminfo, broker, strategy, cerebro, timer, analyzer, trade, dateutils) | `spec/01-04`; public parameter names of the compatible API; behaviour observed through `tools/run_oracle.py` on a separate environment where the oracle is installed | Claude (Fable 5.1) for PWB | three semantics fixed from black-box observation only: batch acceptance at the next bar, Submitted→Margin pre-check, value-gap truncation in `order_target_value` |
+| 2026-11-01 | `src/tradewind/indicator.py`, `indicators/` | mathematical definitions (SMA, EMA with SMA seed, Wilder RSI/ATR, MACD, ROC, Highest/Lowest, CrossOver); oracle runs for equality | Claude for PWB | 9/9 oracle strategies identical at 1e-9 |

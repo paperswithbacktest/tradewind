@@ -13,12 +13,13 @@ from .dateutils import num2date
 
 
 class LineBuffer:
-    __slots__ = ("_name", "array", "idx")
+    __slots__ = ("_name", "_owner", "array", "idx")
 
-    def __init__(self, array, name: str = ""):
+    def __init__(self, array, name: str = "", owner=None):
         self.array = np.ascontiguousarray(array, dtype=np.float64)
         self.idx = -1
         self._name = name
+        self._owner = owner  # the feed or indicator this line belongs to
 
     # -- cursor ---------------------------------------------------------------
     def __len__(self) -> int:

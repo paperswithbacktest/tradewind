@@ -5,18 +5,22 @@ of the repository: the engine is written from the public API contract and from
 black-box tests, and no third-party engine source is ever consulted.
 """
 
+from . import indicators
 from .analyzer import Analyzer, TimeReturn
 from .broker import BackBroker, BrokerBase
 from .cerebro import Cerebro
 from .comminfo import CommInfoBase, CommissionInfo
 from .dateutils import date2num, num2date, num2dt
 from .feeds import DataBase, PandasData, TimeFrame, feeds
+from .indicator import Indicator
 from .lines import LineBuffer, Lines
 from .order import BuyOrder, Order, SellOrder
 from .position import Position
 from .strategy import Strategy
 from .timer import Timer
 from .trade import Trade
+
+ind = indicators  # backtrader's short alias
 
 __version__ = "0.0.2.dev0"
 
@@ -29,6 +33,7 @@ __all__ = [
     "CommInfoBase",
     "CommissionInfo",
     "DataBase",
+    "Indicator",
     "LineBuffer",
     "Lines",
     "Order",
@@ -43,6 +48,8 @@ __all__ = [
     "__version__",
     "date2num",
     "feeds",
+    "ind",
+    "indicators",
     "num2date",
     "num2dt",
 ]

@@ -7,8 +7,10 @@ import sys
 
 
 def main(a_path, b_path, tol=1e-9):
-    a = json.load(open(a_path))["results"]
-    b = json.load(open(b_path))["results"]
+    with open(a_path) as fh:
+        a = json.load(fh)["results"]
+    with open(b_path) as fh:
+        b = json.load(fh)["results"]
     bad = 0
     for name in sorted(set(a) | set(b)):
         if name not in a or name not in b:
