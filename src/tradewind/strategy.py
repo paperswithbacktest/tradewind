@@ -202,7 +202,9 @@ class Strategy(ParamsBase):
         comminfo = self.broker.getcommissioninfo(data)
         if not target and possize:
             return self.close(data=data, size=possize, **kwargs)
-        value = possize * price
+        # the position's value through the broker, as the oracle does (that read has a
+        # side effect on pending cash additions -- see ``BackBroker.get_value``)
+        value = self.broker.get_value(datas=[data]) if possize else 0.0
         if target > value:
             size = comminfo.getsize(price, target - value)
             return self.buy(data=data, size=size, **kwargs) if size else None

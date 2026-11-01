@@ -331,6 +331,44 @@ def build(bt):
                 self.close(d0)
                 self.close(d1)
 
+    class AddCashTiming(Recorder):
+        """When does ``add_cash`` take effect? Read back in the same bar, seen by the batch
+        pre-check of orders placed in the same bar, pulled below zero, mixed with targets."""
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            if n == 33:
+                before = self.broker.getcash()
+                self.broker.add_cash(20_000)
+                after = self.broker.getcash()
+                self.buy(data=d0, size=10 if after > before else 20)       # read back same bar?
+                self.values.append(("value_after_add", round(self.broker.getvalue(), 6)))
+            if n == 36:
+                self.broker.add_cash(30_000)
+                cash = self.broker.getcash()
+                self.buy(data=d1, size=int(1.2 * cash / d1.close[0]))       # funded only with the addition
+            if n == 40:
+                self.order_target_percent(d0, target=0.5)
+                self.broker.add_cash(-40_000)                               # pulled while orders are in flight
+            if n == 45:
+                self.broker.add_cash(-10 * self.broker.getcash())           # far below zero
+                self.buy(data=d0, size=1)
+            if n == 50:
+                self.broker.add_cash(500_000)
+                self.order_target_percent(d0, target=0.3)
+                self.order_target_percent(d1, target=0.3)
+            if n == 55:
+                self.broker.add_cash(-2 * self.broker.getcash())            # negative again, lands at bar 56
+            if n == 57:
+                cash = abs(self.broker.getcash())
+                self.sell(data=d1, size=100)                                # improves a negative cash
+                self.buy(data=d0, size=1)                                   # tiny buy: above the start cash, still below zero
+                self.buy(data=d0, size=int(0.5 * cash / d0.close[0]))       # takes the cash below where it started
+            if n == 60:
+                self.buy(data=d0, size=1)                                   # a lone tiny buy at negative cash
+
     class CloseThenTarget(Recorder):
         """close() and order_target_percent on the same data in the same bar."""
 
@@ -378,6 +416,7 @@ def build(bt):
         "line_edges": LineEdges,
         "reverse_shortfall": ReverseShortfall,
         "cheat_on_close": CheatOnClose,
+        "add_cash_timing": AddCashTiming,
         "close_then_target": CloseThenTarget,
         "monthly_equal_weight": MonthlyEqualWeight,
         "target_size_ladder": TargetSizeLadder,

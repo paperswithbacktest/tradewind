@@ -70,6 +70,8 @@ class BackBroker(BrokerBase):
         self.notifs: collections.deque = collections.deque()
         self.trades: dict = {}
         self._coc = self.p.coc
+        self._cash_addition = 0.0
+        self._value = None
         self._coo = self.p.coo
         self._slip_perc = self.p.slip_perc
         self._slip_fixed = self.p.slip_fixed
@@ -88,7 +90,11 @@ class BackBroker(BrokerBase):
     getcash = get_cash
 
     def add_cash(self, cash):
-        self.cash += float(cash)
+        # Observed on the oracle (probe ``add_cash_timing``): the addition is not visible to
+        # ``getcash``/``getvalue`` in the bar that requests it, the next bar's batch check and
+        # fills still run on the old cash, and it lands at the end of that ``next`` -- before
+        # the notifications of the bar are read.
+        self._cash_addition += float(cash)
 
     def set_coc(self, coc):
         self._coc = bool(coc)
@@ -122,7 +128,20 @@ class BackBroker(BrokerBase):
         return self.positions[data]
 
     def get_value(self, datas=None, mkt=False, lever=False):
-        value = self.cash
+        # Observed on the oracle: with ``datas`` the result is the value of those
+        # positions alone, without the cash -- and asking for it applies any pending
+        # ``add_cash`` on the spot (``getcash`` reflects it from then on), which is how a
+        # same-bar ``order_target_value`` after ``add_cash`` gets its batch checked against
+        # the new cash while a plain ``sell`` does not (probe ``add_cash_timing``).
+        if datas is None:
+            # Observed on the oracle: the plain portfolio value is the one marked once per
+            # bar, after that bar's fills and cash additions -- a same-bar ``add_cash`` or a
+            # ``get_value(datas=...)`` that applied one does not move it until the next bar.
+            return self.cash if self._value is None else self._value
+        if self._cash_addition:
+            self.cash += self._cash_addition
+            self._cash_addition = 0.0
+        value = 0.0
         for data, pos in self.positions.items():
             if datas is not None and data not in datas:
                 continue
@@ -135,6 +154,14 @@ class BackBroker(BrokerBase):
         return value
 
     getvalue = get_value
+
+    def _mark_value(self):
+        value = self.cash
+        for data, pos in self.positions.items():
+            if not pos.size or len(data) == 0:
+                continue
+            value += self.getcommissioninfo(data).getvalue(pos, data.close[0])
+        return value
 
     def get_orders_open(self, safe=False):
         return [o for o in self.pending]
@@ -291,6 +318,10 @@ class BackBroker(BrokerBase):
                 continue
             self._try_exec(order, price, bar[4])
         self.pending = remaining
+        if self._cash_addition:
+            self.cash += self._cash_addition
+            self._cash_addition = 0.0
+        self._value = self._mark_value()
 
     def _check_price(self, order, data):
         et = order.exectype
