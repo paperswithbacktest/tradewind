@@ -240,12 +240,39 @@ class Indicator(ParamsBase):
 
 # -- helpers for the built-ins ---------------------------------------------------------
 
+def _window_sum(x: np.ndarray, period: int) -> np.ndarray:
+    """The sum of every ``period``-long window, compensated the way Python's ``sum`` is.
+
+    Observed on the oracle: its simple average of a window is the window's values
+    summed by Python's ``sum`` (Neumaier-compensated since Python 3.12) divided by
+    the period -- bit for bit on 14 400 values of periods 3, 20 and 200, and
+    *exactly* the constant on a constant series. A cumulative-sum difference is
+    not: it carries ~1e-14 of rounding, which is enough to flip ``close > sma`` on
+    the flat back-filled prefix every late-listed symbol has. The compensation is
+    vectorised across windows; each window is accumulated left to right.
+    """
+    n = len(x) - period + 1
+    total = np.zeros(n)
+    comp = np.zeros(n)
+    for k in range(period):
+        v = x[k:k + n]
+        t = total + v
+        big = np.abs(total) >= np.abs(v)
+        comp += np.where(big, (total - t) + v, (v - t) + total)
+        total = t
+    return np.where(np.isfinite(comp) & (comp != 0.0), total + comp, total)
+
+
+def _mean(x: np.ndarray) -> float:
+    """Python's ``sum(x) / len(x)``, the oracle's average of a seed window."""
+    return float(_window_sum(np.asarray(x, dtype=float), len(x))[0]) / len(x)
+
+
 def _rolling_mean(x: np.ndarray, period: int) -> np.ndarray:
     out = np.full(len(x), np.nan)
     if period <= 0 or len(x) < period:
         return out
-    c = np.cumsum(np.insert(x, 0, 0.0))
-    out[period - 1:] = (c[period:] - c[:-period]) / period
+    out[period - 1:] = _window_sum(x, period) / period
     return out
 
 
@@ -264,7 +291,11 @@ def _ema(x: np.ndarray, period: int, alpha: float | None = None) -> np.ndarray:
     if len(x) < period:
         return out
     a = 2.0 / (period + 1.0) if alpha is None else alpha
-    out[period - 1] = np.mean(x[:period])
+    out[period - 1] = _mean(x[:period])
+    # ``prev * (1 - a) + x * a``, not ``prev + a * (x - prev)``: the two round
+    # differently, and only the former matches the oracle bit for bit (0 of 4 801
+    # values apart on periods 12 and 50; the latter differs on half of them).
+    keep = 1.0 - a
     for i in range(period, len(x)):
-        out[i] = out[i - 1] + a * (x[i] - out[i - 1])
+        out[i] = out[i - 1] * keep + x[i] * a
     return out

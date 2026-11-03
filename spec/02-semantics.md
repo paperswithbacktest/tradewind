@@ -80,6 +80,18 @@ Float64 everywhere; the oracle tolerance is 1e-9 relative on the NAV path for "k
 behaviours. Measured on 2026-11-01: 9/9 synthetic strategies and 3/3 corpus strategies
 (9 545 daily bars each) identical, worst relative error 4e-16.
 
+Indicator arithmetic is reproduced **bit for bit**, not within a tolerance, because a
+strategy compares an indicator to a price with `>` and 1e-14 is enough to flip it on a
+flat series -- and every late-listed symbol has one, the flat prefix `run_strategy`
+back-fills. Observed on 2026-11-03 (periods 3, 20, 200; 14 400 SMA, 9 602 EMA, 4 801
+ATR and 4 801 RSI values, zero mismatches afterwards):
+
+| behaviour | kept / corrected | note |
+|---|---|---|
+| A window average is the window summed by Python's compensated `sum` (Neumaier, Python ≥ 3.12), divided by the period; exact on a constant series | kept | `_window_sum`, vectorised across windows; a cumulative-sum difference is *not* equivalent |
+| An exponential or Wilder smoothing step is `prev * (1 - a) + x * a` | kept | `prev + a * (x - prev)` rounds differently on half the bars |
+| `RSI = 100 - 100 / (1 + au / ad)` | kept | `100 * au / (au + ad)` rounds differently |
+
 ## Decisions requested
 
 1. The "kept" table above and in the sections: agreed as the compatibility contract?

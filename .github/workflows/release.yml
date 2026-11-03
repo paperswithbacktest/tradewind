@@ -1,0 +1,78 @@
+name: release
+# A tag `vX.Y.Z` builds the package, checks it, proves it is clean-room and identical
+# to the oracle on the synthetic probes, then publishes it to PyPI through trusted
+# publishing (OIDC): no API token is stored anywhere. The PyPI project must list this
+# workflow as a trusted publisher (owner paperswithbacktest, repository tradewind,
+# workflow release.yml, environment pypi) and the repository must define the `pypi`
+# environment; see the pull request that introduced this file.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev]" build twine
+      - name: the tag names the version in pyproject.toml
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          echo "pyproject.toml: $version, tag: $GITHUB_REF_NAME"
+          case "$version" in *dev*|*rc*|*a*|*b*) echo "a pre-release version cannot be tagged for PyPI" && exit 1 ;; esac
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "the tag must be v$version" && exit 1; }
+      - name: clean-room guard (no backtrader in the engine)
+        run: |
+          ! grep -rnE "^\s*(import backtrader|from backtrader(\.[a-z_.]+)? import)" src/ || (echo "backtrader must never be imported by the engine" && exit 1)
+          ! grep -niE "backtrader" pyproject.toml || (echo "backtrader must never be a dependency" && exit 1)
+      - run: ruff check src tests tools
+      - run: pytest -q
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: the wheel installs and imports without the source tree
+        run: |
+          python -m venv /tmp/wheel-env
+          /tmp/wheel-env/bin/pip install -q dist/*.whl
+          cd /tmp && /tmp/wheel-env/bin/python -c "import tradewind; print(tradewind.__version__)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  oracle:
+    # backtrader lives only here, in a throwaway environment, as the equivalence oracle.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - run: python tools/run_oracle.py --engine tradewind --out /tmp/oracle_tw.json
+      - run: python -m venv /tmp/oracle-env && /tmp/oracle-env/bin/pip install -q backtrader numpy pandas
+      - run: /tmp/oracle-env/bin/python tools/run_oracle.py --engine backtrader --out /tmp/oracle_bt.json
+      - run: python tools/oracle_diff.py /tmp/oracle_bt.json /tmp/oracle_tw.json
+
+  publish:
+    needs: [check, oracle]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tradewind/
+    permissions:
+      id-token: write  # trusted publishing: PyPI accepts this job's OIDC token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
