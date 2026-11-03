@@ -1,9 +1,9 @@
 # 05. Interfaces of the engine (chantier 2)
 
-**Status: proposal, to be validated by Édouard before any code.** Nothing in `src/` depends
+**Status: validated by Édouard on 2026-11-03 (§ 10).** Nothing in `src/` depends
 on this document yet. It fixes the seams of the engine that chantier 2 builds and chantier 4
 fills: `Security` (currency, multiplier, tick size, lot), `Broker`, the pluggable reality
-models, the clock, the event bus and the feeds. The questions that need a decision are at the
+models, the clock, the event bus and the feeds. The six design decisions are at the
 end (§ 10).
 
 Sources: `01-scope.md`, `02-semantics.md` (the observed behaviour every default must
@@ -649,37 +649,33 @@ Order statuses: the compat names stay; Lean's map as `New`→`Created`, `Submitt
 `Filled`→`Completed`, `Canceled`→`Canceled`, `Invalid`→`Margin` or `Rejected` (with the
 reason), `CancelPending`/`UpdateSubmitted`: live only.
 
-## 10. Decisions to take (Édouard)
+## 10. Decisions (Édouard, 2026-11-03)
 
-1. **Profiles.** One engine with a model set per security; `ModelSet.oracle()` is the default
-   and reproduces backtrader; chantier 4 assembles `ModelSet.realistic()`; a strategy or the
-   toolbox can override one model. *Recommendation*: yes; the default flips to `realistic`
-   only after the 4 200-NAV pass on `oracle` and your sign-off, with a regenerated oracle per
+1. **Profiles.** Décision (Édouard, 2026-11-03) : réponse proposée retenue. `ModelSet.oracle()`
+   is the default and reproduces backtrader, chantier 4 assembles `ModelSet.realistic()`, a
+   strategy or the toolbox can override one model, and the default flips to `realistic` only
+   after the 4 200-NAV pass on `oracle` and Édouard's sign-off, with a regenerated oracle per
    `03-oracle.md`.
-2. **Corporate actions inside the bar.** Apply splits, dividends (ex-date) and delistings at
-   the start of the bar, before its fills (phase 3), rather than after them as Lean's loop does
-   for its own daily events. *Recommendation*: before the fills: on daily bars the open of the
-   ex-date is already in post-split units, so a fill before the split would trade the wrong
-   quantity; dividends credited on the ex-date, the pay date handled later by the settlement
-   model.
-3. **Money as float64**, not decimal as in Lean. *Recommendation*: float64 everywhere with
-   order-preserving reductions (§ 7.3): it is what makes the 4 200 NAVs reproducible bit for
-   bit, and decimal would cost several times the speed budget.
-4. **Indicators computed across time in backtests.** Keep `once()` (whole-line pre-compute)
-   as a backtest optimisation, with a test per built-in that it equals the bar-by-bar path bit
-   for bit, live stepping bar by bar; or forbid it and step everything. *Recommendation*:
-   keep it with the equality test; the "never across time" rule then applies to everything
-   that carries portfolio state.
-5. **Vector methods on models.** Lean's models are scalar (one security, one order). Make
-   the scalar protocol the contract and add optional vector methods (`fee_rates`,
-   `accrue` over arrays) for the per-bar models only. *Recommendation*: yes: per-order
-   models stay scalar (orders are sparse), per-bar ones get a vector path or the 3 µs budget
-   is out of reach on 4 000 names.
-6. **Exposure of `Security`.** Keep it internal in chantier 2, reachable read-only as
-   `data.security` (properties, holding, models), with no change to BaseStrategy; the public
-   typed API (`self.securities`, `notify_corporate_action`, `notify_universe`) comes with
-   chantier 5. *Recommendation*: yes, so that nothing in the corpus or the toolbox can come to
-   depend on an interface before it is frozen.
+2. **Corporate actions inside the bar.** Décision (Édouard, 2026-11-03) : réponse proposée
+   retenue. Splits, dividends and delistings apply at the start of the bar, before its fills
+   (phase 3, unlike Lean's loop), dividends credited on the ex-date and the pay date left to
+   the settlement model, because the ex-date open is already in post-split units.
+3. **Money as float64.** Décision (Édouard, 2026-11-03) : réponse proposée retenue. Money is
+   float64 everywhere, not decimal as in Lean, with order-preserving reductions (§ 7.3), which
+   keeps the 4 200 NAVs reproducible bit for bit within the speed budget.
+4. **Indicators computed across time in backtests.** Décision (Édouard, 2026-11-03) : réponse
+   proposée retenue. `once()` (whole-line pre-compute) stays as a backtest optimisation,
+   guarded by a test per built-in that it equals the bar-by-bar path bit for bit, live steps
+   bar by bar, and the "never across time" rule applies to everything that carries portfolio
+   state.
+5. **Vector methods on models.** Décision (Édouard, 2026-11-03) : réponse proposée retenue. The
+   scalar protocol is the contract, and only the per-bar models get optional vector methods
+   (`fee_rates`, `accrue` over arrays), per-order models staying scalar since orders are
+   sparse.
+6. **Exposure of `Security`.** Décision (Édouard, 2026-11-03) : réponse proposée retenue.
+   `Security` stays internal in chantier 2, reachable read-only as `data.security` with no
+   change to BaseStrategy, and the public typed API (`self.securities`,
+   `notify_corporate_action`, `notify_universe`) comes with chantier 5.
 
-Live concurrency is not a question: the synchronous loop with one inbox (§ 8) is the only
-design that keeps runs deterministic and replayable; say so if you see it otherwise.
+Live concurrency was not a question: the synchronous loop with one inbox (§ 8) is the only
+design that keeps runs deterministic and replayable.
