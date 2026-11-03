@@ -206,10 +206,9 @@ class CrossOver(Indicator):
 
     def __init__(self):
         super().__init__()
+        # one bar beyond the slower input (observed: CrossOver of SMA(3) and SMA(5) first
+        # delivers at bar 6)
         self.addminperiod(2)
-        for inp in self.datas:
-            if isinstance(inp, Indicator):
-                self.addminperiod(inp._minperiod + 1)
 
     def once(self, start, end):
         a = _as_array(self.datas[0])

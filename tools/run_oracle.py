@@ -51,14 +51,34 @@ def run_one(bt, cls, fr, cash=100_000, commission=None):
     cerebro.broker.set_cash(cash)
     if commission is not None:
         cerebro.broker.setcommission(commission=commission)
+    hook = getattr(cls, "oracle_analyzers", None)
+    names = []
+    for name, ancls, kwargs in (hook(bt) if hook else []):
+        cerebro.addanalyzer(ancls, _name=name, **kwargs)
+        names.append(name)
     strat = cerebro.run()[0]
-    return {
+    out = {
         "values": strat.values,
         "fills": strat.fills,
         "statuses": strat.statuses,
         "final_cash": round(cerebro.broker.getcash(), 6),
         "final_value": round(cerebro.broker.getvalue(), 6),
     }
+    extra = dict(getattr(strat, "extra", None) or {})
+    if names:
+        analyses = {n: getattr(strat.analyzers, n).get_analysis() for n in names}
+        extra["analyzers"] = {n: _plain(a) for n, a in analyses.items()}
+        extra["analysis_types"] = {n: type(a).__name__ for n, a in analyses.items()}
+    if extra:
+        out["extra"] = extra
+    return out
+
+
+def _plain(x):
+    """An analysis as plain JSON: nested dicts with string keys."""
+    if isinstance(x, dict):
+        return {str(k): _plain(v) for k, v in x.items()}
+    return x
 
 
 def main():

@@ -80,7 +80,10 @@ class BackBroker(BrokerBase):
 
     # -- configuration -----------------------------------------------------------------
     def set_cash(self, cash):
+        # Observed on the oracle: the portfolio value follows at once, before the run (an
+        # analyzer's ``start`` reads it) and during it.
         self.cash = self.startingcash = float(cash)
+        self._value = self._mark_value()
 
     setcash = set_cash
 
@@ -440,6 +443,14 @@ class BackBroker(BrokerBase):
         self._update_trade(order, data, size, price, opened, closed, pnl, comm_final, dt, newsize)
 
     def _update_trade(self, order, data, size, price, opened, closed, pnl, comm, dt, newsize):
+        if opened and closed:
+            # Observed on the oracle (probe ``analyzers``): a reversing fill closes the
+            # trade with its closing part and opens a new one with the rest, each part
+            # carrying its share of the commission.
+            share = abs(closed) / (abs(closed) + abs(opened))
+            self._update_trade(order, data, closed, price, 0.0, closed, pnl, comm * share, dt, 0.0)
+            self._update_trade(order, data, opened, price, opened, 0.0, 0.0, comm - comm * share, dt, newsize)
+            return
         trade = self.trades.get(data)
         if trade is None or trade.isclosed:
             trade = Trade(data=data, tradeid=order.tradeid)

@@ -68,7 +68,21 @@ TOOLBOX_ENGINE_PATTERNS = [
      r"\1from pwb_toolbox.backtesting.bt import \2"),
 ] + ENGINE_PATTERNS[4:]
 ANY_BACKTRADER = re.compile(r"^\s*(import backtrader\b|from backtrader\b)")
-BT_ATTR = re.compile(r"\bbt\.([A-Za-z_][A-Za-z_0-9]*)")
+# the names a file binds to the engine: ``import backtrader as bt``, ``import tradewind as
+# bt``, ``from pwb_toolbox.backtesting import bt`` (the alias may differ)
+ENGINE_ALIAS = re.compile(
+    r"^\s*(?:import (?:backtrader|tradewind) as (\w+)"
+    r"|from pwb_toolbox\.backtesting import bt(?: as (\w+))?"
+    r"|import (backtrader))\s*(?:#.*)?$",
+    re.MULTILINE,
+)
+
+
+def engine_aliases(text: str) -> set[str]:
+    out = set()
+    for m in ENGINE_ALIAS.finditer(text):
+        out.add(m.group(1) or m.group(3) or m.group(2) or "bt")
+    return out
 
 
 def toolbox_patterns(name: str):
@@ -119,7 +133,12 @@ def surface(paths: list[str]) -> tuple[Counter, Counter]:
     have, lack = Counter(), Counter()
     for path in paths:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            names = set(BT_ATTR.findall(fh.read()))
+            text = fh.read()
+        # Only a name bound to the engine counts: ``bt.get(sym)`` on a local dict called
+        # ``bt`` in a file that never imports the engine is not an engine attribute.
+        names = set()
+        for alias in engine_aliases(text):
+            names.update(re.findall(rf"\b{re.escape(alias)}\.([A-Za-z_][A-Za-z_0-9]*)", text))
         for name in names:
             (have if hasattr(tradewind, name) else lack)[name] += 1
     return have, lack

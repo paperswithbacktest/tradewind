@@ -11,6 +11,7 @@ import numpy as np
 
 from .broker import BackBroker
 from .dateutils import num2date
+from .lines import building
 from .params import ParamsBase
 from .timer import Timer
 
@@ -202,7 +203,13 @@ class Cerebro(ParamsBase):
         # on a throwaway subclass so the user's class is untouched.
         bound = type(cls.__name__, (cls,), {"_before_init": before, "__module__": cls.__module__,
                                            "__qualname__": cls.__qualname__})
-        strat = bound(*args, **skwargs)
+        # The build stage: an operator on lines inside ``__init__`` builds a line
+        # (``lineops``), the same operator in ``next()`` reads current values.
+        try:
+            with building():
+                strat = bound(*args, **skwargs)
+        finally:
+            env._building = None
         strat.__class__ = cls
         env._building = None
         for ind in strat._indicators:
