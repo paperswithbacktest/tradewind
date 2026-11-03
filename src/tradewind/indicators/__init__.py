@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..indicator import Indicator, _as_array, _ema, _rolling_extreme, _rolling_mean
+from ..indicator import Indicator, _as_array, _ema, _mean, _rolling_extreme, _rolling_mean
 
 
 class SimpleMovingAverage(Indicator):
@@ -124,10 +124,11 @@ class AverageTrueRange(Indicator):
         p = self.p.period
         out = np.full(len(c), np.nan)
         if len(c) > p:
-            out[p] = np.mean(tr[1:p + 1])
+            out[p] = _mean(tr[1:p + 1])
             a = 1.0 / p
+            keep = 1.0 - a  # the ``prev * (1 - a) + x * a`` form, as in ``_ema``
             for i in range(p + 1, len(c)):
-                out[i] = out[i - 1] + a * (tr[i] - out[i - 1])
+                out[i] = out[i - 1] * keep + tr[i] * a
         self.lines.atr.array[:] = out
 
 
@@ -155,12 +156,13 @@ class RelativeStrengthIndex(Indicator):
             dn = np.where(d < 0, -d, 0.0)
             au = np.full(n - 1, np.nan)
             ad = np.full(n - 1, np.nan)
-            au[p - 1] = np.mean(up[:p])
-            ad[p - 1] = np.mean(dn[:p])
+            au[p - 1] = _mean(up[:p])
+            ad[p - 1] = _mean(dn[:p])
             a = 1.0 / p
+            keep = 1.0 - a  # the ``prev * (1 - a) + x * a`` form, as in ``_ema``
             for i in range(p, n - 1):
-                au[i] = au[i - 1] + a * (up[i] - au[i - 1])
-                ad[i] = ad[i - 1] + a * (dn[i] - ad[i - 1])
+                au[i] = au[i - 1] * keep + up[i] * a
+                ad[i] = ad[i - 1] * keep + dn[i] * a
             with np.errstate(divide="ignore", invalid="ignore"):
                 rs = au / ad
                 rsi = 100.0 - 100.0 / (1.0 + rs)
