@@ -14,11 +14,12 @@ called before it is reached (``prenext`` is).
 
 from __future__ import annotations
 
+import operator
 from typing import ClassVar
 
 import numpy as np
 
-from .lines import LineBuffer, Lines
+from .lines import LineArithmetic, LineBuffer, Lines, _lazy, in_build_stage
 from .params import ParamsBase
 
 
@@ -35,6 +36,14 @@ def _as_array(source) -> np.ndarray:
     raise TypeError(f"cannot read a line from {type(source).__name__}")
 
 
+def _minperiod_of(source) -> int:
+    """The minimum period an input imposes: an indicator's own, a feed's 1."""
+    owner = source._owner if isinstance(source, LineBuffer) else source
+    if isinstance(owner, Indicator):
+        return owner._minperiod
+    return 1
+
+
 def _owner_line(source) -> LineBuffer:
     if isinstance(source, LineBuffer):
         return source
@@ -45,7 +54,7 @@ def _owner_line(source) -> LineBuffer:
     raise TypeError(f"cannot bind to {type(source).__name__}")
 
 
-class Indicator(ParamsBase):
+class Indicator(LineArithmetic, ParamsBase):
     lines: tuple = ()
     plotinfo: ClassVar[dict] = {}
     plotlines: ClassVar[dict] = {}
@@ -64,6 +73,10 @@ class Indicator(ParamsBase):
         for i, d in enumerate(self.datas):
             setattr(self, f"data{i}", d)
         self._clock = _owner_line(self.data) if self.data is not None else None
+        # Observed on the oracle: an indicator starts from the largest minimum period of its
+        # inputs (an indicator, or a line of one; a feed counts 1) -- SMA(5) of SMA(3) first
+        # delivers at bar 7, a line operation on Highest(20) at bar 20.
+        self._minperiod = max([1] + [_minperiod_of(d) for d in self.datas])
         n = self._clock.buflen() if self._clock is not None else 0
         names = tuple(self.lines) if not isinstance(self.lines, str) else (self.lines,)
         buffers = [LineBuffer(np.full(n, np.nan), name, owner=self) for name in names]
@@ -92,12 +105,21 @@ class Indicator(ParamsBase):
             strat._minperiod = max(strat._minperiod, self._minperiod)
 
     def addminperiod(self, n: int):
-        self._minperiod = max(self._minperiod, int(n))
-        if self._strategy is not None:
-            self._strategy._minperiod = max(self._strategy._minperiod, self._minperiod)
+        """Extend the minimum period by ``n - 1`` bars. Observed on the oracle: periods add
+        up (``addminperiod(5)`` then ``addminperiod(3)`` on a feed: first value at bar 7;
+        on an SMA(4) input: bar 10)."""
+        self._minperiod += int(n) - 1
+        self._push_minperiod()
 
     def updateminperiod(self, n: int):
-        self.addminperiod(n)
+        """Raise the minimum period to ``n`` if it is lower (observed: ``addminperiod(5)``
+        then ``updateminperiod(3)`` keeps 5)."""
+        self._minperiod = max(self._minperiod, int(n))
+        self._push_minperiod()
+
+    def _push_minperiod(self):
+        if self._strategy is not None:
+            self._strategy._minperiod = max(self._strategy._minperiod, self._minperiod)
 
     def __len__(self):
         return len(self.lines[0])
@@ -111,35 +133,26 @@ class Indicator(ParamsBase):
     def __float__(self):
         return self.lines[0][0]
 
-    def __lt__(self, other):
-        return self.lines[0][0] < float(other)
+    # operators come from ``LineArithmetic``: a new line in the build stage, a number on
+    # the current value during the run
+    def _v(self):
+        return self.lines[0][0]
 
-    def __gt__(self, other):
-        return self.lines[0][0] > float(other)
+    def __eq__(self, other):
+        if in_build_stage():
+            return _lazy(operator.eq, self, other)
+        if isinstance(other, (int, float, np.floating, np.integer)) and not isinstance(other, bool):
+            return self._v() == float(other)
+        return self is other  # identity otherwise: ``ind in some_list`` must not compare values
 
-    def __le__(self, other):
-        return self.lines[0][0] <= float(other)
+    def __ne__(self, other):
+        if in_build_stage():
+            return _lazy(operator.ne, self, other)
+        eq = self.__eq__(other)
+        return not eq
 
-    def __ge__(self, other):
-        return self.lines[0][0] >= float(other)
-
-    def __sub__(self, other):
-        return self.lines[0][0] - float(other)
-
-    def __rsub__(self, other):
-        return float(other) - self.lines[0][0]
-
-    def __add__(self, other):
-        return self.lines[0][0] + float(other)
-
-    def __radd__(self, other):
-        return float(other) + self.lines[0][0]
-
-    def __mul__(self, other):
-        return self.lines[0][0] * float(other)
-
-    def __truediv__(self, other):
-        return self.lines[0][0] / float(other)
+    def __hash__(self):
+        return id(self)
 
     # -- computation ------------------------------------------------------------------
     def _input_lines(self):
@@ -195,8 +208,9 @@ class Indicator(ParamsBase):
         if self._computed:
             return
         for inp in self.datas:
-            if isinstance(inp, Indicator):
-                inp._compute()
+            owner = inp._owner if isinstance(inp, LineBuffer) else inp
+            if isinstance(owner, Indicator):
+                owner._compute()
         n = self._clock.buflen()
         if self._vectorised:
             self.once(0, n)

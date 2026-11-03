@@ -409,7 +409,125 @@ def build(bt):
             super().next()
             self.statuses.append((0, "IND", round(float(self.ind[0]), 6), self.datas[0].datetime.date(0).isoformat()))
 
+
+    class LineOps(Recorder):
+        """Lines built in ``__init__`` (corpus ``fixing_the_vix_an_indicator_to_beat_fear``):
+        operators on an indicator and a feed line, ``bt.If``, an SMA of the result; trades
+        on the cross. Also records what ``bt.LineRoot`` / ``bt.LineIterator`` say of each
+        kind of object, and that a built comparison has no truth value."""
+
+        def __init__(self):
+            super().__init__()
+            d = self.datas[0]
+            h = bt.ind.Highest(d.close, period=20)
+            self.vf = bt.If(h > 0.0, (h - d.low) / h * 100.0, 0.0)
+            self.ma = bt.ind.SMA(self.vf, period=20)
+            self.spread = 100.0 - abs(d.close - d.open) * 2.0
+            cond = h > 0.0
+            try:
+                bool(cond)
+                truth = "bool"
+            except TypeError:
+                truth = "TypeError"
+            kinds = {"feed": d, "line": d.close, "indicator": h, "built": cond, "strategy": self}
+            self.extra = {
+                "markers": {k: [isinstance(o, bt.LineRoot), isinstance(o, bt.LineIterator)]
+                            for k, o in kinds.items()},
+                "built_truth": truth,
+                "has_get": hasattr(bt, "get"),
+                "rows": [],
+            }
+            self.prev = None
+
+        def next(self):
+            super().next()
+            d = self.datas[0]
+            v, m = float(self.vf[0]), float(self.ma[0])
+            self.extra["rows"].append((len(self), v, m, float(self.spread[0]), type(d.close > d.open).__name__))
+            diff = v - m
+            if self.prev is not None:
+                if self.prev >= 0 > diff:
+                    self.order_target_percent(d, target=0.9)
+                elif self.prev <= 0 < diff:
+                    self.close(d)
+            self.prev = diff
+
+    class AddsUp(bt.Indicator):
+        """A next-only indicator whose two ``addminperiod`` calls add up."""
+
+        lines = ("x",)
+
+        def __init__(self):
+            self.addminperiod(20)
+            self.addminperiod(14)
+
+        def next(self):
+            self.lines.x[0] = self.data.close[0]
+
+    class MinperiodAdd(Recorder):
+        """``addminperiod(20)`` then ``addminperiod(14)``: ``next`` from bar 33."""
+
+        def __init__(self):
+            super().__init__()
+            self.x = AddsUp(self.datas[0])
+            self.extra = {"first_next": None}
+
+        def next(self):
+            super().next()
+            if self.extra["first_next"] is None:
+                self.extra["first_next"] = len(self)
+                self.extra["x"] = float(self.x[0])
+
+    class MinperiodChain(Recorder):
+        """SMA(20) of SMA(15): ``next`` from bar 34."""
+
+        def __init__(self):
+            super().__init__()
+            self.x = bt.ind.SMA(bt.ind.SMA(self.datas[0].close, period=15), period=20)
+            self.extra = {"first_next": None}
+
+        def next(self):
+            super().next()
+            if self.extra["first_next"] is None:
+                self.extra["first_next"] = len(self)
+                self.extra["x"] = float(self.x[0])
+
+    class Analyzers(Recorder):
+        """``bt.analyzers`` (corpus ``performance_of_the_average_directional_index...``):
+        long and short trades, wins and losses, a reversal, two trades left open."""
+
+        @staticmethod
+        def oracle_analyzers(bt):
+            return [
+                ("trades", bt.analyzers.TradeAnalyzer, {}),
+                ("dd", bt.analyzers.DrawDown, {}),
+                ("sharpe_days", bt.analyzers.SharpeRatio, {"timeframe": bt.TimeFrame.Days, "compression": 1}),
+                ("sharpe_weeks_ann", bt.analyzers.SharpeRatio, {"timeframe": bt.TimeFrame.Weeks, "annualize": True}),
+                ("sharpe_days_raw", bt.analyzers.SharpeRatio,
+                 {"timeframe": bt.TimeFrame.Days, "convertrate": False, "stddev_sample": True}),
+                ("sharpe_years", bt.analyzers.SharpeRatio, {}),
+            ]
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1, d2 = self.datas[0], self.datas[1], self.datas[2]
+            plan = {35: (d0, 100), 42: (d0, 0), 44: (d1, -50), 57: (d1, 80), 72: (d1, 0),
+                    77: (d2, 60), 82: (d2, 40), 92: (d2, -30), 100: (d2, 0), 105: (d0, 200), 110: (d1, -20)}
+            if n in plan:
+                data, size = plan[n]
+                if size == 0:
+                    self.close(data)
+                elif size > 0:
+                    self.buy(data, size=size)
+                else:
+                    self.sell(data, size=-size)
+
     return {
+        "line_ops": LineOps,
+        "minperiod_add": MinperiodAdd,
+        "minperiod_chain": MinperiodChain,
+        "analyzers": Analyzers,
         "foreign_feed": ForeignFeed,
         "batch_funding": BatchFunding,
         "deficit_carry": DeficitCarry,

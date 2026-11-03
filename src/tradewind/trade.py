@@ -19,6 +19,7 @@ class Trade:
         self.pnl = 0.0
         self.pnlcomm = 0.0
         self.justopened = False
+        self.long = None  # the side the trade opened on
         self.isopen = False
         self.isclosed = False
         self.baropen = 0
@@ -49,6 +50,7 @@ class Trade:
             self.baropen = len(self.data)
             self.status = Trade.Open
             self.isopen = True
+            self.long = size > 0
         if opened:
             total = self.size + opened
             self.price = (self.size * self.price + opened * price) / total if total else price

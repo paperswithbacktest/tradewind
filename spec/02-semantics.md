@@ -31,6 +31,26 @@ Four behaviours the public documentation does not state, learned from order logs
 | The batch pre-check prices a market order at the **close of its submission bar**, a limit or stop order at its own price; the fill is then re-checked at the fill price (an order Accepted at the pre-check can still end `Margin`) | kept | `a_new_anomaly…`: order logs, 2020-04-08 |
 | **runonce (default)**: a `next`-only indicator is computed in one pre-pass before the run, during which every feed that is **not one of its inputs sits at its last bar**; an indicator reading such a feed through a parameter sees one frozen value for the whole series. `runonce=False` steps it live. | kept, flagged | probe `foreign_feed`; corpus `a_study_in_portfolio_diversification_using_vix_options` reads VIX = 15.86 on all 9 601 bars. **The reference NAVs embed this defect**; the corrected default (chantier 4) is to step `next`-only indicators live and regenerate those NAVs. |
 
+Observed on 2026-11-03 for the `bt.*` names the codemod found missing (probes `line_ops`,
+`minperiod_add`, `minperiod_chain`, `analyzers`; scratch probes with no trade, an open trade
+only, a reversal, a commission, weekly bars, eleven `SharpeRatio` parameter sets):
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| **Two stages**: in a strategy's `__init__` an operator on lines (`h - data.low`, `h > 0.0`) and `bt.If(cond, a, b)` build a *line*; in `next()` the same operator returns a float or a bool. A built line has no truth value (`bool()` raises `TypeError`) | kept | probe `line_ops`; corpus `fixing_the_vix_an_indicator_to_beat_fear` |
+| A built line takes the **largest minimum period of its operands**, counts towards the strategy's (`If` over `Highest(20)`: `next` from bar 20) and holds **NaN before it** -- `If(nan > 0, x, 0.0)` is NaN there, not 0.0. A comparison is 1.0 / 0.0; `If` takes a non-zero (or NaN) condition as true; a division by zero raises `ZeroDivisionError` when the line is computed | kept | probe `line_ops` |
+| Minimum periods **chain**: an indicator starts from the largest of its inputs' (SMA(20) of SMA(15): bar 34); `addminperiod(n)` **adds** `n - 1` (20 then 14: bar 33), `updateminperiod(n)` raises to `n` | kept | probes `minperiod_add`, `minperiod_chain` |
+| `bt.LineRoot` / `bt.LineIterator`: a feed, a line, a built line, an indicator and a strategy are `LineRoot`; only an indicator and a strategy are `LineIterator`; an analyzer and a feed's `lines` container are neither. `bt.get` does not exist (the corpus' `bt.get(sym)` is a local dict) | kept | probe `line_ops` |
+| `TradeAnalyzer`: `{total: {total: 0}}` without trades, `{total: {total, open}}` with open trades only, the full tree from the first closed trade; a **reversing fill closes one trade and opens another**; won = net P&L > 0; `lost.pnl.max` is the largest loss; empty long/short length buckets start `min` at `sys.maxsize`, `len.won` / `len.lost` have no `min` until a trade lands there. A missing key raises `KeyError`, as an attribute too | kept | probe `analyzers` |
+| `DrawDown`: percent of the running peak, money, bars since the peak, and their maxima, over every bar including `prenext` | kept | probe `analyzers` |
+| `SharpeRatio`: per-period returns (value at the period's last bar over the previous period's, the first over the starting cash); `convertrate` turns `riskfreerate` into `(1+rf)^(1/factor)-1` and `annualize` multiplies by `sqrt(factor)`, else returns are annualised and `annualize` is moot; factor 252/52/12/1; population deviation unless `stddev_sample`; `None` on a zero deviation. Its `get_analysis()` is a **plain `OrderedDict`** (`["sharperatio"]`, no attribute access) | kept | probe `analyzers` |
+| `broker.setcash()` moves the portfolio value at once, before the run too (an analyzer's `start` reads it) | kept | scratch probe; the first build returned the default 10 000 until the first bar |
+
+Seen and **not** reproduced yet: in `runonce` mode a `next`-only indicator whose input is
+another indicator reads `self.data[0]` as NaN on every bar (it reads the value with
+`runonce=False`). No corpus strategy is known to depend on it; to be probed before the
+4 200-NAV pass.
+
 ## Clock and bars
 
 | behaviour | kept / corrected | note |

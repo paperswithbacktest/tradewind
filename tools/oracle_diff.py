@@ -3,7 +3,37 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
+
+
+def _diff_extra(a, b, path, tol=1e-9):
+    """The first path where two recorded structures differ (floats within ``tol``
+    relative, NaN equal to NaN), or None."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b)):
+            if k not in a or k not in b:
+                return f"{path}.{k} (missing on one side)"
+            where = _diff_extra(a[k], b[k], f"{path}.{k}", tol)
+            if where:
+                return where
+        return None
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            return f"{path} (length {len(a)} vs {len(b)})"
+        for i, (x, y) in enumerate(zip(a, b)):
+            where = _diff_extra(x, y, f"{path}[{i}]", tol)
+            if where:
+                return where
+        return None
+    if isinstance(a, float) or isinstance(b, float):
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool):
+            if math.isnan(a) and math.isnan(b):
+                return None
+            if abs(a - b) <= tol * max(1.0, abs(a)):
+                return None
+        return f"{path}: {a!r} vs {b!r}"
+    return None if a == b else f"{path}: {a!r} vs {b!r}"
 
 
 def main(a_path, b_path, tol=1e-9):
@@ -46,6 +76,10 @@ def main(a_path, b_path, tol=1e-9):
                           f"{ra['statuses'][k] if k < len(ra['statuses']) else None} vs "
                           f"{rb['statuses'][k] if k < len(rb['statuses']) else None} "
                           f"({len(ra['statuses'])} vs {len(rb['statuses'])})")
+        if "extra" in ra or "extra" in rb:
+            where = _diff_extra(ra.get("extra"), rb.get("extra"), "extra")
+            if where:
+                issues.append(f"recorded values differ at {where}")
         if issues:
             bad += 1
             print(f"FAIL {name}")

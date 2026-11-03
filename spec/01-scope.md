@@ -45,8 +45,10 @@ and the like under `data_obj:*` are pandas calls on variables named `data`; `imp
 ## Tier 3, not committed
 
 Everything else in backtrader: resampling and replaying, live stores, plotting, `optstrategy`,
-observers beyond the value curve, `bt.If` and line arithmetic (1 file), `LineIterator` /
-`LineRoot` internals (1 file). A strategy that needs one of these is ported, not supported.
+observers beyond the value curve, line internals. A strategy that needs one of these is ported,
+not supported. (`bt.If` and line arithmetic in `__init__`, the `LineRoot` / `LineIterator` names
+and `bt.analyzers` `TradeAnalyzer` / `DrawDown` / `SharpeRatio`, one corpus file each, moved
+into Tier 2 on 2026-11-03; see `02-semantics.md`.)
 
 ## pwb-toolbox surface (25 modules)
 

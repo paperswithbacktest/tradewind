@@ -5,7 +5,7 @@ of the repository: the engine is written from the public API contract and from
 black-box tests, and no third-party engine source is ever consulted.
 """
 
-from . import indicators
+from . import analyzers, indicators
 from .analyzer import Analyzer, TimeReturn
 from .broker import BackBroker, BrokerBase
 from .cerebro import Cerebro
@@ -13,6 +13,7 @@ from .comminfo import CommInfoBase, CommissionInfo
 from .dateutils import date2num, num2date, num2dt
 from .feeds import DataBase, PandasData, TimeFrame, feeds
 from .indicator import Indicator
+from .lineops import If, LineIterator, LineRoot, LinesOperation
 from .lines import LineBuffer, Lines
 from .order import BuyOrder, Order, SellOrder
 from .position import Position
@@ -33,9 +34,13 @@ __all__ = [
     "CommInfoBase",
     "CommissionInfo",
     "DataBase",
+    "If",
     "Indicator",
     "LineBuffer",
+    "LineIterator",
+    "LineRoot",
     "Lines",
+    "LinesOperation",
     "Order",
     "PandasData",
     "Position",
@@ -46,6 +51,7 @@ __all__ = [
     "Timer",
     "Trade",
     "__version__",
+    "analyzers",
     "date2num",
     "feeds",
     "ind",
