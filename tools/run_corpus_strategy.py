@@ -47,6 +47,9 @@ def main():
     args = p.parse_args()
 
     os.environ.setdefault("TQDM_DISABLE", "1")
+    # pwb-toolbox binds to one engine at import (pwb_toolbox.engine); the alias below
+    # is for the papers harness, which still imports backtrader by name.
+    os.environ["PWB_BACKTEST_ENGINE"] = args.engine
     if args.engine == "tradewind":
         tradewind = install_alias()
     else:
