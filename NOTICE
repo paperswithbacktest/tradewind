@@ -8,3 +8,12 @@ the License at http://www.apache.org/licenses/LICENSE-2.0.
 Tradewind is an independent, clean-room implementation. It is compatible with the
 public API of backtrader but shares no code with it. Where its design follows
 QuantConnect's Lean (Apache License 2.0), the attribution is recorded in this file.
+
+Design attributions to QuantConnect Lean (https://github.com/QuantConnect/Lean,
+Copyright QuantConnect Corporation, Apache License 2.0):
+
+* spec/05-interfaces.md follows the decomposition of Lean's Security, SymbolProperties,
+  SecurityHolding, CashBook, IFeeModel, IFillModel, ISlippageModel, IBuyingPowerModel,
+  ISettlementModel, IShortableProvider, IMarginInterestRateModel, ISecurityPortfolioModel,
+  SecurityChanges and SecurityExchangeHours, and the phase order of its
+  AlgorithmManager time loop. The Python interfaces are Tradewind's own.
