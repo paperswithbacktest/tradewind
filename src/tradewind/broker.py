@@ -1,22 +1,55 @@
 """The simulated broker: cash, positions, order execution, commissions, notifications.
 
-Compat fill model (``spec/02-semantics.md``): an order accepted during bar *t* executes
-against bar *t+1* of its feed; a market order at that bar's open, ``Order.Close`` at its
-close, limit and stop orders against its range with the open as the cap when the price
-gapped through. With ``set_coc(True)`` a market order fills at the close of the bar it was
-placed on. An order whose cost the cash cannot cover is ``Margin`` and never fills.
+``BackBroker`` (also ``SimulatedBroker``) implements the ``Broker`` protocol of spec/05 § 6.5
+as phases 3 to 8 of a slice -- corporate actions, accruals, acceptance, fills, transfers,
+mark -- and delegates every reality decision to the ``ModelSet`` of the security concerned
+(spec/05 § 5): the fee model prices, the fill model (with its slippage model) proposes, the
+buying-power model accepts and re-checks, the settlement model moves the cash. With
+``ModelSet.oracle()``, the default, the behaviour is the compat one of
+``spec/02-semantics.md``:
+
+an order accepted during bar *t* executes against bar *t+1* of its feed; a market order at
+that bar's open, ``Order.Close`` at its close, limit and stop orders against its range with
+the open as the cap when the price gapped through. With ``set_coc(True)`` a market order
+fills at the close of the bar it was placed on. An order whose cost the cash cannot cover
+is ``Margin`` and never fills.
+
+Notifications are events on the broker's ``EventBus``, delivered at phase 12.
 """
 
 from __future__ import annotations
 
 import collections
-import copy
+from collections.abc import Sequence
+from typing import Protocol, runtime_checkable
 
+import numpy as np
+
+from .cashbook import CashBook
+from .clock import ALWAYS_OPEN, TimeSlice
 from .comminfo import CommInfoBase, CommissionInfo
+from .events import CorporateActionEvent, EventBus, OrderEvent, TradeEvent
+from .market import MarketState, PortfolioState
+from .models import BatchState, FeeParameters, FillParameters, ModelSet
 from .order import BuyOrder, Order, SellOrder
 from .params import ParamsBase
 from .position import Position
+from .securities import ACCOUNT_CURRENCY, Bar, CashAmount, Security, SecurityHolding, Timestamp
 from .trade import Trade
+
+
+@runtime_checkable
+class Broker(Protocol):
+    """What the engine needs from a broker, simulated or live (spec/05 § 6.5)."""
+
+    def submit(self, order: Order) -> Order: ...
+    def cancel(self, order: Order) -> bool: ...
+    def on_slice(self, s: TimeSlice) -> None: ...          # phases 3 to 8
+    @property
+    def cash(self) -> float: ...                            # the account currency's balance
+    def value(self) -> float: ...
+    def holding(self, security: int) -> SecurityHolding: ...
+    def open_orders(self) -> Sequence[Order]: ...
 
 
 class BrokerBase(ParamsBase):
@@ -24,6 +57,7 @@ class BrokerBase(ParamsBase):
 
     def __init__(self):
         self.comminfo = {None: self.p.commission or CommInfoBase()}
+        self._comminfo_version = 0
 
     def getcommissioninfo(self, data):
         name = getattr(data, "_name", None)
@@ -38,9 +72,36 @@ class BrokerBase(ParamsBase):
                               stocklike=stocklike, percabs=percabs, interest=interest,
                               interest_long=interest_long, leverage=leverage, automargin=automargin)
         self.comminfo[name] = comm
+        self._comminfo_version += 1
 
     def addcommissioninfo(self, comminfo, name=None):
         self.comminfo[name] = comminfo
+        self._comminfo_version += 1
+
+
+class _PositionBook(dict):
+    """``broker.positions``: a ``Position`` per feed, created on first access, in the order
+    the feeds were first touched -- the order the mark sums them in (the oracle's)."""
+
+    def __init__(self, broker):
+        super().__init__()
+        self._broker = broker
+        self.order: list[int] = []       # security ids, in insertion order
+
+    def __missing__(self, data):
+        pos = Position()
+        security = self._broker._security(data)
+        pos._attach(self._broker.portfolio, security.id)
+        self[data] = pos
+        self.order.append(security.id)
+        return pos
+
+
+def _plain_comminfo(ci) -> bool:
+    """A stock-like scheme valued by the base formulas: the mark can vectorise it."""
+    cls = type(ci)
+    return bool(ci.stocklike and cls.getvalue is CommInfoBase.getvalue
+                and cls.profitandloss is CommInfoBase.profitandloss)
 
 
 class BackBroker(BrokerBase):
@@ -62,21 +123,99 @@ class BackBroker(BrokerBase):
 
     def __init__(self):
         super().__init__()
-        self.cash = self.startingcash = float(self.p.cash)
-        self.positions: dict = collections.defaultdict(Position)
+        p = self.p
+        self.cashbook = CashBook(ACCOUNT_CURRENCY, float(p.cash))
+        self.startingcash = float(p.cash)
+        self.models = ModelSet.oracle(coc=p.coc, checksubmit=p.checksubmit, shortcash=p.shortcash,
+                                      slip_perc=p.slip_perc, slip_fixed=p.slip_fixed, slip_open=p.slip_open,
+                                      slip_limit=p.slip_limit, slip_match=p.slip_match, slip_out=p.slip_out)
+        self.hours = ALWAYS_OPEN
+        self.securities: list[Security] = []
+        self._model_overrides: dict = {}
+        self.portfolio = PortfolioState(0)
+        self.market: MarketState | None = None
+        self.bus = EventBus()
+        self.positions = _PositionBook(self)
         self.orders: list[Order] = []          # every order ever submitted
         self.submitted: collections.deque = collections.deque()  # submitted, accepted on the next bar
         self.pending: collections.deque = collections.deque()  # accepted, not yet executed
-        self.notifs: collections.deque = collections.deque()
         self.trades: dict = {}
-        self._coc = self.p.coc
+        self.margin_call_model = None
         self._cash_addition = 0.0
-        self._value = None
-        self._coo = self.p.coo
-        self._slip_perc = self.p.slip_perc
-        self._slip_fixed = self.p.slip_fixed
+        self._coo = p.coo
         self._env = None
+        self._now: Timestamp = np.int64(0)
+        self._dtnum = 0.0
+        self._accruals = False
+        self._prev_accrual = None
+        self._mark_cache = None
         self._value = self.cash
+
+    # -- cash (the account currency's balance of the cash book) -------------------------
+    @property
+    def cash(self) -> float:
+        return self.cashbook.account.amount
+
+    @cash.setter
+    def cash(self, value: float) -> None:
+        self.cashbook.account.amount = value
+
+    def value(self) -> float:
+        return self.get_value()
+
+    def holding(self, security: int) -> SecurityHolding:
+        return self.securities[security].holding
+
+    def open_orders(self) -> list[Order]:
+        return list(self.submitted) + list(self.pending)
+
+    # -- securities ---------------------------------------------------------------------
+    def register(self, data) -> Security:
+        """The security of ``data``, created (next ``SecurityId``) on first sight."""
+        security = getattr(data, "security", None)
+        if security is not None and security._broker is self:
+            return security
+        sid = len(self.securities)
+        models = self._model_overrides.get(id(data), self.models)
+        name = getattr(data, "_name", "") or f"data{sid}"
+        security = Security(sid, name, data, models, self.hours, broker=self)
+        self.securities.append(security)
+        self.portfolio.grow(len(self.securities))
+        security._portfolio = self.portfolio
+        security._market = self.market
+        data.security = security
+        self._mark_cache = None
+        return security
+
+    _security = register
+
+    def set_models(self, data, models: ModelSet | None = None, **changes) -> ModelSet:
+        """Give ``data``'s security its own models: a whole ``ModelSet`` or some models
+        swapped in the broker's default set (spec/05 § 5: any single model can be
+        overridden per security)."""
+        base = models if models is not None else self.models
+        chosen = base.replace(**changes) if changes else base
+        self._model_overrides[id(data)] = chosen
+        security = getattr(data, "security", None)
+        if security is not None and security._broker is self:
+            security.models = chosen
+        self._accruals = self._needs_accruals()
+        return chosen
+
+    def start(self, datas, market: MarketState) -> None:
+        """Bind the run's feeds (``SecurityId`` = adddata order) and its market state."""
+        for data in datas:
+            self.register(data)
+        self.market = market
+        for security in self.securities:
+            security._market = market
+        self._accruals = self._needs_accruals()
+        self._mark_cache = None
+
+    def _needs_accruals(self) -> bool:
+        sets = [s.models for s in self.securities] or [self.models]
+        return any(not getattr(m.settlement, "noop_scan", False) or not getattr(m.shortable, "noop_fees", False)
+                   or not getattr(m.margin_interest, "noop_accrue", False) for m in sets)
 
     # -- configuration -----------------------------------------------------------------
     def set_cash(self, cash):
@@ -95,27 +234,35 @@ class BackBroker(BrokerBase):
     def add_cash(self, cash):
         # Observed on the oracle (probe ``add_cash_timing``): the addition is not visible to
         # ``getcash``/``getvalue`` in the bar that requests it, the next bar's batch check and
-        # fills still run on the old cash, and it lands at the end of that ``next`` -- before
-        # the notifications of the bar are read.
+        # fills still run on the old cash, and it lands at the end of that pass (phase 7) --
+        # before the notifications of the bar are read. Several requests are summed first.
         self._cash_addition += float(cash)
 
+    @property
+    def _coc(self):
+        return self.models.fill.coc
+
     def set_coc(self, coc):
-        self._coc = bool(coc)
+        self.models.fill.coc = bool(coc)
 
     def set_coo(self, coo):
         self._coo = bool(coo)
 
     def set_slippage_perc(self, perc, slip_open=True, slip_limit=True, slip_match=True, slip_out=False):
-        self._slip_perc, self._slip_fixed = float(perc), 0.0
+        slip = self.models.slippage
+        slip.perc, slip.fixed = float(perc), 0.0
 
     def set_slippage_fixed(self, fixed, slip_open=True, slip_limit=True, slip_match=True, slip_out=False):
-        self._slip_fixed, self._slip_perc = float(fixed), 0.0
+        slip = self.models.slippage
+        slip.fixed, slip.perc = float(fixed), 0.0
 
     def set_checksubmit(self, checksubmit):
         self.p.checksubmit = checksubmit
+        self.models.buying_power.checksubmit = checksubmit
 
     def set_shortcash(self, shortcash):
         self.p.shortcash = shortcash
+        self.models.buying_power.shortcash = shortcash
 
     def set_fundmode(self, fundmode, fundstartval=None):
         self.p.fundmode = fundmode
@@ -145,8 +292,15 @@ class BackBroker(BrokerBase):
             self.cash += self._cash_addition
             self._cash_addition = 0.0
         value = 0.0
+        if isinstance(datas, (list, tuple)) and len(datas) == 1:
+            # the common read (``order_target_value``): one position, no scan of the book
+            data = datas[0]
+            pos = self.positions.get(data)
+            if pos is not None and pos.size and len(data):
+                value += self.getcommissioninfo(data).getvalue(pos, data.close[0])
+            return value
         for data, pos in self.positions.items():
-            if datas is not None and data not in datas:
+            if data not in datas:
                 continue
             if not pos.size:
                 continue
@@ -159,29 +313,77 @@ class BackBroker(BrokerBase):
     getvalue = get_value
 
     def _mark_value(self):
-        value = self.cash
-        for data, pos in self.positions.items():
-            if not pos.size or len(data) == 0:
-                continue
-            value += self.getcommissioninfo(data).getvalue(pos, data.close[0])
-        return value
+        """Cash + the value of every open position, summed left to right in the order the
+        positions were first touched (the oracle's order, spec/05 § 7.3)."""
+        market = self.market
+        if market is None:
+            value = self.cash
+            for data, pos in self.positions.items():
+                if not pos.size or len(data) == 0:
+                    continue
+                value += self.getcommissioninfo(data).getvalue(pos, data.close[0])
+            return value
+        order = self.positions.order
+        cash = self.cashbook.account.amount
+        if not order:
+            return cash
+        cache = self._mark_cache
+        if cache is None or cache[0] != len(order) or cache[1] != self._comminfo_key():
+            cache = self._mark_cache = self._build_mark_cache()
+        _, _, ids, mult, scalar_idx = cache
+        pf = self.portfolio
+        q = pf.quantity[ids]
+        live = (q != 0) & (market.length[ids] > 0)
+        if not live.any():
+            return cash
+        price = market.flat["close"][market.offsets[ids] + market.length[ids] - 1]
+        avg = pf.average_price[ids]
+        # the base scheme's value: a long at the close; a short at its entry value plus the
+        # open P&L -- the same float operations, element by element
+        vals = np.where(q >= 0, q * price, q * avg + q * (price - avg) * mult)
+        if scalar_idx:
+            securities = self.securities
+            for k in scalar_idx:
+                if live[k]:
+                    data = securities[ids[k]].feed
+                    vals[k] = self.getcommissioninfo(data).getvalue(self.positions[data], data.close[0])
+        vals = vals[live]
+        # sequential, not pairwise: ``add.accumulate`` adds left to right like the loop
+        return float(np.add.accumulate(np.concatenate(((cash,), vals)))[-1])
+
+    def _build_mark_cache(self):
+        order = self.positions.order
+        ids = np.array(order, dtype=np.int64)
+        securities = self.securities
+        comminfos = [self.getcommissioninfo(securities[i].feed) for i in order]
+        plain = np.array([_plain_comminfo(ci) for ci in comminfos], dtype=bool)
+        mult = np.array([float(ci.p.mult) for ci in comminfos])
+        scalar_idx = np.flatnonzero(~plain).tolist()
+        return (len(order), self._comminfo_key(), ids, mult, scalar_idx)
+
+    def _comminfo_key(self):
+        """Changes whenever a scheme is set, added or replaced (even in the dict directly)."""
+        return (self._comminfo_version, tuple(map(id, self.comminfo.values())))
 
     def get_orders_open(self, safe=False):
         return [o for o in self.pending]
 
     def get_notification(self):
-        try:
-            return self.notifs.popleft()
-        except IndexError:
+        """The oldest undelivered notification (an order as it was, or a trade)."""
+        event = self.bus.pop()
+        if event is None:
             return None
+        return event.order if isinstance(event, OrderEvent) else getattr(event, "trade", event)
 
     def notify(self, order):
         # A notification carries the status at the moment it was raised: the strategy
         # sees Submitted then Accepted, not Accepted twice, even though the live order
         # object has already moved on; ``executed`` is frozen with it.
-        clone = copy.copy(order)
-        clone.executed = copy.copy(order.executed)
-        self.notifs.append(clone)
+        clone = order._snapshot()
+        security = getattr(order.data, "security", None)
+        ex = order.executed
+        self.bus.publish(OrderEvent(self._now, 0, order.ref, security.id if security is not None else None,
+                                    order.status, ex.size, ex.price, ex.comm, "", clone))
 
     # -- order entry -------------------------------------------------------------------------
     def buy(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None,
@@ -199,7 +401,7 @@ class BackBroker(BrokerBase):
         return self.submit(order, check=_checksubmit)
 
     def submit(self, order, check=True):
-        """Submitted now; accepted, as a batch, when the next bar arrives.
+        """Submitted now; accepted, as a batch, at phase 5 of the next slice.
 
         Observed on the oracle: the notifications of a bar arrive as all the Submitted,
         then all the Accepted, then the fills -- acceptance is a broker step at the next
@@ -207,6 +409,7 @@ class BackBroker(BrokerBase):
         against the cash at the current close and goes straight to ``Margin`` when it
         cannot be afforded, without ever being Accepted.
         """
+        self._security(order.data)
         order.comminfo = self.getcommissioninfo(order.data)
         order.submit(self)
         self.orders.append(order)
@@ -214,36 +417,9 @@ class BackBroker(BrokerBase):
         order._check = check
         # Cheat-on-close changes nothing here: observed on the oracle, the batch is still
         # accepted and notified when the next bar arrives; only the fill price of a market
-        # order becomes the close of the bar it was placed on (see ``next``).
+        # order becomes the close of the bar it was placed on (see the fill model).
         self.submitted.append(order)
         return order
-
-    def _cash_delta(self, order, price, pos):
-        """Cash flow of filling ``order`` at ``price`` against position ``pos``
-        (negative when cash goes out), commission included."""
-        comminfo = order.comminfo
-        size = order.size
-        comm = comminfo.getcommission(size, price)
-        if comminfo.stocklike:
-            return -size * price - comm
-        opening = (pos.size == 0) or ((pos.size > 0) == (size > 0))
-        if opening:
-            return -comminfo.getoperationcost(size, price) - comm
-        return -comm
-
-    def _affordable(self, order, price, cash=None, pos=None):
-        """Can ``cash`` cover the order at ``price``, commission included? Closing or
-        reducing a position never fails; stock-like sells never fail."""
-        cash = self.cash if cash is None else cash
-        pos = self.positions[order.data] if pos is None else pos
-        comminfo = order.comminfo
-        size = order.size
-        opening = (pos.size == 0) or ((pos.size > 0) == (size > 0))
-        if not opening:
-            return True
-        if comminfo.stocklike and not order.isbuy():
-            return True
-        return cash + self._cash_delta(order, price, pos) >= 0
 
     def cancel(self, order, bracket=False):
         if order in self.submitted:
@@ -258,75 +434,131 @@ class BackBroker(BrokerBase):
             return True
         return False
 
-    # -- execution ---------------------------------------------------------------------------
-    def next(self, upcoming):
-        """Accept the submitted orders, then execute against the bars about to arrive.
+    # -- the slice: phases 3 to 8 --------------------------------------------------------------
+    def on_slice(self, s: TimeSlice) -> None:
+        self.set_time(s)
+        self.corporate_actions(s)
+        self.accruals(s)
+        self.acceptance(s)
+        self.fills(s)
+        self.transfers(s)
+        self.mark(s)
 
-        ``upcoming`` maps each feed that has a bar at this clock tick to that bar's
-        ``(open, high, low, close, dtnum)``; an order on a feed with no bar waits.
+    def set_time(self, s: TimeSlice) -> None:
+        """Phase 0, broker side: the time events and fees are stamped with."""
+        self._now = s.time
+        self._dtnum = s.dtnum
+
+    def next(self, upcoming=None):
+        """Compat entry: phases 5 to 8 against the bars the feeds have just moved to."""
+        self.acceptance(None)
+        self.fills(None)
+        self.transfers(None)
+        self.mark(None)
+
+    # phase 3
+    def corporate_actions(self, s: TimeSlice | None) -> None:
+        """Splits, dividends, symbol changes and delistings effective now, applied to
+        holdings and open orders before any fill (spec/05 § 10, Q2); none with the
+        oracle's data."""
+        if s is None or not s.actions:
+            return
+        securities = self.securities
+        for action in sorted(s.actions, key=lambda a: (a.security, a.rank)):
+            securities[action.security].models.corporate_actions.apply(action, self)
+            self.bus.publish(CorporateActionEvent(self._now, 0, action))
+        self._mark_cache = None
+
+    # phase 4
+    def accruals(self, s: TimeSlice | None) -> None:
+        """Settlement scan, borrow fees on shorts, margin interest; skipped entirely while
+        every security has the no-op oracle models."""
+        if not self._accruals or s is None:
+            return
+        now = s.time
+        seen = set()
+        for security in self.securities:
+            m = security.models.settlement
+            if id(m) not in seen:
+                seen.add(id(m))
+                self.cashbook.register_unsettled(m.unsettled)
+                m.scan(now, self.cashbook)
+        self._borrow_fees(s)
+        seen.clear()
+        for security in self.securities:
+            m = security.models.margin_interest
+            if id(m) not in seen:
+                seen.add(id(m))
+                charged = m.accrue(self.cashbook, self.portfolio, now)
+                if charged:
+                    self.cashbook.add(self.cashbook.account_currency, -charged)
+        self._prev_accrual = now
+
+    def _borrow_fees(self, s: TimeSlice) -> None:
+        prev = self._prev_accrual
+        if prev is None or self.market is None:
+            return
+        years = float(s.time - prev) / (365.0 * 86_400e9)
+        pf = self.portfolio
+        groups: dict[int, tuple] = {}
+        for security in self.securities:
+            m = security.models.shortable
+            if getattr(m, "noop_fees", False):
+                continue
+            groups.setdefault(id(m), (m, []))[1].append(security.id)
+        for m, sids in groups.values():
+            ids = np.array(sids, dtype=np.int64)
+            short = pf.quantity[ids] < 0
+            if not short.any():
+                continue
+            ids = ids[short]
+            if hasattr(m, "fee_rates"):
+                rates = np.asarray(m.fee_rates(ids, s.time), dtype=np.float64)
+            else:
+                rates = np.array([m.fee_rate(self.securities[i].symbol, s.time) for i in ids])
+            price = self.market.gather("close", ids)
+            fees = -pf.quantity[ids] * price * pf.multiplier[ids] * rates * years
+            for sid, fee in zip(ids.tolist(), fees.tolist()):
+                if fee:
+                    self.cashbook.add(self.securities[sid].properties.quote_currency, -fee)
+                    pf.total_borrow_fees[sid] += fee
+
+    # phase 5
+    def acceptance(self, s: TimeSlice | None) -> None:
+        """The orders submitted during the previous slice, checked as one batch in
+        submission order by each security's buying-power model.
 
         Observed on the oracle: the submitted orders of a bar are checked as a batch, in
         submission order, against a *running* cash -- a sell earlier in the batch funds a
         buy later in it -- and each is Accepted or Margin before any fill happens. The
         running cash takes the cash flow of **every** order, refused ones included: an
         order is Accepted when the running cash is still non-negative after it, Margin
-        otherwise. So the deficit of a refused buy weighs on the orders after it, and a
-        sell -- even one reducing a long -- is refused while the running cash stays
-        below zero after its proceeds (``a_new_anomaly…``, 2020-05-28: 48 orders, the
-        deficit-carrying rule is the only one that reproduces the 20 refusals).
+        otherwise (``a_new_anomaly…``, 2020-05-28: 48 orders, 20 refusals).
         """
-        cash = self.cash
-        pseudo = {}
-        while self.submitted:
-            order = self.submitted.popleft()
-            data = order.data
+        submitted = self.submitted
+        if not submitted:
+            return
+        state = BatchState(self.cash, {}, self._now)
+        pending = self.pending
+        while submitted:
+            order = submitted.popleft()
+            security = order.data.security
             # The pre-check prices the order at what was known when it was placed: the
             # close of the submission bar for a market order, the limit or stop price
             # otherwise -- not at the fill price of the bar that just arrived.
-            price = self._check_price(order, data)
-            pos = pseudo.get(data)
-            if pos is None:
-                pos = pseudo[data] = self.positions[data].clone()
-            if price is not None:
-                cash += self._cash_delta(order, price, pos)
-                pos.update(order.size, price)
-            if order._check and self.p.checksubmit and price is not None and cash < 0:
+            check = security.models.buying_power.check_order(security, order, self._check_price(order, order.data),
+                                                             state)
+            state.running_cash -= check.cash_consumed
+            if not check.accepted:
                 order.margin()
                 self.notify(order)
                 continue
             order.accept(self)
             self.notify(order)
-            self.pending.append(order)
-        remaining = collections.deque()
-        while self.pending:
-            order = self.pending.popleft()
-            data = order.data
-            bar = upcoming.get(data)
-            if bar is None:
-                remaining.append(order)
-                continue
-            if order.valid is not None and bar[4] > order.valid:
-                order.expire()
-                self.notify(order)
-                continue
-            if self._coc and order.exectype == Order.Market and len(data) >= 2:
-                # cheat-on-close (observed): the market order fills at the close of the bar
-                # it was placed on, everything else -- batch acceptance, notification at
-                # the next bar, the pre-check at that same close -- unchanged
-                price = self._slip(data.close[-1], order, True)
-            else:
-                price = self._fill_price(order, bar)
-            if price is None:
-                remaining.append(order)
-                continue
-            self._try_exec(order, price, bar[4])
-        self.pending = remaining
-        if self._cash_addition:
-            self.cash += self._cash_addition
-            self._cash_addition = 0.0
-        self._value = self._mark_value()
+            pending.append(order)
 
-    def _check_price(self, order, data):
+    @staticmethod
+    def _check_price(order, data):
         et = order.exectype
         if et in (Order.Limit, Order.StopLimit) and order.pricelimit is not None:
             return order.pricelimit if et == Order.StopLimit else order.price
@@ -341,106 +573,123 @@ class BackBroker(BrokerBase):
             return data.close[0]
         return None
 
-    def _slip(self, price, order, is_open):
-        if self._slip_perc:
-            adj = price * self._slip_perc
-        elif self._slip_fixed:
-            adj = self._slip_fixed
-        else:
-            return price
-        if is_open and not self.p.slip_open:
-            return price
-        return price + adj if order.isbuy() else price - adj
+    # phase 6
+    def fills(self, s: TimeSlice | None) -> None:
+        """Each accepted, still-open order whose feed has a bar now: the fill model
+        proposes, the buying-power model re-checks at the fill price, the fee model prices,
+        the settlement model moves the cash."""
+        pending = self.pending
+        if not pending:
+            return
+        has_bar = self.market.has_bar if (s is None and self.market is not None) else (
+            s.has_bar if s is not None else None)
+        remaining = collections.deque()
+        while pending:
+            order = pending.popleft()
+            data = order.data
+            security = data.security
+            if has_bar is not None and (security.id >= len(has_bar) or not has_bar[security.id]):
+                remaining.append(order)
+                continue
+            models = security.models
+            fill_model = models.fill
+            bar = Bar(self._dtnum, data.open[0], data.high[0], data.low[0], data.close[0], data.volume[0])
+            if fill_model.expired(order, bar):
+                order.expire()
+                self.notify(order)
+                continue
+            placed = None
+            if getattr(fill_model, "needs_placed_bar", True) and len(data) >= 2:
+                placed = Bar(data.datetime[-1], data.open[-1], data.high[-1], data.low[-1], data.close[-1],
+                             data.volume[-1])
+            proposal = fill_model.fill(FillParameters(security, order, bar, placed, self._now, models.slippage))
+            if proposal is None:
+                remaining.append(order)
+                continue
+            self._execute(security, order, proposal, self._dtnum)
+        self.pending = remaining
 
-    def _fill_price(self, order, bar):
-        o, h, lo, c = bar[0], bar[1], bar[2], bar[3]
-        et = order.exectype
-        if et == Order.Market:
-            return self._slip(o, order, True)
-        if et == Order.Close:
-            return c
-        if et == Order.Limit:
-            lim = order.price
-            if order.isbuy():
-                if o <= lim:
-                    return o
-                return lim if lo <= lim else None
-            if o >= lim:
-                return o
-            return lim if h >= lim else None
-        if et == Order.Stop:
-            stp = order.price
-            if order.isbuy():
-                if o >= stp:
-                    return self._slip(o, order, True)
-                return self._slip(stp, order, False) if h >= stp else None
-            if o <= stp:
-                return self._slip(o, order, True)
-            return self._slip(stp, order, False) if lo <= stp else None
-        if et == Order.StopLimit:
-            stp, lim = order.price, order.pricelimit
-            if not order.triggered:
-                hit = (h >= stp) if order.isbuy() else (lo <= stp)
-                if not hit:
-                    return None
-                order.triggered = True
-            if order.isbuy():
-                return lim if lo <= lim else None
-            return lim if h >= lim else None
-        raise NotImplementedError(f"execution type {order.getordername()} is not supported")
-
-    def _try_exec(self, order, price, dt=None):
+    def _execute(self, security, order, proposal, dt):
         data = order.data
         comminfo = order.comminfo
-        size = order.size
+        models = security.models
+        size, price = proposal.quantity, proposal.price
         pos = self.positions[data]
-        comm = comminfo.getcommission(size, price)
-        if not self._affordable(order, price):
+        now = self._now
+        comm = models.fee.get_order_fee(FeeParameters(security, order, size, price, now)).amount
+        allowed = models.buying_power.check_fill(security, order, proposal, self.cash, now)
+        if allowed is None:
             order.margin()
             self.notify(order)
             return
-        if dt is None:
-            dt = data.datetime[0]
-        reversing = pos.size and ((pos.size > 0) != (size > 0)) and abs(size) > abs(pos.size)
-        if reversing and comminfo.stocklike:
-            # Observed on the oracle (breaking_bad_trends, 1993-04-02: short 1 998, buy 3 947):
-            # the closing part of a reversing order always fills; the opening part fills
-            # only if the cash left after closing covers it, otherwise the order ends
-            # Partial (closing part executed) then Margin, the opening part untouched.
-            closed = -pos.size
-            opened = size - closed
-            comm_closed = comminfo.getcommission(closed, price)
-            comm_opened = comminfo.getcommission(opened, price)
-            cash_after_close = self.cash - closed * price - comm_closed
-            if cash_after_close - opened * price - comm_opened < 0:
-                oldprice = pos.price
-                newsize, _newprice, _o, c = pos.update(closed, price)
-                pnl = comminfo.profitandloss(-c, oldprice, price)
-                self.cash -= closed * price
-                self.cash -= comm_closed
-                comm_final = comminfo.confirmexec(closed, price)
-                order.execute(dt, closed, price, c, c * price, comm_final, 0.0, 0.0, 0.0, 0.0, pnl)
-                order.partial()
-                self.notify(order)
-                order.margin()
-                self.notify(order)
-                self._update_trade(order, data, closed, price, 0.0, c, pnl, comm_final, dt, newsize)
-                return
+        settle = models.settlement.apply_funds
+        cashbook = self.cashbook
+        ccy = cashbook.account_currency
+        if allowed.quantity != size:
+            # the closing part of a reversal: filled, then the rest refused (Partial, Margin)
+            closed = allowed.quantity
+            comm_closed = models.fee.get_order_fee(FeeParameters(security, order, closed, price, now)).amount
+            oldprice = pos.price
+            newsize, _newprice, _o, c = pos.update(closed, price)
+            pnl = comminfo.profitandloss(-c, oldprice, price)
+            settle(security, CashAmount(-(closed * price), ccy), now, cashbook)
+            cashbook.add(ccy, -comm_closed)
+            comm_final = self._confirm_fee(models.fee, security, order, closed, price)
+            order.execute(dt, closed, price, c, c * price, comm_final, 0.0, 0.0, 0.0, 0.0, pnl)
+            self._account(security, comm_final, pnl)
+            order.partial()
+            self.notify(order)
+            order.margin()
+            self.notify(order)
+            self._update_trade(order, data, closed, price, 0.0, c, pnl, comm_final, dt, newsize)
+            return
         oldprice = pos.price
         newsize, _newprice, opened, closed = pos.update(size, price)
         pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0
         # cash flow: stock-like pays/receives the traded value; futures-like only P&L
         if comminfo.stocklike:
-            self.cash -= size * price
+            settle(security, CashAmount(-(size * price), ccy), now, cashbook)
         else:
-            self.cash += pnl
-        self.cash -= comm
-        comm_final = comminfo.confirmexec(size, price)
+            settle(security, CashAmount(pnl, ccy), now, cashbook)
+        cashbook.add(ccy, -comm)
+        comm_final = self._confirm_fee(models.fee, security, order, size, price)
         order.execute(dt, size, price, closed, closed * price, comm_final if closed else 0.0,
                       opened, opened * price, comm_final if not closed else 0.0, 0.0, pnl)
+        self._account(security, comm_final, pnl)
         order.completed()
         self.notify(order)
         self._update_trade(order, data, size, price, opened, closed, pnl, comm_final, dt, newsize)
+
+    @staticmethod
+    def _confirm_fee(fee_model, security, order, size, price):
+        confirm = getattr(fee_model, "confirm_order_fee", None) or fee_model.get_order_fee
+        return confirm(FeeParameters(security, order, size, price, 0)).amount
+
+    def _account(self, security, fee, pnl):
+        pf = self.portfolio
+        sid = security.id
+        pf.total_fees[sid] += fee
+        if pnl:
+            pf.realized_pnl[sid] += pnl
+
+    # phase 7
+    def transfers(self, s: TimeSlice | None) -> None:
+        """Queued ``add_cash`` requests land (summed in request order, then added once)."""
+        if self._cash_addition:
+            self.cash += self._cash_addition
+            self._cash_addition = 0.0
+
+    # phase 8
+    def mark(self, s: TimeSlice | None) -> None:
+        self._value = self._mark_value()
+
+    # phase 9
+    def margin_call(self, s: TimeSlice | None) -> None:
+        """The margin-call model may place liquidation orders, handled from phase 5 of the
+        next slice; there is none by default (the oracle never calls)."""
+        model = self.margin_call_model
+        if model is not None:
+            model.check(self, s)
 
     def _update_trade(self, order, data, size, price, opened, closed, pnl, comm, dt, newsize):
         if opened and closed:
@@ -456,4 +705,9 @@ class BackBroker(BrokerBase):
             trade = Trade(data=data, tradeid=order.tradeid)
             self.trades[data] = trade
         trade.update(order, size, price, opened, closed, pnl, comm, dt, newsize)
-        self.notifs.append(trade)
+        security = getattr(data, "security", None)
+        self.bus.publish(TradeEvent(self._now, 0, security.id if security is not None else None, trade,
+                                    order.owner))
+
+
+SimulatedBroker = BackBroker

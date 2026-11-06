@@ -492,6 +492,35 @@ def build(bt):
                 self.extra["first_next"] = len(self)
                 self.extra["x"] = float(self.x[0])
 
+    class NotifySequence(Recorder):
+        """Two fills on one bar, and an order placed from inside ``notify_order``: are the
+        trade notifications grouped after the order ones, and when is an order placed
+        during a notification first notified?"""
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            n = len(self)
+            if order.status == order.Completed and n == 38 and order.data._name == "S0":
+                self.buy(data=self.datas[2], size=3)
+
+        def notify_trade(self, trade):
+            self.statuses.append((0, f"trade {trade.data._name} {'closed' if trade.isclosed else 'open'}",
+                                  round(self.broker.getvalue(), 6), self.datas[0].datetime.date(0).isoformat()))
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            if n == 34:
+                self.buy(data=d0, size=10)
+                self.buy(data=d1, size=10)
+            if n == 37:
+                self.close(d0)
+                self.close(d1)
+            if n == 51:
+                self.sell(data=d0, size=5)
+                self.buy(data=d1, size=5)
+
     class Analyzers(Recorder):
         """``bt.analyzers`` (corpus ``performance_of_the_average_directional_index...``):
         long and short trades, wins and losses, a reversal, two trades left open."""
@@ -528,6 +557,7 @@ def build(bt):
         "minperiod_add": MinperiodAdd,
         "minperiod_chain": MinperiodChain,
         "analyzers": Analyzers,
+        "notify_sequence": NotifySequence,
         "foreign_feed": ForeignFeed,
         "batch_funding": BatchFunding,
         "deficit_carry": DeficitCarry,
