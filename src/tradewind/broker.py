@@ -422,11 +422,10 @@ class BackBroker(BrokerBase):
         return order
 
     def cancel(self, order, bracket=False):
-        if order in self.submitted:
-            self.submitted.remove(order)
-            order.cancel()
-            self.notify(order)
-            return True
+        # Observed on the oracle (probe ``cancel_timing``): an order still waiting for its
+        # batch acceptance cannot be cancelled -- in the ``next`` that placed it, or inside
+        # the ``notify_order`` that placed it -- and goes on to be accepted and filled as if
+        # nothing had been asked. Only an accepted order not yet filled is cancelled.
         if order in self.pending:
             self.pending.remove(order)
             order.cancel()

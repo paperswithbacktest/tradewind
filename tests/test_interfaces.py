@@ -704,3 +704,25 @@ def test_sequential_accumulate_is_the_python_loop():
         for v in x.tolist():
             total += v
         assert float(np.add.accumulate(x)[-1]) == total
+
+
+# -- cancel (probe ``cancel_timing``) ---------------------------------------------------------
+
+
+def test_cancel_reaches_only_accepted_orders():
+    class Cancel(Plan):
+        def next(self):
+            super().next()
+            if len(self) == 3:
+                self.first = self.buy(data=self.datas[0], size=5)
+                self.refused = self.cancel(self.first)          # still Submitted: no effect
+            if len(self) == 5:
+                self.second = self.buy(data=self.datas[1], size=5, exectype=tw.Order.Limit, price=1.0)
+            if len(self) == 6:
+                self.cancelled = self.cancel(self.second)       # Accepted: cancelled
+
+    cerebro = cerebro_with(frames(), Cancel)
+    strat = cerebro.run()[0]
+    assert strat.refused is False and strat.first.status == Order.Completed
+    assert strat.cancelled is True and strat.second.status == Order.Canceled
+    assert ("order", "S1", "Canceled") in strat.events
