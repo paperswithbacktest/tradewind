@@ -223,7 +223,8 @@ class CrossOver(Indicator):
         out[1:][dn] = -1.0
         out[np.isnan(diff)] = np.nan
         out[1:][np.isnan(diff[:-1])] = np.nan
-        self.lines.crossover.array[:] = out
+        # the first line, whatever a subclass names it (CrossUp reads it back)
+        self.lines[0].array[:] = out
 
 
 class CrossUp(CrossOver):
@@ -231,7 +232,7 @@ class CrossUp(CrossOver):
 
     def once(self, start, end):
         super().once(start, end)
-        arr = self.lines.crossover.array if hasattr(self.lines, "crossover") else self.lines[0].array
+        arr = self.lines[0].array
         self.lines[0].array[:] = np.where(arr > 0, 1.0, np.where(np.isnan(arr), np.nan, 0.0))
 
 

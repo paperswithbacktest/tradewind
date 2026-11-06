@@ -27,6 +27,14 @@ class OrderData:
         self.remsize = remsize
         self.exbits = []
 
+    def _copy(self):
+        """A shallow copy (what ``copy.copy`` gives, without its generic machinery)."""
+        new = OrderData.__new__(OrderData)
+        new.comm, new.dt, new.exbits, new.margin, new.pnl = self.comm, self.dt, self.exbits, self.margin, self.pnl
+        new.price, new.pricelimit, new.remsize, new.size, new.value = (self.price, self.pricelimit, self.remsize,
+                                                                      self.size, self.value)
+        return new
+
     def add(self, dt, size, price, closed=0, opened=0, value=0.0, comm=0.0, pnl=0.0):
         self.exbits.append(OrderExecutionBit(dt, size, price, closed, opened, value, comm, pnl))
         oldsize = self.size
@@ -101,6 +109,14 @@ class Order:
         side = "Buy" if self.isbuy() else "Sell"
         name = getattr(self.data, "_name", "?")
         return f"Order(ref={self.ref}, {side}, {name}, size={self.size}, {self.getordername()}, {self.getstatusname()})"
+
+    def _snapshot(self):
+        """The order as it is now, for a notification: a shallow copy whose ``executed`` is
+        frozen too, so a later fill does not show through (the clone semantics)."""
+        clone = object.__new__(type(self))
+        clone.__dict__.update(self.__dict__)
+        clone.executed = self.executed._copy()
+        return clone
 
     # -- transitions (broker only) ------------------------------------------------
     def _set(self, status):

@@ -7,7 +7,7 @@ black-box tests, and no third-party engine source is ever consulted.
 
 from . import analyzers, indicators
 from .analyzer import Analyzer, TimeReturn
-from .broker import BackBroker, BrokerBase
+from .broker import BackBroker, BrokerBase, SimulatedBroker
 from .cerebro import Cerebro
 from .comminfo import CommInfoBase, CommissionInfo
 from .dateutils import date2num, num2date, num2dt
@@ -15,6 +15,7 @@ from .feeds import DataBase, PandasData, TimeFrame, feeds
 from .indicator import Indicator
 from .lineops import If, LineIterator, LineRoot, LinesOperation
 from .lines import LineBuffer, Lines
+from .models import ModelSet
 from .order import BuyOrder, Order, SellOrder
 from .position import Position
 from .strategy import Strategy
@@ -41,10 +42,12 @@ __all__ = [
     "LineRoot",
     "Lines",
     "LinesOperation",
+    "ModelSet",
     "Order",
     "PandasData",
     "Position",
     "SellOrder",
+    "SimulatedBroker",
     "Strategy",
     "TimeFrame",
     "TimeReturn",

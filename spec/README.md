@@ -11,4 +11,4 @@ concept it borrows where backtrader has none, and the tests that prove it.
 | `02-semantics.md` | event order, fills, sizing, notifications: kept vs corrected (to be validated) |
 | `03-oracle.md` | the equivalence oracle: reference NAVs, tolerances, CI subset |
 | `04-design.md` | the modules of the first engine and their public names |
-| `05-interfaces.md` | chantier 2: Security, Broker, pluggable reality models, clock, event bus, feeds; event order in a bar (validated 2026-11-03) |
+| `05-interfaces.md` | chantier 2: Security, Broker, pluggable reality models, clock, event bus, feeds; event order in a bar (validated 2026-11-03, implemented 2026-11-06, § 11) |

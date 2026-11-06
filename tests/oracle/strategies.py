@@ -492,6 +492,67 @@ def build(bt):
                 self.extra["first_next"] = len(self)
                 self.extra["x"] = float(self.x[0])
 
+    class NotifySequence(Recorder):
+        """Two fills on one bar, and an order placed from inside ``notify_order``: are the
+        trade notifications grouped after the order ones, and when is an order placed
+        during a notification first notified?"""
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            n = len(self)
+            if order.status == order.Completed and n == 38 and order.data._name == "S0":
+                self.buy(data=self.datas[2], size=3)
+
+        def notify_trade(self, trade):
+            self.statuses.append((0, f"trade {trade.data._name} {'closed' if trade.isclosed else 'open'}",
+                                  round(self.broker.getvalue(), 6), self.datas[0].datetime.date(0).isoformat()))
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            if n == 34:
+                self.buy(data=d0, size=10)
+                self.buy(data=d1, size=10)
+            if n == 37:
+                self.close(d0)
+                self.close(d1)
+            if n == 51:
+                self.sell(data=d0, size=5)
+                self.buy(data=d1, size=5)
+
+    class CancelTiming(Recorder):
+        """``cancel()`` at four moments: in the ``next`` that placed the order (a far limit,
+        then a market order), on the next bar once it is Accepted, and on an order placed
+        inside ``notify_order``. Which ones are cancelled, and which still fill?"""
+
+        def __init__(self):
+            super().__init__()
+            self.kept = {}
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            if order.status == order.Completed and order.data._name == "S1" and len(self) == 44:
+                self.kept["d"] = self.buy(data=self.datas[2], size=1, exectype=bt.Order.Limit,
+                                          price=self.datas[2].close[0] * 0.5)
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0 = self.datas[0]
+            if n == 33:
+                self.cancel(self.buy(data=d0, size=1, exectype=bt.Order.Limit, price=d0.close[0] * 0.5))
+            if n == 36:
+                self.kept["b"] = self.buy(data=d0, size=1, exectype=bt.Order.Limit, price=d0.close[0] * 0.5)
+            if n == 37:
+                self.cancel(self.kept["b"])
+            if n == 40:
+                self.cancel(self.buy(data=d0, size=2))
+            if n == 43:
+                self.buy(data=self.datas[1], size=1)
+            if n == 46:
+                self.cancel(self.kept["d"])
+
     class Analyzers(Recorder):
         """``bt.analyzers`` (corpus ``performance_of_the_average_directional_index...``):
         long and short trades, wins and losses, a reversal, two trades left open."""
@@ -528,6 +589,8 @@ def build(bt):
         "minperiod_add": MinperiodAdd,
         "minperiod_chain": MinperiodChain,
         "analyzers": Analyzers,
+        "notify_sequence": NotifySequence,
+        "cancel_timing": CancelTiming,
         "foreign_feed": ForeignFeed,
         "batch_funding": BatchFunding,
         "deficit_carry": DeficitCarry,

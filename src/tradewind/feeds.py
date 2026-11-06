@@ -50,6 +50,7 @@ class DataBase(ParamsBase):
         self._env = None
         self._arrays: dict[str, np.ndarray] = {}
         self._dtnum: np.ndarray | None = None
+        self.security = None   # set by the broker: the engine's record of this feed (read-only)
 
     # -- to be provided by subclasses -------------------------------------------------
     def _load_arrays(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -121,6 +122,21 @@ class DataBase(ParamsBase):
 
     def date2num(self, dt):
         return date2num(dt)
+
+    # -- DataFeed (spec/05 § 6.4) -------------------------------------------------------------
+    def load(self):
+        """The whole history as a ``FeedBlock`` (int64 ns timestamps, float64 columns)."""
+        from .market import feed_block
+
+        if not self._started:
+            self._start()
+        return feed_block(self._dtnum, self._arrays)
+
+    def is_live(self) -> bool:
+        return False
+
+    def poll(self, until):
+        return None
 
     def haslivedata(self):
         return False

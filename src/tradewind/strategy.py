@@ -54,6 +54,7 @@ class Strategy(ParamsBase):
         self._minperiod = 1
         self._indicators = []
         self._nextstarted = False
+        self._listed = False
         self.analyzers = _Analyzers()
         self.stats = []
 
@@ -199,18 +200,21 @@ class Strategy(ParamsBase):
         data = self.data if data is None else self._resolve(data)
         price = data.close[0] if price is None else price
         possize = self.getposition(data).size
-        comminfo = self.broker.getcommissioninfo(data)
         if not target and possize:
             return self.close(data=data, size=possize, **kwargs)
         # the position's value through the broker, as the oracle does (that read has a
         # side effect on pending cash additions -- see ``BackBroker.get_value``)
         value = self.broker.get_value(datas=[data]) if possize else 0.0
+        # the security's buying-power model turns the value gap into a size (the oracle's:
+        # the scheme's ``getsize`` on the gap, toward zero)
+        security = self.broker.register(data)
+        size = security.models.buying_power.quantity_for_target_value(security, target, value, price)
+        # the side is the gap's: a negative price (crude oil, April 2020) gives a negative
+        # size whose magnitude is still the order's, as in the oracle
         if target > value:
-            size = comminfo.getsize(price, target - value)
-            return self.buy(data=data, size=size, **kwargs) if size else None
+            return self.buy(data=data, size=abs(size), **kwargs) if size else None
         if target < value:
-            size = comminfo.getsize(price, value - target)
-            return self.sell(data=data, size=size, **kwargs) if size else None
+            return self.sell(data=data, size=abs(size), **kwargs) if size else None
         return None
 
     def order_target_percent(self, data=None, target=0.0, **kwargs):
@@ -249,7 +253,11 @@ class Strategy(ParamsBase):
         strategy in ``prenext`` for those 30 bars."""
         if len(self) < self._minperiod:
             return False
-        return all(len(d) > 0 for d in self.datas)
+        if self._listed:
+            return True
+        # a feed's length never shrinks during a run: once all have listed, they stay so
+        self._listed = all(len(d) > 0 for d in self.datas)
+        return self._listed
 
     def _step(self):
         """prenext / nextstart / next by the clock feed's length against the min period."""

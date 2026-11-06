@@ -46,6 +46,16 @@ only, a reversal, a commission, weekly bars, eleven `SharpeRatio` parameter sets
 | `SharpeRatio`: per-period returns (value at the period's last bar over the previous period's, the first over the starting cash); `convertrate` turns `riskfreerate` into `(1+rf)^(1/factor)-1` and `annualize` multiplies by `sqrt(factor)`, else returns are annualised and `annualize` is moot; factor 252/52/12/1; population deviation unless `stddev_sample`; `None` on a zero deviation. Its `get_analysis()` is a **plain `OrderedDict`** (`["sharperatio"]`, no attribute access) | kept | probe `analyzers` |
 | `broker.setcash()` moves the portfolio value at once, before the run too (an analyzer's `start` reads it) | kept | scratch probe; the first build returned the default 10 000 until the first bar |
 
+Observed on 2026-11-06 while the event bus of `05-interfaces.md` was built (probes
+`notify_sequence`, `cancel_timing`; the order and trade notifications of both engines
+compared, nothing else printed):
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| Within one bar the strategy receives **every order notification before any trade notification** (two fills: Completed, Completed, then trade, trade), not one fill's order then its trade | kept | probe `notify_sequence`; v0 interleaved them, the bus's (kind, sequence) drain matches the oracle |
+| An order placed **inside `notify_order`** is first notified at the **next** bar (Submitted, Accepted, Completed together), not during the delivery that placed it | kept | probe `notify_sequence`; v0 delivered its Submitted at once |
+| `cancel()` reaches only an **Accepted** order not yet filled. An order still waiting for its batch acceptance -- cancelled in the `next` that placed it, or placed and cancelled inside `notify_order` -- is accepted at the next bar and fills as if nothing had been asked; a cancelled Accepted order is notified `Canceled` at the next bar | kept, flagged | probe `cancel_timing` (four moments, a market order cancelled at once still executes). **A cancel that silently does nothing is a defect**: the corrected default (chantier 4) cancels a Submitted order at once |
+
 Seen and **not** reproduced yet: in `runonce` mode a `next`-only indicator whose input is
 another indicator reads `self.data[0]` as NaN on every bar (it reads the value with
 `runonce=False`). No corpus strategy is known to depend on it; to be probed before the

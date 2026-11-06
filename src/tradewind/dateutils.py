@@ -58,3 +58,12 @@ def stamps2num(index) -> np.ndarray:
     # Days since the proleptic ordinal epoch: ordinal(1970-01-01) == 719163.
     ns = idx.asi8.astype(np.float64)
     return 719163.0 + ns / (_SECONDS_PER_DAY * 1e9)
+
+
+def num2ns(num) -> np.ndarray:
+    """float-day array -> int64 ns since the Unix epoch (UTC), seconds rounded to the
+    millisecond as ``num2date`` does; the engine's ``Timestamp``."""
+    num = np.asarray(num, dtype=np.float64)
+    day = np.floor(num)
+    ms = np.round((num - day) * (_SECONDS_PER_DAY * 1000.0)).astype(np.int64)
+    return (day.astype(np.int64) - 719163) * 86_400_000_000_000 + ms * 1_000_000
