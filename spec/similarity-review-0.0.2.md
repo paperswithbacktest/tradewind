@@ -225,6 +225,8 @@ python -I tools/similarity.py --ref /tmp/bt/src/backtrader $BASE --target src/tr
 python tools/similarity.py --self-test-control src/tradewind/broker.py
 ```
 
-Before the next release this should run in the release workflow, next to the oracle job (the
-reference installed in a throwaway environment, as the oracle is), failing on any new span of
-41 tokens or more that is not in an allow-list of the API ranges above.
+Since 2026-11-08 this runs as a gate in CI and in the release workflow, next to the oracle
+job (the reference installed in a throwaway environment, as the oracle is), failing on any
+span of 41 tokens or more, or AST statement of 40 nodes or more, that is not in the
+allow-list of the ranges above: `tools/similarity_gate.sh`, `spec/similarity-allowlist.json`
+and the procedure in `spec/similarity-allowlist.md`.

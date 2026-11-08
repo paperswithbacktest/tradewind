@@ -1,0 +1,304 @@
+{
+ "_comment": [
+  "Ranges of Tradewind that match the pinned reference and that a human has reviewed and accepted.",
+  "An entry is (file relative to src/tradewind, kind, digest); the digest is taken on Tradewind's own tokens, so a range may move inside its file but any edit makes it new.",
+  "Never add an entry without the procedure of spec/similarity-allowlist.md: human review, class, a line in CLEANROOM.md."
+ ],
+ "reference": {
+  "package": "backtrader",
+  "version": "1.9.78.123",
+  "sha256": "9a07a516b0de9155539a35c56e9404d8711dd7020b3d37b30495e83e1b9d5dfd"
+ },
+ "base": {
+  "python": "3.13",
+  "stdlib": [
+   "asyncio",
+   "email",
+   "logging",
+   "json",
+   "unittest",
+   "concurrent",
+   "http",
+   "collections",
+   "argparse.py",
+   "dataclasses.py",
+   "enum.py",
+   "functools.py",
+   "_pydecimal.py"
+  ]
+ },
+ "parameters": {
+  "k": 20,
+  "w": 5,
+  "min_tokens": 41,
+  "min_nodes": 40
+ },
+ "entries": [
+  {
+   "file": "cerebro.py",
+   "kind": "tokens",
+   "digest": "6e949fe8a1c8deb5",
+   "size": 139,
+   "lines_at_review": [
+    22,
+    46
+   ],
+   "class": "API",
+   "what": "Cerebro.params: the 19 documented parameters with their defaults",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 1"
+  },
+  {
+   "file": "cerebro.py",
+   "kind": "ast",
+   "digest": "9a2751aea478b4c3",
+   "size": 60,
+   "lines_at_review": [
+    23,
+    43
+   ],
+   "class": "API",
+   "what": "Cerebro.params (the same declaration, as one AST statement)",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 1"
+  },
+  {
+   "file": "broker.py",
+   "kind": "tokens",
+   "digest": "373fdd747d506fae",
+   "size": 80,
+   "lines_at_review": [
+    65,
+    71
+   ],
+   "class": "API",
+   "what": "setcommission(...) signature and one-to-one forwarding of its keywords to CommissionInfo",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 2"
+  },
+  {
+   "file": "analyzers.py",
+   "kind": "tokens",
+   "digest": "b488aa17b9df3648",
+   "size": 78,
+   "lines_at_review": [
+    218,
+    245
+   ],
+   "class": "API",
+   "what": "SharpeRatio.params: the 10 documented parameters",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 3"
+  },
+  {
+   "file": "comminfo.py",
+   "kind": "tokens",
+   "digest": "9f28ea2cbcfb1192",
+   "size": 75,
+   "lines_at_review": [
+    22,
+    38
+   ],
+   "class": "API",
+   "what": "COMM_PERC, COMM_FIXED and CommInfoBase.params (10 documented parameters)",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 4"
+  },
+  {
+   "file": "comminfo.py",
+   "kind": "tokens",
+   "digest": "eefeed1e9b7b2249",
+   "size": 74,
+   "lines_at_review": [
+    74,
+    82
+   ],
+   "class": "semantics",
+   "what": "getsize and the head of getoperationcost (documented commission scheme)",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 5"
+  },
+  {
+   "file": "feeds.py",
+   "kind": "tokens",
+   "digest": "32f99d17fd94d21d",
+   "size": 64,
+   "lines_at_review": [
+    151,
+    161
+   ],
+   "class": "API",
+   "what": "PandasData.params: column names, -1 = find the column by name",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 6"
+  },
+  {
+   "file": "feeds.py",
+   "kind": "tokens",
+   "digest": "4962a9d4335a7d45",
+   "size": 63,
+   "lines_at_review": [
+    33,
+    43
+   ],
+   "class": "API",
+   "what": "DataBase.params",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 7"
+  },
+  {
+   "file": "comminfo.py",
+   "kind": "tokens",
+   "digest": "5903d417355c1401",
+   "size": 60,
+   "lines_at_review": [
+    102,
+    111
+   ],
+   "class": "semantics",
+   "what": "cashadjust (futures-like only) and the head of _getcommission",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 8"
+  },
+  {
+   "file": "comminfo.py",
+   "kind": "tokens",
+   "digest": "3de4d5d106d6ab48",
+   "size": 58,
+   "lines_at_review": [
+    80,
+    88
+   ],
+   "class": "semantics",
+   "what": "getoperationcost / getvaluesize: abs(size) x margin or x price",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 9"
+  },
+  {
+   "file": "comminfo.py",
+   "kind": "tokens",
+   "digest": "16db2cc4e93c3ef7",
+   "size": 55,
+   "lines_at_review": [
+    86,
+    93
+   ],
+   "class": "semantics",
+   "what": "getvaluesize / head of getvalue",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 10"
+  },
+  {
+   "file": "strategy.py",
+   "kind": "tokens",
+   "digest": "0f58dba713f51174",
+   "size": 53,
+   "lines_at_review": [
+    234,
+    239
+   ],
+   "class": "semantics",
+   "what": "order_target_size: buy the gap if the target is above the position, sell it if below",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 11"
+  },
+  {
+   "file": "comminfo.py",
+   "kind": "tokens",
+   "digest": "e37185ff2e295c44",
+   "size": 46,
+   "lines_at_review": [
+    66,
+    74
+   ],
+   "class": "semantics",
+   "what": "get_margin: the documented automargin rule",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 12"
+  },
+  {
+   "file": "comminfo.py",
+   "kind": "tokens",
+   "digest": "92253bf5e4328bc3",
+   "size": 46,
+   "lines_at_review": [
+    99,
+    105
+   ],
+   "class": "semantics",
+   "what": "end of getvalue, profitandloss = size x (new - old) x mult",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 13"
+  },
+  {
+   "file": "broker.py",
+   "kind": "tokens",
+   "digest": "1de8731749678178",
+   "size": 45,
+   "lines_at_review": [
+    421,
+    423
+   ],
+   "class": "API",
+   "what": "BackBroker.buy(...) signature (documented order keywords) building a BuyOrder",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 14"
+  },
+  {
+   "file": "broker.py",
+   "kind": "tokens",
+   "digest": "3af76ca409ee16ac",
+   "size": 45,
+   "lines_at_review": [
+    428,
+    430
+   ],
+   "class": "API",
+   "what": "BackBroker.sell(...) signature building a SellOrder",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 15"
+  },
+  {
+   "file": "cerebro.py",
+   "kind": "tokens",
+   "digest": "89bef11f0a9f76d3",
+   "size": 44,
+   "lines_at_review": [
+    104,
+    107
+   ],
+   "class": "API + idiom",
+   "what": "addsizer / addsizer_by_idx: store (cls, args, kwargs)",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 16"
+  },
+  {
+   "file": "broker.py",
+   "kind": "tokens",
+   "digest": "8e9080819b77a7cc",
+   "size": 41,
+   "lines_at_review": [
+    133,
+    140
+   ],
+   "class": "API",
+   "what": "tail of BackBroker.params (slip_*, shortcash, fundstartval, fundmode)",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 17"
+  },
+  {
+   "file": "securities.py",
+   "kind": "tokens",
+   "digest": "76032ceda1e5361f",
+   "size": 41,
+   "lines_at_review": [
+    157,
+    157
+   ],
+   "class": "API + idiom",
+   "what": "Bar(feed.datetime[0], ..., feed.volume[0]): the current bar through documented [0] indexing",
+   "accepted": "2026-11-08",
+   "review": "spec/similarity-review-0.0.2.md § 4 row 18"
+  }
+ ]
+}

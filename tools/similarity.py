@@ -31,6 +31,10 @@ Usage::
 
     python tools/similarity.py --self-test-control src/tradewind/broker.py
 
+    # release gate: fails on any range of --min-tokens or more missing from the allow-list
+    python -I tools/similarity.py --ref ... --base ... --target src/tradewind \\
+        --allowlist spec/similarity-allowlist.json
+
 Run with ``python -I`` when the reference is a downloaded package, so that nothing in it can
 shadow a module this tool imports. Calibrate ``--min-tokens`` and ``--min-nodes`` against an
 unrelated reference (the standard library) and a renamed copy (``--self-test-control``)
@@ -57,6 +61,7 @@ _FSTRING_START = getattr(tokenize, "FSTRING_START", None)
 _FSTRING_END = getattr(tokenize, "FSTRING_END", None)
 _STRUCT = {tokenize.NEWLINE: "<nl>", tokenize.INDENT: "<in>", tokenize.DEDENT: "<de>"}
 _KEYWORDS = set(keyword.kwlist)
+_STRUCT_NAMES = set(_STRUCT.values())
 _IDENT_FIELDS = {"id", "arg", "attr", "name", "module", "asname"}
 
 
@@ -70,13 +75,19 @@ def _h(text: str) -> int:
 def normalised_tokens(source: str) -> list[tuple[str, int]]:
     """``(normalised token, source line)`` pairs of a module. Raises on untokenisable input;
     the caller decides what to say about it."""
+    return [(t, line) for t, line, _ in _tokens(source, keep_text=False)]
+
+
+def _tokens(source: str, keep_text: bool) -> list[tuple[str, int, str]]:
+    """``(normalised token, source line, original text)``; the original text is kept only on
+    the target side (``keep_text``), where it fingerprints a span for the allow-list."""
     raw = [t for t in tokenize.generate_tokens(io.StringIO(source).readline) if t.type not in _SKIP]
-    out: list[tuple[str, int]] = []
+    out: list[tuple[str, int, str]] = []
     i, n = 0, len(raw)
     while i < n:
         tok = raw[i]
         if _FSTRING_START is not None and tok.type == _FSTRING_START:
-            depth = 0
+            depth, first = 0, i
             while i < n:
                 if raw[i].type == _FSTRING_START:
                     depth += 1
@@ -85,9 +96,11 @@ def normalised_tokens(source: str) -> list[tuple[str, int]]:
                     if depth == 0:
                         break
                 i += 1
-            out.append(("S", tok.start[0]))
+            text = "".join(t.string for t in raw[first : i + 1]) if keep_text else ""
+            out.append(("S", tok.start[0], text))
             i += 1
             continue
+        text = tok.string if keep_text else ""
         if tok.type == tokenize.STRING:
             prev = out[-1][0] if out else "<nl>"
             nxt = raw[i + 1].type if i + 1 < n else tokenize.NEWLINE
@@ -95,23 +108,32 @@ def normalised_tokens(source: str) -> list[tuple[str, int]]:
                 i += 2  # a bare string statement: a docstring, dropped with its NEWLINE
                 continue
             if out and out[-1][0] == "S":
-                i += 1  # implicit concatenation is one literal
+                if keep_text:  # implicit concatenation is one literal
+                    out[-1] = (out[-1][0], out[-1][1], out[-1][2] + " " + text)
+                i += 1
                 continue
-            out.append(("S", tok.start[0]))
+            out.append(("S", tok.start[0], text))
         elif tok.type == tokenize.NUMBER:
-            out.append(("N", tok.start[0]))
+            out.append(("N", tok.start[0], text))
         elif tok.type == tokenize.NAME:
-            out.append((tok.string if tok.string in _KEYWORDS else "V", tok.start[0]))
+            out.append((tok.string if tok.string in _KEYWORDS else "V", tok.start[0], text))
         elif tok.type in _STRUCT:
-            out.append((_STRUCT[tok.type], tok.start[0]))
+            out.append((_STRUCT[tok.type], tok.start[0], text))
         else:
-            out.append((tok.string, tok.start[0]))
+            out.append((tok.string, tok.start[0], text))
         i += 1
     return out
 
 
-def kgram_hashes(tokens: list[tuple[str, int]], k: int) -> list[int]:
-    words = [t for t, _ in tokens]
+def text_digest(parts: list[str]) -> str:
+    """Fingerprint of a **target** range for the allow-list: its exact tokens, names
+    included, whitespace, comments, line structure and line numbers excluded, so that the
+    entry survives a range moving inside its file but not an edit of the range itself."""
+    return hashlib.blake2b("\x1f".join(parts).encode(), digest_size=8).hexdigest()
+
+
+def kgram_hashes(tokens: list, k: int) -> list[int]:
+    words = [t[0] for t in tokens]
     return [_h("\x1f".join(words[i : i + k])) for i in range(len(words) - k + 1)]
 
 
@@ -173,6 +195,7 @@ class StmtUnit:
     last: int
     is_function: bool
     name: str  # target-side only; never filled for the reference
+    fingerprint: str = ""  # target-side only: the statement with its names, for the allow-list
     children: list[int] = field(default_factory=list)
 
 
@@ -197,6 +220,7 @@ def statement_units(source: str, keep_names: bool) -> list[StmtUnit]:
                 last=(node.end_lineno or node.lineno) if keep_names else 0,
                 is_function=is_fn,
                 name=(node.name if is_fn and keep_names else ""),
+                fingerprint=(text_digest([ast.dump(node)]) if keep_names else ""),
             )
         )
     return units
@@ -290,6 +314,7 @@ class Span:
     first: int
     last: int
     tokens: int
+    digest: str = ""
 
 
 @dataclass
@@ -303,6 +328,7 @@ class FileReport:
     ast_covered: int
     ast_matches: list[dict]
     function_matches: list[dict]
+    key: str = ""  # path relative to the target root: what the allow-list names
 
     @property
     def token_score(self) -> float:
@@ -317,7 +343,7 @@ def analyse_file(
     path: str, display: str, idx: ReferenceIndex, w: int, min_nodes: int
 ) -> FileReport:
     text = _read(path) or ""
-    toks = normalised_tokens(text)
+    toks = _tokens(text, keep_text=True)
     k = idx.k
     hashes = kgram_hashes(toks, k)
     present = [h in idx.kgrams for h in hashes]
@@ -333,7 +359,11 @@ def analyse_file(
         while j + 1 < len(present) and present[j + 1]:
             j += 1
         last_tok = j + k - 1
-        spans.append(Span(toks[s][1], toks[last_tok][1], last_tok - s + 1))
+        # NEWLINE / INDENT / DEDENT left out: a span may gain one at its edge when the code
+        # next to it changes (a function added above a class ends with a DEDENT), and they
+        # carry no text a reviewer reads
+        digest = text_digest([t[2] for t in toks[s : last_tok + 1] if t[0] not in _STRUCT_NAMES])
+        spans.append(Span(toks[s][1], toks[last_tok][1], last_tok - s + 1, digest))
         j += 1
 
     units = statement_units(text, keep_names=True)
@@ -355,7 +385,12 @@ def analyse_file(
         ast_nodes=module_nodes(text),
         ast_covered=covered,
         ast_matches=[
-            {"lines": [u.first, u.last], "nodes": u.nodes, "function": u.name or None}
+            {
+                "lines": [u.first, u.last],
+                "nodes": u.nodes,
+                "function": u.name or None,
+                "digest": u.fingerprint,
+            }
             for u in maximal
         ],
         function_matches=[
@@ -368,8 +403,11 @@ def analyse_file(
 
 def analyse(target: str, idx: ReferenceIndex, w: int, min_nodes: int) -> list[FileReport]:
     reports = []
+    root = target if os.path.isdir(target) else os.path.dirname(target)
     for path in _python_files(target):
-        reports.append(analyse_file(path, os.path.relpath(path), idx, w, min_nodes))
+        rep = analyse_file(path, os.path.relpath(path), idx, w, min_nodes)
+        rep.key = os.path.relpath(path, root).replace(os.sep, "/")
+        reports.append(rep)
     return reports
 
 
@@ -475,13 +513,93 @@ def report_json(reports: list[FileReport], idx: ReferenceIndex, args) -> dict:
                 "ast_nodes": r.ast_nodes,
                 "ast_covered": r.ast_covered,
                 "ast_score": round(r.ast_score, 4),
-                "spans": [[s.first, s.last, s.tokens] for s in r.spans],
+                "spans": [[s.first, s.last, s.tokens, s.digest] for s in r.spans],
                 "ast_matches": r.ast_matches,
                 "function_matches": r.function_matches,
             }
             for r in reports
         ],
     }
+
+
+# ------------------------------------------------------------------------ gate
+
+
+def findings(reports: list[FileReport], min_tokens: int) -> list[dict]:
+    """Every range a review must classify, as target-side facts only: the token spans of at
+    least ``min_tokens`` tokens and the maximal AST statements of at least ``--min-nodes``."""
+    out = []
+    for r in reports:
+        for s in r.spans:
+            if s.tokens >= min_tokens:
+                out.append(
+                    {"file": r.key, "kind": "tokens", "digest": s.digest, "size": s.tokens,
+                     "lines": [s.first, s.last], "where": r.path}
+                )
+        for m in r.ast_matches:
+            out.append(
+                {"file": r.key, "kind": "ast", "digest": m["digest"], "size": m["nodes"],
+                 "lines": list(m["lines"]), "where": r.path}
+            )
+    return out
+
+
+def gate(reports: list[FileReport], idx: ReferenceIndex, args) -> tuple[int, str]:
+    """Compare the ranges found with a versioned allow-list of ranges a human has reviewed.
+
+    An entry is ``(file relative to the target root, kind, digest)``: the digest is taken on
+    Tradewind's own tokens (:func:`text_digest`), so an accepted range may move inside its
+    file, while any edit of it, any growth (a span only grows when code next to it also
+    matches) or any new range fails the gate. Exit status 1 on a new range, on parameters
+    that differ from the allow-list's or on an empty reference (a vacuous pass)."""
+    with open(args.allowlist, encoding="utf-8") as fh:
+        allow = json.load(fh)
+    problems = []
+    for name, value in allow.get("parameters", {}).items():
+        if getattr(args, name, value) != value:
+            problems.append(f"--{name.replace('_', '-')} {getattr(args, name)} differs from the "
+                            f"allow-list's {value}")
+    if idx.files == 0 or not idx.kgrams:
+        problems.append("the reference is empty: nothing was compared")
+    entries = {(e["file"], e["kind"], e["digest"]): e for e in allow.get("entries", [])}
+    lines = ["", f"gate: ranges to classify against {args.allowlist} (target locations only)"]
+    seen, new = set(), []
+    for f in findings(reports, args.min_tokens):
+        key = (f["file"], f["kind"], f["digest"])
+        unit = "tokens" if f["kind"] == "tokens" else "nodes"
+        where = f["file"] if f["where"].startswith("..") else f["where"]
+        loc = f"{where}:{f['lines'][0]}-{f['lines'][1]}  {f['kind']} {f['size']} {unit}  {f['digest']}"
+        if key in entries:
+            seen.add(key)
+            lines.append(f"  allowed  {loc}  [{entries[key].get('class', '?')}]")
+        else:
+            new.append(f)
+            lines.append(f"  NEW      {loc}")
+    for key in entries:
+        if key not in seen:
+            lines.append(f"  unused allow-list entry (range edited or removed): {' '.join(key)}")
+    for p in problems:
+        lines.append(f"  ERROR    {p}")
+    if new:
+        lines += [
+            "",
+            f"{len(new)} range(s) not in the allow-list. Read each one in Tradewind only, classify",
+            "it (API, idiom, semantics, suspect) and, if it is not a suspect, add its entry to the",
+            "allow-list in a pull request reviewed by a human, with a line in CLEANROOM.md",
+            "(procedure: spec/similarity-allowlist.md). Candidate entries:",
+        ]
+        for f in new:
+            cand = {k: f[k] for k in ("file", "kind", "digest", "size")}
+            cand.update({"lines_at_review": f["lines"], "class": "TODO", "what": "TODO",
+                         "accepted": "TODO", "review": "TODO"})
+            lines.append("  " + json.dumps(cand, ensure_ascii=False) + ",")
+    ok = not new and not problems
+    summary = (
+        f"gate: {'PASS' if ok else 'FAIL'} ({len(seen)} allowed, {len(new)} new, "
+        f"{len(entries) - len(seen)} unused entries, {len(problems)} errors)"
+    )
+    lines += ["", summary]
+    return (0 if ok else 1), "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -499,6 +617,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-tokens", type=int, default=41, help="span length worth reviewing")
     ap.add_argument("--min-nodes", type=int, default=40, help="statement size worth reviewing")
     ap.add_argument("--json", help="write the full report (target locations only) here")
+    ap.add_argument(
+        "--allowlist",
+        metavar="FILE",
+        help="gate mode: exit 1 on any reviewable range missing from this versioned allow-list",
+    )
     ap.add_argument(
         "--self-test-control",
         metavar="FILE",
@@ -523,6 +646,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(report_json(reports, idx, args), fh, indent=1)
+    if args.allowlist:
+        status, text = gate(reports, idx, args)
+        print(text)
+        return status
     return 0
 
 
