@@ -11,7 +11,9 @@ from __future__ import annotations
 class Position:
     __slots__ = ("_book", "_sid", "adjbase", "price", "size", "upclosed", "upopened")
 
-    def __init__(self, size: float = 0.0, price: float = 0.0):
+    def __init__(self, size: float = 0, price: float = 0.0):
+        # an int 0, as the oracle's: sizes stay ints through integer fills (probe
+        # ``checksubmit_off`` prints a close of 500 shares as -500, not -500.0)
         self.size = size
         self.price = price if size else 0.0
         self.adjbase = None
@@ -36,9 +38,9 @@ class Position:
         """Mirror this position into row ``sid`` of ``book`` (a ``PortfolioState``)."""
         self._book = book
         self._sid = sid
-        self._sync()
+        self._tw_sync()
 
-    def _sync(self) -> None:
+    def _tw_sync(self) -> None:
         book = self._book
         if book is not None:
             book.quantity[self._sid] = self.size
@@ -48,7 +50,7 @@ class Position:
         """Replace size and average price (corporate actions)."""
         self.size = size
         self.price = price
-        self._sync()
+        self._tw_sync()
 
     def update(self, size: float, price: float):
         """Apply a fill of ``size`` at ``price``; return (size, price, opened, closed)."""
@@ -73,5 +75,5 @@ class Position:
         self.price = newprice
         self.upopened, self.upclosed = opened, closed
         if self._book is not None:
-            self._sync()
+            self._tw_sync()
         return newsize, newprice, opened, closed

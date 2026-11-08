@@ -236,6 +236,35 @@ class BuyingPowerModel(Protocol):
     def initial_margin(self, security: Security, quantity: float, price: float) -> float: ...
 
 
+def leveraged_stock_flow(size, price, pos_size, pos_price, leverage, comminfo) -> float:
+    """Cash flow, before fees, of trading ``size`` of a stock-like asset whose scheme has
+    ``leverage`` != 1, against a position of ``pos_size`` entered at ``pos_price``.
+
+    Observed on the oracle (probe ``stock_leverage``; corpus ``structural_convexity…``,
+    whose strategy sets ``comminfo.p.leverage = 2.0``): leverage applies to **longs only**.
+    Buying debits ``size * price / leverage``; selling out of a long credits back the
+    margin at the entry price plus the P&L, ``(q * entry / leverage + P&L)`` grouped as
+    written; shorts move the full ``size * price`` either way, as without leverage. A
+    reversal is its closing part then its opening part.
+    """
+    flow = 0.0
+    if size > 0:
+        if pos_size < 0:                       # buying back a short: full price
+            q = min(size, -pos_size)
+            flow -= q * price
+            size -= q
+        if size > 0:                           # opening or adding to a long: the margin
+            flow -= size * price / leverage
+        return flow
+    q = min(-size, pos_size) if pos_size > 0 else 0
+    if q > 0:                                  # selling out of a long: margin back + P&L
+        flow += (q * pos_price / leverage + comminfo.profitandloss(q, pos_price, price))
+    rest = -size - q
+    if rest > 0:                               # opening or adding to a short: full price
+        flow += rest * price
+    return flow
+
+
 def _fee(security, order, size, price, time) -> float:
     return security.models.fee.get_order_fee(FeeParameters(security, order, size, price, time)).amount
 
@@ -261,12 +290,16 @@ class CompatCashBuyingPower:
         self.shortcash = shortcash
 
     @staticmethod
-    def cash_delta(order: Order, price: float, pos_size: float, fee: float) -> float:
+    def cash_delta(order: Order, price: float, pos_size: float, fee: float,
+                   pos_price: float = 0.0) -> float:
         """Cash flow of filling ``order`` at ``price`` against a position of ``pos_size``
         (negative when cash goes out), fee included."""
         comminfo = order.comminfo
         size = order.size
         if comminfo.stocklike:
+            leverage = comminfo.get_leverage()
+            if leverage != 1.0:
+                return leveraged_stock_flow(size, price, pos_size, pos_price, leverage, comminfo) - fee
             return -size * price - fee
         opening = (pos_size == 0) or ((pos_size > 0) == (size > 0))
         if opening:
@@ -283,7 +316,8 @@ class CompatCashBuyingPower:
         if check_price is None:
             return BuyingPowerCheck(True, 0.0)
         fee = _fee(security, order, order.size, check_price, state.time)
-        delta = self.cash_delta(order, check_price, pos_size, fee)
+        pos_price = security._broker.getposition(security.feed).price
+        delta = self.cash_delta(order, check_price, pos_size, fee, pos_price)
         pseudo[sid] = pos_size + order.size
         if order._check and self.checksubmit and state.running_cash + delta < 0:
             return BuyingPowerCheck(False, -delta, "running cash below zero")
@@ -293,13 +327,25 @@ class CompatCashBuyingPower:
                    time: Timestamp = 0) -> FillProposal | None:
         comminfo = order.comminfo
         size, price = fill.quantity, fill.price
-        pos_size = security._broker.getposition(security.feed).size
+        position = security._broker.getposition(security.feed)
+        pos_size = position.size
         opening = (pos_size == 0) or ((pos_size > 0) == (size > 0))
         if opening and not (comminfo.stocklike and not order.isbuy()):
             fee = _fee(security, order, size, price, time)
-            if not cash + self.cash_delta(order, price, pos_size, fee) >= 0:
+            if not cash + self.cash_delta(order, price, pos_size, fee, position.price) >= 0:
                 return None
         reversing = pos_size and ((pos_size > 0) != (size > 0)) and abs(size) > abs(pos_size)
+        if reversing and comminfo.stocklike and comminfo.get_leverage() != 1.0:
+            closed = -pos_size
+            opened = size - closed
+            comm_closed = _fee(security, order, closed, price, time)
+            comm_opened = _fee(security, order, opened, price, time)
+            lev = comminfo.get_leverage()
+            cash_after_close = cash + leveraged_stock_flow(closed, price, pos_size, position.price, lev,
+                                                           comminfo) - comm_closed
+            if cash_after_close + leveraged_stock_flow(opened, price, 0, 0.0, lev, comminfo) - comm_opened < 0:
+                return FillProposal(closed, price)
+            return fill
         if reversing and comminfo.stocklike:
             # observed (breaking_bad_trends, 1993-04-02): the closing part always fills; the
             # opening part only if the cash left after closing covers it

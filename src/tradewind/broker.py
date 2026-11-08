@@ -104,6 +104,27 @@ def _plain_comminfo(ci) -> bool:
                 and cls.profitandloss is CommInfoBase.profitandloss)
 
 
+def _mark_terms(comminfo, pos, price):
+    """A position's terms in the portfolio value, added in this order to a running sum
+    that starts at zero; the value is ``cash + sum`` (not ``cash + v1 + v2 ...``).
+
+    Observed on the oracle (probes ``value_terms``, 893 of 904 marks bit for bit, against
+    164 for the cash-first sequential sum): a long counts its market value ``size *
+    close``; a short its entry value then its open P&L; a long under a leveraged
+    stock-like scheme its margin ``size * entry / leverage`` then its open P&L (114 of 120).
+    Shorts count ``size * close`` too (101 of 106 marks on a corpus long/short book,
+    against 89 for entry value then P&L). The positions are taken in the order they were
+    first touched (fewer last-bit differences on the corpus than the feeds' order).
+    A scheme with its own ``getvalue`` gives one term."""
+    if not _plain_comminfo(comminfo):
+        return (comminfo.getvalue(pos, price), 0.0)
+    size, entry = pos.size, pos.price
+    lev = comminfo.get_leverage()
+    if size < 0 or lev == 1.0:
+        return (size * price, 0.0)
+    return (size * entry / lev, comminfo.profitandloss(size, entry, price))
+
+
 class BackBroker(BrokerBase):
     params = (
         ("cash", 10000.0),
@@ -141,9 +162,9 @@ class BackBroker(BrokerBase):
         self.pending: collections.deque = collections.deque()  # accepted, not yet executed
         self.trades: dict = {}
         self.margin_call_model = None
-        self._cash_addition = 0.0
+        self._cash_addition = []
         self._coo = p.coo
-        self._env = None
+        self._tw_env = None
         self._now: Timestamp = np.int64(0)
         self._dtnum = 0.0
         self._accruals = False
@@ -220,9 +241,12 @@ class BackBroker(BrokerBase):
     # -- configuration -----------------------------------------------------------------
     def set_cash(self, cash):
         # Observed on the oracle: the portfolio value follows at once, before the run (an
-        # analyzer's ``start`` reads it) and during it.
+        # analyzer's ``start`` reads it) and during it -- and it becomes the cash alone, the
+        # open positions left out until the next bar's mark (probe ``setcash_held``; corpus
+        # ``parameter_uncertainty…`` credits a monthly rate with ``setcash`` and then sizes
+        # its book on ``getvalue()``, which reads that cash).
         self.cash = self.startingcash = float(cash)
-        self._value = self._mark_value()
+        self._value = self.cash
 
     setcash = set_cash
 
@@ -236,7 +260,7 @@ class BackBroker(BrokerBase):
         # ``getcash``/``getvalue`` in the bar that requests it, the next bar's batch check and
         # fills still run on the old cash, and it lands at the end of that pass (phase 7) --
         # before the notifications of the bar are read. Several requests are summed first.
-        self._cash_addition += float(cash)
+        self._cash_addition.append(float(cash))
 
     @property
     def _coc(self):
@@ -289,8 +313,7 @@ class BackBroker(BrokerBase):
             # ``get_value(datas=...)`` that applied one does not move it until the next bar.
             return self.cash if self._value is None else self._value
         if self._cash_addition:
-            self.cash += self._cash_addition
-            self._cash_addition = 0.0
+            self._land_additions()
         value = 0.0
         if isinstance(datas, (list, tuple)) and len(datas) == 1:
             # the common read (``order_target_value``): one position, no scan of the book
@@ -313,16 +336,18 @@ class BackBroker(BrokerBase):
     getvalue = get_value
 
     def _mark_value(self):
-        """Cash + the value of every open position, summed left to right in the order the
-        positions were first touched (the oracle's order, spec/05 § 7.3)."""
+        """``cash + t``, ``t`` the terms of every open position (``_mark_terms``) summed left
+        to right from zero, in the order the positions were first touched."""
         market = self.market
         if market is None:
-            value = self.cash
+            terms = 0.0
             for data, pos in self.positions.items():
                 if not pos.size or len(data) == 0:
                     continue
-                value += self.getcommissioninfo(data).getvalue(pos, data.close[0])
-            return value
+                e, u = _mark_terms(self.getcommissioninfo(data), pos, data.close[0])
+                terms += e
+                terms += u
+            return self.cash + terms
         order = self.positions.order
         cash = self.cashbook.account.amount
         if not order:
@@ -330,7 +355,7 @@ class BackBroker(BrokerBase):
         cache = self._mark_cache
         if cache is None or cache[0] != len(order) or cache[1] != self._comminfo_key():
             cache = self._mark_cache = self._build_mark_cache()
-        _, _, ids, mult, scalar_idx = cache
+        _, _, ids, mult, lev, scalar_idx = cache
         pf = self.portfolio
         q = pf.quantity[ids]
         live = (q != 0) & (market.length[ids] > 0)
@@ -338,18 +363,21 @@ class BackBroker(BrokerBase):
             return cash
         price = market.flat["close"][market.offsets[ids] + market.length[ids] - 1]
         avg = pf.average_price[ids]
-        # the base scheme's value: a long at the close; a short at its entry value plus the
-        # open P&L -- the same float operations, element by element
-        vals = np.where(q >= 0, q * price, q * avg + q * (price - avg) * mult)
+        # the entry value then the open P&L of each position (``_mark_terms``), the same
+        # float operations element by element
+        levered = (q > 0) & (lev != 1.0)
+        entry = np.where(levered, q * avg / lev, q * price)
+        pnl = np.where(levered, q * (price - avg) * mult, 0.0)
         if scalar_idx:
             securities = self.securities
             for k in scalar_idx:
                 if live[k]:
                     data = securities[ids[k]].feed
-                    vals[k] = self.getcommissioninfo(data).getvalue(self.positions[data], data.close[0])
-        vals = vals[live]
+                    entry[k], pnl[k] = _mark_terms(self.getcommissioninfo(data), self.positions[data],
+                                                   data.close[0])
+        terms = np.column_stack((entry[live], pnl[live])).ravel()
         # sequential, not pairwise: ``add.accumulate`` adds left to right like the loop
-        return float(np.add.accumulate(np.concatenate(((cash,), vals)))[-1])
+        return cash + float(np.add.accumulate(np.concatenate(((0.0,), terms)))[-1])
 
     def _build_mark_cache(self):
         order = self.positions.order
@@ -358,12 +386,15 @@ class BackBroker(BrokerBase):
         comminfos = [self.getcommissioninfo(securities[i].feed) for i in order]
         plain = np.array([_plain_comminfo(ci) for ci in comminfos], dtype=bool)
         mult = np.array([float(ci.p.mult) for ci in comminfos])
+        lev = np.array([float(ci.get_leverage()) for ci in comminfos])
         scalar_idx = np.flatnonzero(~plain).tolist()
-        return (len(order), self._comminfo_key(), ids, mult, scalar_idx)
+        return (len(order), self._comminfo_key(), ids, mult, lev, scalar_idx)
 
     def _comminfo_key(self):
         """Changes whenever a scheme is set, added or replaced (even in the dict directly)."""
-        return (self._comminfo_version, tuple(map(id, self.comminfo.values())))
+        # leverage too: a strategy may set ``comminfo.p.leverage`` on a scheme in place
+        return (self._comminfo_version, tuple(map(id, self.comminfo.values())),
+                tuple(ci.p.leverage for ci in self.comminfo.values()))
 
     def get_orders_open(self, safe=False):
         return [o for o in self.pending]
@@ -409,12 +440,21 @@ class BackBroker(BrokerBase):
         against the cash at the current close and goes straight to ``Margin`` when it
         cannot be afforded, without ever being Accepted.
         """
-        self._security(order.data)
+        security = self._security(order.data)
         order.comminfo = self.getcommissioninfo(order.data)
         order.submit(self)
         self.orders.append(order)
-        self.notify(order)
         order._check = check
+        if not getattr(security.models.buying_power, "checksubmit", True):
+            # Observed on the oracle (probe ``checksubmit_off``): without the pre-check an
+            # order is accepted at once -- no Submitted notification, an Accepted one
+            # delivered with the next bar's -- and so ``cancel()`` in the bar that placed
+            # it does cancel it. The cash is only checked at the fill (Margin there).
+            order.accept(self)
+            self.notify(order)
+            self.pending.append(order)
+            return order
+        self.notify(order)
         # Cheat-on-close changes nothing here: observed on the oracle, the batch is still
         # accepted and notified when the next bar arrives; only the fill price of a market
         # order becomes the close of the bar it was placed on (see the fill model).
@@ -423,7 +463,7 @@ class BackBroker(BrokerBase):
 
     def cancel(self, order, bracket=False):
         # Observed on the oracle (probe ``cancel_timing``): an order still waiting for its
-        # batch acceptance cannot be cancelled -- in the ``next`` that placed it, or inside
+        # batch acceptance (``checksubmit``, the default) cannot be cancelled -- in the ``next`` that placed it, or inside
         # the ``notify_order`` that placed it -- and goes on to be accepted and filled as if
         # nothing had been asked. Only an accepted order not yet filled is cancelled.
         if order in self.pending:
@@ -624,40 +664,63 @@ class BackBroker(BrokerBase):
         settle = models.settlement.apply_funds
         cashbook = self.cashbook
         ccy = cashbook.account_currency
-        if allowed.quantity != size:
+        fee = models.fee
+        oldprice, oldsize = pos.price, pos.size
+        partial = allowed.quantity != size
+        if partial:
             # the closing part of a reversal: filled, then the rest refused (Partial, Margin)
-            closed = allowed.quantity
-            comm_closed = models.fee.get_order_fee(FeeParameters(security, order, closed, price, now)).amount
-            oldprice = pos.price
-            newsize, _newprice, _o, c = pos.update(closed, price)
-            pnl = comminfo.profitandloss(-c, oldprice, price)
-            settle(security, CashAmount(-(closed * price), ccy), now, cashbook)
-            cashbook.add(ccy, -comm_closed)
-            comm_final = self._confirm_fee(models.fee, security, order, closed, price)
-            order.execute(dt, closed, price, c, c * price, comm_final, 0.0, 0.0, 0.0, 0.0, pnl)
-            self._account(security, comm_final, pnl)
+            size = allowed.quantity
+            comm = models.fee.get_order_fee(FeeParameters(security, order, size, price, now)).amount
+        newsize, _newprice, opened, closed = pos.update(size, price)
+        pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0
+        if comminfo.stocklike:
+            # Observed on the oracle (probes ``reversal_fees``, ``close_cash``): a fill is
+            # one execution per part -- the closing part, then the opening part --, each
+            # settled then charged its own fee. Closing gives back the position's entry
+            # value plus the P&L, ``(entry value + P&L)``, not the traded value: the two
+            # differ in the last bits. A leveraged long's entry value is its margin,
+            # ``size * entry / leverage``; opening a long pays ``size * price /
+            # leverage``. Shorts are never leveraged.
+            lev = comminfo.get_leverage()
+            parts = []
+            if closed:
+                entry = -closed * oldprice / lev if oldsize > 0 else -closed * oldprice
+                parts.append((closed, entry + pnl))
+            if opened:
+                parts.append((opened, -(opened * price) / lev if opened > 0 else -(opened * price)))
+            fees = []
+            for part, flow in parts:
+                part_fee = comm if len(parts) == 1 else fee.get_order_fee(
+                    FeeParameters(security, order, part, price, now)).amount
+                settle(security, CashAmount(flow, ccy), now, cashbook)
+                cashbook.add(ccy, -part_fee)
+                fees.append(self._confirm_fee(fee, security, order, part, price))
+            closedcomm = fees[0] if closed else 0.0
+            openedcomm = fees[-1] if opened else 0.0
+            comm_final = closedcomm + openedcomm if closed and opened else fees[0]
+            trade_parts = (closedcomm, openedcomm) if closed and opened else None
+        else:
+            # futures-like: only the P&L moves the cash
+            settle(security, CashAmount(pnl, ccy), now, cashbook)
+            cashbook.add(ccy, -comm)
+            comm_final = self._confirm_fee(fee, security, order, size, price)
+            closedcomm = comm_final if closed else 0.0
+            openedcomm = comm_final if not closed else 0.0
+            trade_parts = None
+        # observed on the oracle (probe ``executed_values``): the closed part is valued at
+        # the position's entry price, the opened part at the fill price
+        order.execute(dt, size, price, closed, -closed * oldprice, closedcomm, opened, opened * price,
+                      openedcomm, 0.0, pnl)
+        self._account(security, comm_final, pnl)
+        if partial:
             order.partial()
             self.notify(order)
             order.margin()
-            self.notify(order)
-            self._update_trade(order, data, closed, price, 0.0, c, pnl, comm_final, dt, newsize)
-            return
-        oldprice = pos.price
-        newsize, _newprice, opened, closed = pos.update(size, price)
-        pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0
-        # cash flow: stock-like pays/receives the traded value; futures-like only P&L
-        if comminfo.stocklike:
-            settle(security, CashAmount(-(size * price), ccy), now, cashbook)
         else:
-            settle(security, CashAmount(pnl, ccy), now, cashbook)
-        cashbook.add(ccy, -comm)
-        comm_final = self._confirm_fee(models.fee, security, order, size, price)
-        order.execute(dt, size, price, closed, closed * price, comm_final if closed else 0.0,
-                      opened, opened * price, comm_final if not closed else 0.0, 0.0, pnl)
-        self._account(security, comm_final, pnl)
-        order.completed()
+            order.completed()
         self.notify(order)
-        self._update_trade(order, data, size, price, opened, closed, pnl, comm_final, dt, newsize)
+        self._update_trade(order, data, size, price, opened, closed, pnl, comm_final, dt, newsize,
+                           parts=trade_parts)
 
     @staticmethod
     def _confirm_fee(fee_model, security, order, size, price):
@@ -672,11 +735,21 @@ class BackBroker(BrokerBase):
             pf.realized_pnl[sid] += pnl
 
     # phase 7
+    def _land_additions(self) -> None:
+        """Queued ``add_cash`` requests land one after the other, in request order --
+        observed on the oracle: summing them first rounds differently (corpus
+        ``profitable_mean_reversion…`` 2010-03-12, nine additions of the toolbox's
+        membership marks)."""
+        cash = self.cash
+        for amount in self._cash_addition:
+            cash += amount
+        self.cash = cash
+        self._cash_addition = []
+
     def transfers(self, s: TimeSlice | None) -> None:
-        """Queued ``add_cash`` requests land (summed in request order, then added once)."""
+        """Queued ``add_cash`` requests land, one after the other."""
         if self._cash_addition:
-            self.cash += self._cash_addition
-            self._cash_addition = 0.0
+            self._land_additions()
 
     # phase 8
     def mark(self, s: TimeSlice | None) -> None:
@@ -690,20 +763,27 @@ class BackBroker(BrokerBase):
         if model is not None:
             model.check(self, s)
 
-    def _update_trade(self, order, data, size, price, opened, closed, pnl, comm, dt, newsize):
+    def _update_trade(self, order, data, size, price, opened, closed, pnl, comm, dt, newsize, parts=None):
         if opened and closed:
             # Observed on the oracle (probe ``analyzers``): a reversing fill closes the
             # trade with its closing part and opens a new one with the rest, each part
-            # carrying its share of the commission.
-            share = abs(closed) / (abs(closed) + abs(opened))
-            self._update_trade(order, data, closed, price, 0.0, closed, pnl, comm * share, dt, 0.0)
-            self._update_trade(order, data, opened, price, opened, 0.0, 0.0, comm - comm * share, dt, newsize)
+            # carrying its own fee (probe ``reversal_fees``) -- a share of the whole fee
+            # for a scheme that does not price the parts.
+            if parts is None:
+                share = abs(closed) / (abs(closed) + abs(opened))
+                parts = (comm * share, comm - comm * share)
+            self._update_trade(order, data, closed, price, 0.0, closed, pnl, parts[0], dt, 0.0)
+            self._update_trade(order, data, opened, price, opened, 0.0, 0.0, parts[1], dt, newsize)
             return
         trade = self.trades.get(data)
         if trade is None or trade.isclosed:
             trade = Trade(data=data, tradeid=order.tradeid)
             self.trades[data] = trade
         trade.update(order, size, price, opened, closed, pnl, comm, dt, newsize)
+        if not (trade.justopened or trade.isclosed):
+            # observed on the oracle (probe ``executed_values``): ``notify_trade`` hears of a
+            # trade when it opens and when it closes, not when a fill only resizes it
+            return
         security = getattr(data, "security", None)
         self.bus.publish(TradeEvent(self._now, 0, security.id if security is not None else None, trade,
                                     order.owner))

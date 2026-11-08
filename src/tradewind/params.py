@@ -64,17 +64,17 @@ class MetaParams(type):
                 values[name] = kwargs.pop(name)
         obj = cls.__new__(cls)
         obj.p = obj.params = _Params(values)
-        pre = getattr(cls, "_before_init", None)
+        pre = getattr(cls, "_tw_before_init", None)
         if pre is not None:
             pre(obj)
         # A class may consume the positional arguments itself (an indicator takes its
         # input lines this way), so that a user ``__init__(self)`` written without
         # arguments still works, as the corpus writes them.
-        consume = getattr(cls, "_consume_args", None)
+        consume = getattr(cls, "_tw_consume_args", None)
         if consume is not None:
             args = consume(obj, *args)
         obj.__init__(*args, **kwargs)
-        post = getattr(cls, "_after_init", None)
+        post = getattr(cls, "_tw_after_init", None)
         if post is not None:
             post(obj)
         return obj
@@ -84,5 +84,5 @@ class ParamsBase(metaclass=MetaParams):
     params: tuple = ()
 
     @classmethod
-    def _params_declared(cls) -> dict:
+    def _tw_params_declared(cls) -> dict:
         return declared_params(cls)
