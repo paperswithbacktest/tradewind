@@ -92,11 +92,11 @@ class CommInfoBase(ParamsBase):
     def getvalue(self, position, price):
         if not self._stocklike:
             return abs(position.size) * self.get_margin(price)
-        size = position.size
-        if size >= 0:
-            return size * price
-        # a short is carried at its entry value plus the open P&L
-        return size * position.price + self.profitandloss(size, position.price, price)
+        # long or short, ``size * price``: observed on the oracle, a short's value read by
+        # ``get_value(datas=[d])`` is its market value, not entry value + P&L, which rounds
+        # differently (corpus ``high_dimensional_minimum_variance…`` 2025-05-26: a target of
+        # ~0 on a 1 204-share short sized 1 204 on the oracle, 1 203 from entry + P&L)
+        return position.size * price
 
     def profitandloss(self, size, price, newprice):
         return size * (newprice - price) * self.p.mult

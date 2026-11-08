@@ -81,7 +81,7 @@ class BrokerBase(ParamsBase):
 
 class _PositionBook(dict):
     """``broker.positions``: a ``Position`` per feed, created on first access, in the order
-    the feeds were first touched (the mark sums them in the feeds' order instead)."""
+    the feeds were first touched -- the order the mark sums them in (the oracle's)."""
 
     def __init__(self, broker):
         super().__init__()
@@ -113,8 +113,8 @@ def _mark_terms(comminfo, pos, price):
     close``; a short its entry value then its open P&L; a long under a leveraged
     stock-like scheme its margin ``size * entry / leverage`` then its open P&L (114 of 120).
     Shorts count ``size * close`` too (101 of 106 marks on a corpus long/short book,
-    against 89 for entry value then P&L). The positions are taken in the order the feeds
-    were added, not the order they were first traded.
+    against 89 for entry value then P&L). The positions are taken in the order they were
+    first touched (fewer last-bit differences on the corpus than the feeds' order).
     A scheme with its own ``getvalue`` gives one term."""
     if not _plain_comminfo(comminfo):
         return (comminfo.getvalue(pos, price), 0.0)
@@ -162,7 +162,7 @@ class BackBroker(BrokerBase):
         self.pending: collections.deque = collections.deque()  # accepted, not yet executed
         self.trades: dict = {}
         self.margin_call_model = None
-        self._cash_addition = 0.0
+        self._cash_addition = []
         self._coo = p.coo
         self._tw_env = None
         self._now: Timestamp = np.int64(0)
@@ -260,7 +260,7 @@ class BackBroker(BrokerBase):
         # ``getcash``/``getvalue`` in the bar that requests it, the next bar's batch check and
         # fills still run on the old cash, and it lands at the end of that pass (phase 7) --
         # before the notifications of the bar are read. Several requests are summed first.
-        self._cash_addition += float(cash)
+        self._cash_addition.append(float(cash))
 
     @property
     def _coc(self):
@@ -313,8 +313,7 @@ class BackBroker(BrokerBase):
             # ``get_value(datas=...)`` that applied one does not move it until the next bar.
             return self.cash if self._value is None else self._value
         if self._cash_addition:
-            self.cash += self._cash_addition
-            self._cash_addition = 0.0
+            self._land_additions()
         value = 0.0
         if isinstance(datas, (list, tuple)) and len(datas) == 1:
             # the common read (``order_target_value``): one position, no scan of the book
@@ -338,11 +337,11 @@ class BackBroker(BrokerBase):
 
     def _mark_value(self):
         """``cash + t``, ``t`` the terms of every open position (``_mark_terms``) summed left
-        to right from zero, in the feeds' order."""
+        to right from zero, in the order the positions were first touched."""
         market = self.market
         if market is None:
             terms = 0.0
-            for data, pos in sorted(self.positions.items(), key=lambda kv: kv[0].security.id):
+            for data, pos in self.positions.items():
                 if not pos.size or len(data) == 0:
                     continue
                 e, u = _mark_terms(self.getcommissioninfo(data), pos, data.close[0])
@@ -381,8 +380,7 @@ class BackBroker(BrokerBase):
         return cash + float(np.add.accumulate(np.concatenate(((0.0,), terms)))[-1])
 
     def _build_mark_cache(self):
-        # the feeds' order (SecurityId = adddata order), not the order of first trade
-        order = sorted(self.positions.order)
+        order = self.positions.order
         ids = np.array(order, dtype=np.int64)
         securities = self.securities
         comminfos = [self.getcommissioninfo(securities[i].feed) for i in order]
@@ -737,11 +735,21 @@ class BackBroker(BrokerBase):
             pf.realized_pnl[sid] += pnl
 
     # phase 7
+    def _land_additions(self) -> None:
+        """Queued ``add_cash`` requests land one after the other, in request order --
+        observed on the oracle: summing them first rounds differently (corpus
+        ``profitable_mean_reversion…`` 2010-03-12, nine additions of the toolbox's
+        membership marks)."""
+        cash = self.cash
+        for amount in self._cash_addition:
+            cash += amount
+        self.cash = cash
+        self._cash_addition = []
+
     def transfers(self, s: TimeSlice | None) -> None:
-        """Queued ``add_cash`` requests land (summed in request order, then added once)."""
+        """Queued ``add_cash`` requests land, one after the other."""
         if self._cash_addition:
-            self.cash += self._cash_addition
-            self._cash_addition = 0.0
+            self._land_additions()
 
     # phase 8
     def mark(self, s: TimeSlice | None) -> None:

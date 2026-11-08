@@ -691,7 +691,7 @@ def test_vectorised_mark_equals_the_scalar_loop_bit_for_bit(seed):
     from tradewind.broker import _mark_terms
 
     terms = 0.0
-    for data, pos in sorted(broker.positions.items(), key=lambda kv: kv[0].security.id):
+    for data, pos in broker.positions.items():
         if pos.size and len(data):
             e, u = _mark_terms(broker.getcommissioninfo(data), pos, data.close[0])
             terms += e
