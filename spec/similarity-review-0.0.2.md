@@ -9,7 +9,8 @@ public API dictates (declarative `params`, documented signatures, empty hook met
 the documented semantics force (the one-line formulas of `CommInfoBase`, the
 `order_target_size` rule). The longest match outside declarations is 9 lines. One file,
 `comminfo.py`, stands well above the others and is discussed in § 5; it does not meet the
-definition of a suspect, and 0.0.2 can stay published.
+definition of a suspect, 0.0.2 can stay published, and Édouard decided on 2026-11-08 to keep
+it as is.
 
 ## 1. Method
 
@@ -185,7 +186,11 @@ the same method order, but these methods all share nearly the same normalised sh
 measure cannot tell order from shape. This is the definition of "dictated by the API", not of
 a suspect.
 
-Options for Édouard (no change in this PR):
+**Decision (Édouard, 2026-11-08): option 1, `comminfo.py` is kept as is.** No rewrite is
+planned for 0.0.3; the ranges of § 4 that come from it (rows 4, 5, 8, 9, 10, 12, 13) are
+accepted as API and documented semantics.
+
+Options that were put to Édouard (no change in this PR):
 
 1. **Accept as is** (recommended): the ranges are short, documented and forced; 0.0.2 stays.
 2. **Precautionary rewrite in 0.0.3**: a contributor who has not written `comminfo.py` rewrites
