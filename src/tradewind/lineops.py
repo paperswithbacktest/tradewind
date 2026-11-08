@@ -98,7 +98,7 @@ class LinesOperation(Indicator):
                 args.append(arr)
             else:
                 args.append(float(o))
-        first = self._minperiod - 1
+        first = self._tw_minperiod - 1
         if self._fn in _DIVISIONS:
             divisor = args[1]
             tail = divisor[first:] if isinstance(divisor, np.ndarray) else divisor
@@ -118,9 +118,9 @@ def operate(fn, *operands):
     if not inputs:
         raise TypeError("a line operation needs at least one line operand")
     op = LinesOperation(*inputs, _fn=fn, _operands=operands)
-    # the inputs set the minimum period (``_consume_args``); a built line adds nothing
-    op._minperiod = max(_minperiod_of(i) for i in inputs)
-    op._push_minperiod()
+    # the inputs set the minimum period (``_tw_consume_args``); a built line adds nothing
+    op._tw_minperiod = max(_minperiod_of(i) for i in inputs)
+    op._tw_push_minperiod()
     return op
 
 

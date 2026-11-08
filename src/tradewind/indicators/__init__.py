@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..indicator import Indicator, _as_array, _ema, _mean, _rolling_extreme, _rolling_mean
+from ..indicator import (
+    Indicator,
+    _as_array,
+    _ema,
+    _mean,
+    _rolling_extreme,
+    _rolling_mean,
+    _window_sum,
+)
 
 
 class SimpleMovingAverage(Indicator):
@@ -68,7 +76,13 @@ MinN = Lowest
 
 
 class RateOfChange(Indicator):
-    """``close / close[-period] - 1``."""
+    """``(close - close[-period]) / close[-period]``.
+
+    Written as a difference over the old value, not ``close / close[-period] - 1``: the
+    two round differently, and only the former is the oracle's bit for bit (0 of 342
+    values apart on periods 1, 5 and 12; the ratio form differs on 95 % of them). A last
+    bit is enough to reorder two ETFs of equal return in a decile sort (probe
+    ``roc_bits``, corpus ``abnormal_returns_with_momentum_contrarian…``)."""
 
     lines = ("roc",)
     params = (("period", 12),)
@@ -82,7 +96,7 @@ class RateOfChange(Indicator):
         p = self.p.period
         out = np.full(len(x), np.nan)
         if len(x) > p:
-            out[p:] = x[p:] / x[:-p] - 1.0
+            out[p:] = (x[p:] - x[:-p]) / x[:-p]
         self.lines.roc.array[:] = out
 
 
@@ -250,6 +264,14 @@ class CrossDown(CrossOver):
 
 
 class StandardDeviation(Indicator):
+    """``sqrt(mean(x**2) - mean(x)**2)`` over the window, both means the simple average.
+
+    The public documentation gives this definition (mean of the squares minus the squared
+    mean); with the window sums compensated as the simple average's are (``_window_sum``),
+    it is the oracle's bit for bit (probe ``indicator_bits``: 0 of 111 values apart, where
+    a two-pass ``numpy.std`` differs on all of them). ``safepow`` takes the absolute value
+    first, against a tiny negative difference."""
+
     lines = ("stddev",)
     params = (("period", 20), ("movav", None), ("safepow", True))
 
@@ -262,8 +284,11 @@ class StandardDeviation(Indicator):
         p = self.p.period
         out = np.full(len(x), np.nan)
         if len(x) >= p:
-            w = np.lib.stride_tricks.sliding_window_view(x, p)
-            out[p - 1:] = w.std(axis=1)
+            meansq = _window_sum(x * x, p) / p
+            mean = _window_sum(x, p) / p
+            diff = meansq - mean * mean
+            with np.errstate(invalid="ignore"):
+                out[p - 1:] = np.sqrt(np.abs(diff) if self.p.safepow else diff)
         self.lines.stddev.array[:] = out
 
 

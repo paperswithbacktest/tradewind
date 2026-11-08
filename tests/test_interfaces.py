@@ -688,11 +688,15 @@ def test_vectorised_mark_equals_the_scalar_loop_bit_for_bit(seed):
     cerebro.broker.setcommission(commission=0.0, mult=3.0, name="S4")
     strat = cerebro.run()[0]
     broker = cerebro.broker
-    scalar = broker.cash
-    for data, pos in broker.positions.items():
+    from tradewind.broker import _mark_terms
+
+    terms = 0.0
+    for data, pos in sorted(broker.positions.items(), key=lambda kv: kv[0].security.id):
         if pos.size and len(data):
-            scalar += broker.getcommissioninfo(data).getvalue(pos, data.close[0])
-    assert broker._mark_value() == scalar
+            e, u = _mark_terms(broker.getcommissioninfo(data), pos, data.close[0])
+            terms += e
+            terms += u
+    assert broker._mark_value() == broker.cash + terms
     assert strat.values[-1] == broker.getvalue()
 
 

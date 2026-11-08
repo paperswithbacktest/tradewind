@@ -47,7 +47,7 @@ class DataBase(ParamsBase):
         self._name = self.p.name or ""
         self._dataname = self.p.dataname
         self._started = False
-        self._env = None
+        self._tw_env = None
         self._arrays: dict[str, np.ndarray] = {}
         self._dtnum: np.ndarray | None = None
         self.security = None   # set by the broker: the engine's record of this feed (read-only)
