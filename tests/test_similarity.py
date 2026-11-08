@@ -8,6 +8,7 @@ reaches stdout, stderr or the JSON report, while the copy hidden in the target i
 import ast
 import json
 import os
+import re
 import sys
 import textwrap
 import warnings
@@ -115,3 +116,95 @@ def test_normalisation_ignores_names_comments_and_docstrings():
     fs = 'def h(v):\n    return f"{v!r} and {v:>4}"\n'
     assert sim.normalised_tokens(fs)[-3][0] == "S"
     ast.parse(sim.renamed_copy(fs))  # the !r conversion is not renamed into a syntax error
+
+
+# ------------------------------------------------------------------ release gate
+
+GATE_ARGS = ["--k", "8", "--min-tokens", "10", "--min-nodes", "10"]
+GATE_PARAMS = {"k": 8, "w": 5, "min_tokens": 10, "min_nodes": 10}
+
+
+def _gate(ref, target, allow, capsys, tmp_path):
+    out_json = tmp_path / "gate.json"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        rc = sim.main(["--ref", str(ref), "--target", str(target), "--allowlist", str(allow),
+                       "--json", str(out_json), *GATE_ARGS])
+    captured = capsys.readouterr()
+    warned = "\n".join(str(w.message) + str(w.filename) for w in caught)
+    for channel in (captured.out, captured.err, out_json.read_text(), warned):
+        assert CANARY not in channel.lower()  # the gate prints Tradewind-side facts only
+    return rc, captured.out
+
+
+def _accept_everything(out: str, allow, params=GATE_PARAMS):
+    """What a reviewer does after reading the ranges: paste the candidate entries."""
+    cands = [json.loads(line.strip().rstrip(",")) for line in out.splitlines()
+             if line.strip().startswith('{"file"')]
+    for c in cands:
+        c.update({"class": "API", "what": "test", "accepted": "2026-11-08", "review": "test"})
+    allow.write_text(json.dumps({"parameters": params, "entries": cands}))
+    return cands
+
+
+def test_gate_fails_on_new_ranges_and_passes_once_reviewed(tmp_path, capsys):
+    ref, target = _reference(tmp_path), _target(tmp_path)
+    allow = tmp_path / "allow.json"
+    allow.write_text(json.dumps({"parameters": GATE_PARAMS, "entries": []}))
+
+    rc, out = _gate(ref, target, allow, capsys, tmp_path)
+    assert rc == 1 and "gate: FAIL" in out and "  NEW      " in out
+    cands = _accept_everything(out, allow)
+    assert cands and {c["file"] for c in cands} == {"copied.py"}
+    assert {c["kind"] for c in cands} == {"tokens", "ast"}
+
+    rc, out = _gate(ref, target, allow, capsys, tmp_path)
+    assert rc == 0 and "gate: PASS" in out and "NEW" not in out
+
+
+def test_gate_entries_survive_a_move_but_not_an_edit(tmp_path, capsys):
+    ref, target = _reference(tmp_path), _target(tmp_path)
+    allow = tmp_path / "allow.json"
+    allow.write_text(json.dumps({"parameters": GATE_PARAMS, "entries": []}))
+    _accept_everything(_gate(ref, target, allow, capsys, tmp_path)[1], allow)
+
+    copied = target / "copied.py"
+    original = copied.read_text()
+    # moved: new code (a function, whose DEDENT now precedes the range), comments and blank
+    # lines above, reformatted spacing inside
+    copied.write_text("import math\n\n# moved down\n\n\ndef rate():\n    return math.pi\n\n\n"
+                      + original.replace(", ", ",  "))
+    rc, out = _gate(ref, target, allow, capsys, tmp_path)
+    assert rc == 0, out
+
+    # edited: one name changed inside the accepted range (the normalised tokens, hence the
+    # match with the reference, are unchanged; the reviewed text is not)
+    lines = original.splitlines()
+    i = next(j for j, line in enumerate(lines) if "return" in line)
+    lines[i] = re.sub(r"x[0-9a-f]+_[0-9]+", "edited_name", lines[i], count=1)
+    assert "edited_name" in lines[i]
+    copied.write_text("\n".join(lines) + "\n")
+    rc, out = _gate(ref, target, allow, capsys, tmp_path)
+    assert rc == 1 and "NEW" in out and "unused allow-list entry" in out
+
+    # copied elsewhere: the same text in another file is a new range
+    copied.write_text(original)
+    (target / "elsewhere.py").write_text(original)
+    rc, out = _gate(ref, target, allow, capsys, tmp_path)
+    assert rc == 1 and "elsewhere.py" in out
+
+
+def test_gate_refuses_other_parameters_and_an_empty_reference(tmp_path, capsys):
+    ref, target = _reference(tmp_path), _target(tmp_path)
+    allow = tmp_path / "allow.json"
+    allow.write_text(json.dumps({"parameters": GATE_PARAMS, "entries": []}))
+    out = _gate(ref, target, allow, capsys, tmp_path)[1]
+    _accept_everything(out, allow, params={**GATE_PARAMS, "min_tokens": 11})
+    rc, out = _gate(ref, target, allow, capsys, tmp_path)
+    assert rc == 1 and "--min-tokens 10 differs" in out and "NEW" not in out
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    allow.write_text(json.dumps({"parameters": GATE_PARAMS, "entries": []}))
+    rc, out = _gate(empty, target, allow, capsys, tmp_path)
+    assert rc == 1 and "the reference is empty" in out

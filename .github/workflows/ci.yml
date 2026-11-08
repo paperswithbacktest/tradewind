@@ -34,3 +34,17 @@ jobs:
       - run: python -m venv /tmp/oracle-env && /tmp/oracle-env/bin/pip install -q backtrader numpy pandas
       - run: /tmp/oracle-env/bin/python tools/run_oracle.py --engine backtrader --out /tmp/oracle_bt.json
       - run: python tools/oracle_diff.py /tmp/oracle_bt.json /tmp/oracle_tw.json
+
+  similarity:
+    # Clean-room rule 4 as a gate: backtrader is installed (sha256-pinned) in a throwaway
+    # environment and read by tools/similarity.py as hashes only; the job prints scores and
+    # Tradewind locations, never the reference's code. It fails on any range of 41 tokens or
+    # more not in spec/similarity-allowlist.json, then checks that a planted copy does fail.
+    # Procedure to accept a range: spec/similarity-allowlist.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"  # the base is this standard library: see the allow-list
+      - run: tools/similarity_gate.sh --control
