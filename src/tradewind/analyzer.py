@@ -8,16 +8,16 @@ from .params import ParamsBase
 
 
 class Analyzer(ParamsBase):
-    def _before_init(self):
+    def _tw_before_init(self):
         # set by Cerebro before the user's __init__: strategy, datas, data aliases
         self.rets = collections.OrderedDict()
-        self._children = []
+        self._tw_children = []
         if not hasattr(self, "strategy"):
             self.strategy = None
             self.datas = []
             self.data = None
 
-    def _bind(self, strategy):
+    def _tw_bind(self, strategy):
         self.strategy = strategy
         self.datas = strategy.datas
         self.data = strategy.datas[0] if strategy.datas else None

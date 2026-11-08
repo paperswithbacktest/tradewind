@@ -1,7 +1,7 @@
 # 05. Interfaces of the engine (chantier 2)
 
-**Status: validated by Édouard on 2026-11-03 (§ 10).** Nothing in `src/` depends
-on this document yet. It fixes the seams of the engine that chantier 2 builds and chantier 4
+**Status: validated by Édouard on 2026-11-03 (§ 10); implemented on 2026-11-06 behind the
+v0 engine with the oracle defaults (§ 11 lists where the code departs from the text).** It fixes the seams of the engine that chantier 2 builds and chantier 4
 fills: `Security` (currency, multiplier, tick size, lot), `Broker`, the pluggable reality
 models, the clock, the event bus and the feeds. The six design decisions are at the
 end (§ 10).
@@ -679,3 +679,60 @@ reason), `CancelPending`/`UpdateSubmitted`: live only.
 
 Live concurrency was not a question: the synchronous loop with one inbox (§ 8) is the only
 design that keeps runs deterministic and replayable.
+
+## 11. As built (2026-11-06)
+
+Modules: `securities.py` (§ 4.1-4.4), `cashbook.py` (§ 4.5), `models.py` (§ 5),
+`clock.py` (§ 3, § 6.1-6.2: `Phase`, `TimeSlice`, `UnionClock`, `AlwaysOpen`), `events.py`
+(§ 6.3), `market.py` (§ 6.4, § 7.1), `broker.py` (`Broker` protocol, `BackBroker` =
+`SimulatedBroker` as phases 3-8 and 9), `cerebro.py` (the loop). Tests: `test_interfaces.py`
+(one group per interface, each non-default model plugged through `broker.set_models` to
+prove the engine routes through it), `test_once_bar_by_bar.py` (Q4).
+
+Parity: the 21 synthetic probes give v0's NAVs, fills and statuses at full precision (no
+rounding); with the two probes added on the way, 23/23 against the oracle.
+
+Departures from the text above, all for parity or speed:
+
+* **Value objects are `NamedTuple`s** (`CashAmount`, `Bar`, `FeeParameters`,
+  `FillParameters`, `FillProposal`, `BuyingPowerCheck`): immutable and several times cheaper
+  to build per order than frozen dataclasses. Events are slotted dataclasses whose `seq` the
+  bus stamps at publish.
+* **`SlippageModel.get_slippage(..., at_open=False)`**: the compat `slip_open` switch needs to
+  know that the reference price is the bar's open.
+* **`CommInfoFeeModel.confirm_order_fee`**: the cash moves by the scheme's `getcommission`, the
+  order records its `confirmexec`, as v0 (identical for every scheme in the corpus).
+* **`FillModel.expired(order, bar)`** and **`needs_placed_bar`**: expiry is checked by the
+  broker before the fill; `placed_bar` is the feed's previous bar, built only for
+  cheat-on-close.
+* **`BuyingPowerModel`**: `pseudo_positions` holds sizes (the cash flow needs no more);
+  `BatchState.time` and `check_fill(..., time)` stamp the fee parameters.
+* **`TimeSlice`** also carries `dtnum` (the compat float day) and `all_have_bar`; `has_bar` is
+  a row of a T × N mask the clock precomputes.
+* **`OrderEvent.order`** is the order frozen at publish (the `notify_order` argument);
+  **`TradeEvent`** carries the trade and the strategy that owns the order behind it.
+  `CashEvent` exists but is not published by default: v0 never called `notify_cashvalue`.
+* **Phase 8 sums positions in the order they were first touched**, not in `SecurityId`
+  order: that is the oracle's (and v0's) order, and the one bit parity needs. The sum is a
+  gather of the closes and `np.add.accumulate`, checked against the scalar loop.
+* **`MarketState`** concatenates every feed's history into one array per field and turns the
+  feeds' line buffers into views on it (no copy kept); phase 2 moves the buffers from the
+  `has_bar` mask; open/high/low/close/volume rows are gathered on demand rather than at every
+  slice.
+* **Phases 10-15 run phase by phase across strategies**; v0 ran them strategy by strategy.
+  Identical with one strategy; with several, a trade notification now goes to the strategy
+  whose order moved it.
+* **Phase 4** is implemented generically (settlement scan, borrow fee = annual rate × short
+  value × elapsed years, margin interest charged to the account) and skipped entirely while
+  every security has the no-op oracle models.
+* **Q4**: the built-ins have only a vectorised `once()`; the bar-by-bar path the test compares
+  against is the indicator rebuilt on every prefix of the series (what a run knowing bars
+  `0..t` computes). Per-built-in `next()` steps come with live (chantier 7).
+
+Speed (`tools/bench_engine.py`, 4 000 names × 756 bars, Mac M-series, best of three; a
+corpus backtest was running alongside): `idle` (empty `next`) 1.11 → 0.43 µs per
+security-bar, `rebalance` (monthly equal weight on all names) 5.29 → 1.45 µs; same final
+values. The gains: phase 2 from the mask (no per-feed date comparison, no bar tuple), the
+mark vectorised, `get_value(datas=[d])` without a scan of the book, the readiness gate
+cached, notifications cloned without `copy.copy`.
+

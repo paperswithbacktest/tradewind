@@ -1,6 +1,8 @@
 # 04. Design: modules and interfaces
 
-Written before the code, from `01-scope.md` and `02-semantics.md`. The names a strategy
+Written before the code, from `01-scope.md` and `02-semantics.md`. Chantier 2 put the
+interfaces of `05-interfaces.md` behind these modules (securities, cash book, models, clock,
+event bus, market state; see its § 11). The names a strategy
 sees are backtrader's public names; the internals are Tradewind's own and carry no
 compatibility promise.
 

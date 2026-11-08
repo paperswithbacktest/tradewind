@@ -44,7 +44,38 @@ only, a reversal, a commission, weekly bars, eleven `SharpeRatio` parameter sets
 | `TradeAnalyzer`: `{total: {total: 0}}` without trades, `{total: {total, open}}` with open trades only, the full tree from the first closed trade; a **reversing fill closes one trade and opens another**; won = net P&L > 0; `lost.pnl.max` is the largest loss; empty long/short length buckets start `min` at `sys.maxsize`, `len.won` / `len.lost` have no `min` until a trade lands there. A missing key raises `KeyError`, as an attribute too | kept | probe `analyzers` |
 | `DrawDown`: percent of the running peak, money, bars since the peak, and their maxima, over every bar including `prenext` | kept | probe `analyzers` |
 | `SharpeRatio`: per-period returns (value at the period's last bar over the previous period's, the first over the starting cash); `convertrate` turns `riskfreerate` into `(1+rf)^(1/factor)-1` and `annualize` multiplies by `sqrt(factor)`, else returns are annualised and `annualize` is moot; factor 252/52/12/1; population deviation unless `stddev_sample`; `None` on a zero deviation. Its `get_analysis()` is a **plain `OrderedDict`** (`["sharperatio"]`, no attribute access) | kept | probe `analyzers` |
-| `broker.setcash()` moves the portfolio value at once, before the run too (an analyzer's `start` reads it) | kept | scratch probe; the first build returned the default 10 000 until the first bar |
+| `broker.setcash()` moves the portfolio value at once, before the run too (an analyzer's `start` reads it); during the run the value becomes the cash alone until the next mark (see 0.1.45 below) | kept | scratch probe; the first build returned the default 10 000 until the first bar |
+
+Observed on 2026-11-06 while the event bus of `05-interfaces.md` was built (probes
+`notify_sequence`, `cancel_timing`; the order and trade notifications of both engines
+compared, nothing else printed):
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| Within one bar the strategy receives **every order notification before any trade notification** (two fills: Completed, Completed, then trade, trade), not one fill's order then its trade | kept | probe `notify_sequence`; v0 interleaved them, the bus's (kind, sequence) drain matches the oracle |
+| An order placed **inside `notify_order`** is first notified at the **next** bar (Submitted, Accepted, Completed together), not during the delivery that placed it | kept | probe `notify_sequence`; v0 delivered its Submitted at once |
+| `cancel()` reaches only an **Accepted** order not yet filled. An order still waiting for its batch acceptance -- cancelled in the `next` that placed it, or placed and cancelled inside `notify_order` -- is accepted at the next bar and fills as if nothing had been asked; a cancelled Accepted order is notified `Canceled` at the next bar | kept, flagged | probe `cancel_timing` (four moments, a market order cancelled at once still executes). **A cancel that silently does nothing is a defect**: the corrected default (chantier 4) cancels a Submitted order at once |
+
+Observed on 2026-11-06/08 during the parity pass on pwb-toolbox 0.1.45 (804 corpus
+strategies: 11 errors and 12 divergences of `feat/interfaces` explained). Probes in
+`tests/oracle/strategies.py`; order logs of both engines compared; oracle exceptions read
+as type and message only:
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| A strategy's own attributes may use any `_name` (`_ready`, `_resolve(sym, default)`, `_step`, `_indicators`, `_listed`, `_computed`...): the engine's internals of `Strategy`, `Indicator` and `Analyzer` are prefixed `_tw_` | kept | probe `private_names`; corpus `regimes_of_index…`, `volatility_spreads…` (`'bool' object is not callable`), `credit_informed…` (its `_resolve` replaced the engine's) |
+| `strategy.datetime` is the **clock's own line**, the time of every slice run so far, not data0's: it moves while data0 has not listed, it is not preloaded (`date(1)` raises `IndexError`), an `ago` before its first slice wraps like a Python list; `len(strategy)` counts the slices | kept | probe `strategy_clock`; six corpus strategies read `self.datetime.date(0)` |
+| `next` waits for every feed to list **and for every indicator's warm-up on its own input**: an SMA(5) on a late feed adds 4 bars, one on an early feed nothing | kept | probe `strategy_clock` |
+| An indicator may only **bind** its declared lines in `__init__` (`self.lines.value = ROC(...)`, `self.l.b = SMA(...)`): the line carries the bound values bit for bit, NaN before their min period, and the indicator takes the bound min period; it needs neither `once` nor `next` | kept | probe `line_binding`; corpus `ROC5Signal`, `DualMomentumSignal` |
+| `RateOfChange = (x - x[-p]) / x[-p]`; `StandardDeviation = sqrt(mean(x²) - mean(x)²)`, both means compensated window sums | kept | probe `indicator_bits` (0 of 342 and 0 of 111 values apart); the ratio form `x / x[-p] - 1` differs in the last bit on 95 % of values and reordered two equal-return ETFs in `abnormal_returns…`'s decile sort |
+| `order_target_value` reads the position's value through `get_value(datas=[d])` **even when flat**, which lands a pending `add_cash`: a buy placed after a same-bar withdrawal is checked at its fill against the reduced cash | kept, flagged | probe `add_cash_flat`; `investing_in_the_s_p_index…` 2023-02-02 (monthly fee then re-entry: `Margin`). Same defect as the `get_value` side effect above |
+| With `set_checksubmit(False)` an order is **accepted at once**: no `Submitted` notification, `Accepted` delivered with the next bar's, cancellable in the bar that placed it; the cash is checked only at the fill | kept | probe `checksubmit_off`; `robust_asset_allocation…` (the toolbox's retry decision counts notifications) |
+| A stock-like scheme's `leverage` (set even in place, `comminfo.p.leverage = 2`) applies to **longs only**: buying pays `size × price / leverage`, the pre-check and the fill check count that, selling out of a long returns `(size × entry / leverage + P&L)`, the mark counts `size × entry / leverage` then the P&L; shorts move the full price; `getsize` multiplies by the leverage; `get_value(datas=[d])` still answers `size × close` | kept | probe `stock_leverage`; `structural_convexity…` (accepts a 2× book the unlevered check refused); 19 corpus files set a leverage |
+| `setcash()` while holding makes `getvalue()` **the cash alone** until the next bar's mark | kept, flagged | probe `setcash_held`; `parameter_uncertainty…` credits a monthly rate with `setcash` and then sizes its book on that value. **A value without positions is a defect** |
+| A fill is one execution **per part** -- the closing part, then the opening part --, each settled then charged its own fee; closing returns the **entry value plus the P&L**, `(size × entry + P&L)`, not the traded value; `order.executed.value` counts the closed part at the entry price, `executed.comm` is the sum of the parts' fees | kept | probes `reversal_fees`, `executed_values` (cash bit for bit on 406 reversal bars and 74 others; one fee on the whole size differs on most reversals) |
+| `notify_trade` hears of a trade when it **opens and when it closes**, not when a fill resizes it | kept | probe `executed_values` |
+| The marked value is **`cash + t`**, `t` the positions' values summed from zero in the order the positions were first touched: `size × close` for a long or a short (a leveraged long: margin then P&L). Queued `add_cash` amounts land **one after the other**, not summed first; a short's `getvalue` (what `order_target_value` reads) is `size × close` too | kept, residual | scratch probes `value_terms` (893 of 904 marks bit for bit, against 164 for `cash + v1 + v2...`); `high_dimensional_minimum_variance…` 2025-05-26 (a target of ~0 on a 1 204-share short: 1 204 shares on the oracle, 1 203 from entry + P&L); `profitable_mean_reversion…` 2010-03-12 (nine toolbox additions). **Residual**: a few marks in a hundred still differ in their last bit, cash identical; the first-touch order of the oracle's positions is the suspect (switching the feeds' order for it moved the count both ways) |
+| A strategy that draws from `np.random` without a seed is not reproducible on either engine | n/a | `large_scale_portfolio_allocation…`: two oracle runs at the same hash seed end at 326 551 and 386 278; with `np.random.seed(0)` both engines end at 416 048.7958239279 |
 
 Seen and **not** reproduced yet: in `runonce` mode a `next`-only indicator whose input is
 another indicator reads `self.data[0]` as NaN on every bar (it reads the value with
@@ -81,7 +112,7 @@ another indicator reads `self.data[0]` as NaN on every bar (it reads the value w
 | behaviour | kept / corrected | note |
 |---|---|---|
 | `notify_order` on each status change: Submitted, Accepted, Partial, Completed, Canceled, Margin, Rejected, Expired | kept | names and order of states |
-| `notify_trade` with `trade.isclosed`, `pnl`, `pnlcomm` | kept | |
+| `notify_trade` with `trade.isclosed`, `pnl`, `pnlcomm`, at a trade's open and close only | kept | |
 | `notify_timer` with `add_timer(when, monthdays, monthcarry)` | kept | used by the eleven toolbox strategies |
 | `notify_cashvalue`, `notify_fund` | kept, low priority | 0 files |
 
@@ -89,7 +120,7 @@ another indicator reads `self.data[0]` as NaN on every bar (it reads the value w
 
 | behaviour | kept / corrected | note |
 |---|---|---|
-| `getvalue()` = cash + Σ position × close of the bar being processed | kept | 70 % of files log it in `next()`; it is the NAV the oracle compares |
+| `getvalue()` = cash + Σ position × close of the bar being processed (the positions summed apart, then added to the cash; see 0.1.45 above) | kept | 70 % of files log it in `next()`; it is the NAV the oracle compares |
 | Single currency (USD) | corrected (new) | Lean `CashBook`; default single-currency, identical results |
 | Corporate actions | corrected (new) | prices are adjusted upstream today; dividends as cash and splits as quantity changes become possible when the feed carries them |
 | Delisting | corrected (new) | a feed that ends liquidates at its last close (today the position is carried at a stale price) |

@@ -40,7 +40,7 @@ def _minperiod_of(source) -> int:
     """The minimum period an input imposes: an indicator's own, a feed's 1."""
     owner = source._owner if isinstance(source, LineBuffer) else source
     if isinstance(owner, Indicator):
-        return owner._minperiod
+        return owner._tw_minperiod
     return 1
 
 
@@ -54,72 +54,112 @@ def _owner_line(source) -> LineBuffer:
     raise TypeError(f"cannot bind to {type(source).__name__}")
 
 
+def _bindable(obj) -> bool:
+    """A line, an indicator (its first line) or a feed (its close): what a declared line
+    of an indicator can be bound to."""
+    return isinstance(obj, (LineBuffer, Indicator)) or (hasattr(obj, "lines") and hasattr(obj, "_dtnum"))
+
+
+class _IndicatorLines(Lines):
+    """An indicator's lines. Assigning a line to a declared line **binds** it, as the
+    public documentation of indicator development shows (``self.lines.sma = SMA(...)``
+    in ``__init__``): the declared line then carries the bound line's values, and the
+    indicator needs neither ``once()`` nor ``next()``. Observed on the oracle (probe
+    ``line_binding``): the values are the bound line's bit for bit, NaN before its min
+    period, and the indicator's min period becomes the bound line's (an indicator bound
+    to ``RateOfChange(period=5)`` first delivers at bar 6; an SMA(3) of it at bar 8)."""
+
+    def __init__(self, names, buffers, owner):
+        object.__setattr__(self, "_tw_owner", owner)
+        object.__setattr__(self, "_tw_open", False)
+        super().__init__(names, buffers)
+        object.__setattr__(self, "_tw_open", True)
+
+    def __setattr__(self, name, value):
+        if self._tw_open and name in self._names and _bindable(value):
+            self._tw_owner._tw_bind_line(self._names.index(name), value)
+            return
+        object.__setattr__(self, name, value)
+
+    def __setitem__(self, i, value):
+        if not _bindable(value):
+            raise TypeError(f"cannot bind {type(value).__name__} to line {i}")
+        self._tw_owner._tw_bind_line(range(len(self._names))[i], value)
+
+
 class Indicator(LineArithmetic, ParamsBase):
     lines: tuple = ()
     plotinfo: ClassVar[dict] = {}
     plotlines: ClassVar[dict] = {}
 
-    def _before_init(self):
-        self._minperiod = 1
-        self._computed = False
-        self._clock = None
-        self._strategy = None
+    def _tw_before_init(self):
+        self._tw_minperiod = 1
+        self._tw_computed = False
+        self._tw_clock = None
+        self._tw_strategy = None
+        self._tw_bindings = []
 
-    def _consume_args(self, *inputs):
+    def _tw_consume_args(self, *inputs):
         """Bind the input lines before the user's ``__init__`` runs; nothing is passed on,
         so a corpus indicator written as ``def __init__(self)`` works."""
         self.datas = list(inputs)
         self.data = self.datas[0] if self.datas else None
         for i, d in enumerate(self.datas):
             setattr(self, f"data{i}", d)
-        self._clock = _owner_line(self.data) if self.data is not None else None
+        self._tw_clock = _owner_line(self.data) if self.data is not None else None
         # Observed on the oracle: an indicator starts from the largest minimum period of its
         # inputs (an indicator, or a line of one; a feed counts 1) -- SMA(5) of SMA(3) first
         # delivers at bar 7, a line operation on Highest(20) at bar 20.
-        self._minperiod = max([1] + [_minperiod_of(d) for d in self.datas])
-        n = self._clock.buflen() if self._clock is not None else 0
+        self._tw_minperiod = max([1] + [_minperiod_of(d) for d in self.datas])
+        n = self._tw_clock.buflen() if self._tw_clock is not None else 0
         names = tuple(self.lines) if not isinstance(self.lines, str) else (self.lines,)
         buffers = [LineBuffer(np.full(n, np.nan), name, owner=self) for name in names]
-        self.lines = Lines(names, buffers)
+        self.lines = _IndicatorLines(names, buffers, self)
         self.l = self.lines
         for name, buf in zip(names, buffers):
             setattr(self, name, buf)
-        self._register()
+        self._tw_register()
         return ()
 
     def __init__(self):
         pass
 
-    def _register(self):
+    def _tw_register(self):
         """Attach to the running strategy so the engine syncs the cursor and reads the
         min period. Found through the feed's environment."""
         source = self.data
         if isinstance(source, LineBuffer):
             source = source._owner
-        env = getattr(source, "_env", None)
-        self._env = env
+        env = getattr(source, "_tw_env", None)
+        self._tw_env = env
         strat = getattr(env, "_building", None) if env is not None else None
         if strat is not None:
-            strat._indicators.append(self)
-            self._strategy = strat
-            strat._minperiod = max(strat._minperiod, self._minperiod)
+            strat._tw_indicators.append(self)
+            self._tw_strategy = strat
+            strat._tw_minperiod = max(strat._tw_minperiod, self._tw_minperiod)
+
+    def _tw_bind_line(self, i: int, source):
+        """``self.lines.<name> = source`` in ``__init__`` (see ``_IndicatorLines``)."""
+        self._tw_bindings.append((i, source))
+        self._tw_minperiod = max(self._tw_minperiod, _minperiod_of(source))
+        self._tw_push_minperiod()
 
     def addminperiod(self, n: int):
         """Extend the minimum period by ``n - 1`` bars. Observed on the oracle: periods add
         up (``addminperiod(5)`` then ``addminperiod(3)`` on a feed: first value at bar 7;
         on an SMA(4) input: bar 10)."""
-        self._minperiod += int(n) - 1
-        self._push_minperiod()
+        self._tw_minperiod += int(n) - 1
+        self._tw_push_minperiod()
 
     def updateminperiod(self, n: int):
         """Raise the minimum period to ``n`` if it is lower (observed: ``addminperiod(5)``
         then ``updateminperiod(3)`` keeps 5)."""
-        self._minperiod = max(self._minperiod, int(n))
-        self._push_minperiod()
+        self._tw_minperiod = max(self._tw_minperiod, int(n))
+        self._tw_push_minperiod()
 
-    def _push_minperiod(self):
-        if self._strategy is not None:
-            self._strategy._minperiod = max(self._strategy._minperiod, self._minperiod)
+    def _tw_push_minperiod(self):
+        if self._tw_strategy is not None:
+            self._tw_strategy._tw_minperiod = max(self._tw_strategy._tw_minperiod, self._tw_minperiod)
 
     def __len__(self):
         return len(self.lines[0])
@@ -135,14 +175,14 @@ class Indicator(LineArithmetic, ParamsBase):
 
     # operators come from ``LineArithmetic``: a new line in the build stage, a number on
     # the current value during the run
-    def _v(self):
+    def _tw_v(self):
         return self.lines[0][0]
 
     def __eq__(self, other):
         if in_build_stage():
             return _lazy(operator.eq, self, other)
         if isinstance(other, (int, float, np.floating, np.integer)) and not isinstance(other, bool):
-            return self._v() == float(other)
+            return self._tw_v() == float(other)
         return self is other  # identity otherwise: ``ind in some_list`` must not compare values
 
     def __ne__(self, other):
@@ -155,7 +195,7 @@ class Indicator(LineArithmetic, ParamsBase):
         return id(self)
 
     # -- computation ------------------------------------------------------------------
-    def _input_lines(self):
+    def _tw_input_lines(self):
         """Every LineBuffer of every input (a feed's lines, an indicator's lines)."""
         out = []
         for inp in self.datas:
@@ -174,7 +214,7 @@ class Indicator(LineArithmetic, ParamsBase):
         ``self.data.high[-1]`` or ``self.data.datetime.date(0)`` inside ``next()`` read
         the bar being computed, then restored.
         """
-        inputs = self._input_lines()
+        inputs = self._tw_input_lines()
         saved = [buf.idx for buf in inputs]
         try:
             for i in range(start, end):
@@ -182,7 +222,7 @@ class Indicator(LineArithmetic, ParamsBase):
                     buf.idx = i
                 for buf in inputs:
                     buf.idx = i
-                if i + 1 < self._minperiod:
+                if i + 1 < self._tw_minperiod:
                     continue
                 self.next()
         finally:
@@ -193,29 +233,43 @@ class Indicator(LineArithmetic, ParamsBase):
         raise NotImplementedError(f"{type(self).__name__} defines neither once() nor next()")
 
     @property
-    def _vectorised(self) -> bool:
+    def _tw_vectorised(self) -> bool:
         """Does the class provide its own ``once``? Then it is computed in one pass at
         start. Otherwise it is stepped bar by bar with the strategy, like the oracle
         runs a ``next``-only indicator, so its ``next()`` may read any feed of the run
         (a corpus indicator reads a VIX feed it was not given as input)."""
         return type(self).once is not Indicator.once
 
-    def _runonce(self) -> bool:
-        env = self._env
+    @property
+    def _tw_steps(self) -> bool:
+        """Does the class compute anything bar by bar? An indicator whose lines are all
+        bound in ``__init__`` defines neither ``once`` nor ``next`` and has nothing to step."""
+        return not self._tw_vectorised and (type(self).next is not Indicator.next or not self._tw_bindings)
+
+    def _tw_runonce(self) -> bool:
+        env = self._tw_env
         return bool(getattr(getattr(env, "p", None), "runonce", True)) if env is not None else True
 
-    def _compute(self):
-        if self._computed:
+    def _tw_compute(self):
+        if self._tw_computed:
             return
         for inp in self.datas:
             owner = inp._owner if isinstance(inp, LineBuffer) else inp
             if isinstance(owner, Indicator):
-                owner._compute()
-        n = self._clock.buflen()
-        if self._vectorised:
+                owner._tw_compute()
+        n = self._tw_clock.buflen()
+        for i, source in self._tw_bindings:
+            owner = source._owner if isinstance(source, LineBuffer) else source
+            if isinstance(owner, Indicator):
+                owner._tw_compute()
+            values = _as_array(source)
+            if len(values) != n:
+                raise NotImplementedError("binding a line of another clock (a feed of another length)")
+            self.lines[i].array[:] = values
+        if self._tw_vectorised:
             self.once(0, n)
             self.lines.home()
-        elif self._runonce():
+        elif self._tw_steps and self._tw_runonce():
             # Observed on the oracle (runonce, its default): a next-only indicator is
             # computed in one pre-pass before the run, during which every feed that is
             # not one of its inputs sits at its LAST bar. An indicator reading such a
@@ -224,8 +278,8 @@ class Indicator(LineArithmetic, ParamsBase):
             # Reproduced here because the reference NAVs embed it; ``runonce=False``
             # steps the indicator live instead.
             foreign = []
-            inputs = {id(b) for b in self._input_lines()}
-            for d in getattr(self._env, "datas", []):
+            inputs = {id(b) for b in self._tw_input_lines()}
+            for d in getattr(self._tw_env, "datas", []):
                 for buf in getattr(d, "lines", []):
                     if id(buf) not in inputs:
                         foreign.append((buf, buf.idx))
@@ -236,19 +290,19 @@ class Indicator(LineArithmetic, ParamsBase):
                 for buf, idx in foreign:
                     buf.idx = idx
             self.lines.home()
-        self._computed = True
-        self._stepped = -1
+        self._tw_computed = True
+        self._tw_stepped = -1
 
-    def _sync(self):
+    def _tw_sync(self):
         """Align the cursor with the clock feed's cursor; step a live next-only indicator."""
-        if not self._computed:
-            self._compute()
-        idx = self._clock.idx
+        if not self._tw_computed:
+            self._tw_compute()
+        idx = self._tw_clock.idx
         for buf in self.lines:
             buf.idx = idx
-        if not self._vectorised and not self._runonce() and idx > self._stepped:
-            self._stepped = idx
-            if idx + 1 >= self._minperiod:
+        if self._tw_steps and not self._tw_runonce() and idx > self._tw_stepped:
+            self._tw_stepped = idx
+            if idx + 1 >= self._tw_minperiod:
                 self.next()
 
 

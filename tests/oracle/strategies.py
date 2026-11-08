@@ -492,6 +492,67 @@ def build(bt):
                 self.extra["first_next"] = len(self)
                 self.extra["x"] = float(self.x[0])
 
+    class NotifySequence(Recorder):
+        """Two fills on one bar, and an order placed from inside ``notify_order``: are the
+        trade notifications grouped after the order ones, and when is an order placed
+        during a notification first notified?"""
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            n = len(self)
+            if order.status == order.Completed and n == 38 and order.data._name == "S0":
+                self.buy(data=self.datas[2], size=3)
+
+        def notify_trade(self, trade):
+            self.statuses.append((0, f"trade {trade.data._name} {'closed' if trade.isclosed else 'open'}",
+                                  round(self.broker.getvalue(), 6), self.datas[0].datetime.date(0).isoformat()))
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            if n == 34:
+                self.buy(data=d0, size=10)
+                self.buy(data=d1, size=10)
+            if n == 37:
+                self.close(d0)
+                self.close(d1)
+            if n == 51:
+                self.sell(data=d0, size=5)
+                self.buy(data=d1, size=5)
+
+    class CancelTiming(Recorder):
+        """``cancel()`` at four moments: in the ``next`` that placed the order (a far limit,
+        then a market order), on the next bar once it is Accepted, and on an order placed
+        inside ``notify_order``. Which ones are cancelled, and which still fill?"""
+
+        def __init__(self):
+            super().__init__()
+            self.kept = {}
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            if order.status == order.Completed and order.data._name == "S1" and len(self) == 44:
+                self.kept["d"] = self.buy(data=self.datas[2], size=1, exectype=bt.Order.Limit,
+                                          price=self.datas[2].close[0] * 0.5)
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0 = self.datas[0]
+            if n == 33:
+                self.cancel(self.buy(data=d0, size=1, exectype=bt.Order.Limit, price=d0.close[0] * 0.5))
+            if n == 36:
+                self.kept["b"] = self.buy(data=d0, size=1, exectype=bt.Order.Limit, price=d0.close[0] * 0.5)
+            if n == 37:
+                self.cancel(self.kept["b"])
+            if n == 40:
+                self.cancel(self.buy(data=d0, size=2))
+            if n == 43:
+                self.buy(data=self.datas[1], size=1)
+            if n == 46:
+                self.cancel(self.kept["d"])
+
     class Analyzers(Recorder):
         """``bt.analyzers`` (corpus ``performance_of_the_average_directional_index...``):
         long and short trades, wins and losses, a reversal, two trades left open."""
@@ -523,11 +584,315 @@ def build(bt):
                 else:
                     self.sell(data, size=-size)
 
+
+    # -- probes of the 0.1.45 parity pass (spec/02 § "parity 0.1.45") ---------------------------
+
+    class StrategyClock(Recorder):
+        """``self.datetime`` and ``len(self)`` of a strategy whose data0 lists 30 bars late
+        (feeds S3 first): the clock's own line, not data0's; an SMA on an early feed adds no
+        warm-up, one on the late feed does."""
+
+        def __init__(self):
+            super().__init__()
+            self.sma_early = bt.indicators.SMA(self.datas[1].close, period=5)
+            self.sma_late = bt.indicators.SMA(self.datas[3].close, period=5)
+            self.extra = {"rows": []}
+
+        def _row(self, stage):
+            dt = self.datetime
+            try:
+                ahead = dt.date(1).isoformat()
+            except IndexError as exc:
+                ahead = type(exc).__name__
+            self.extra["rows"].append((stage, len(self), len(dt), dt.date(0).isoformat(),
+                                       dt.date(-1).isoformat(), ahead, len(self.datas[3])))
+
+        def prenext(self):
+            if len(self) in (1, 2, 30, 31, 33):
+                self._row("prenext")
+
+        def nextstart(self):
+            self._row("nextstart")
+            self.next()
+
+        def next(self):
+            super().next()
+            if len(self) % 20 == 0:
+                self._row("next")
+
+    class LineBinding(Recorder):
+        """Indicators that only bind their declared lines in ``__init__`` (corpus ROC5Signal,
+        DualMomentumSignal): values, min periods, an SMA of one."""
+
+        def __init__(self):
+            super().__init__()
+
+            class Bound(bt.Indicator):
+                lines = ("value",)
+                params = (("period", 5),)
+
+                def __init__(self):
+                    super().__init__()
+                    self.lines.value = bt.indicators.RateOfChange(self.data.close, period=self.p.period)
+
+            class TwoLines(bt.Indicator):
+                lines = ("a", "b")
+
+                def __init__(self):
+                    self.l.b = bt.indicators.SMA(self.data.close, period=3)
+                    self.lines.a = self.data.close - self.data.open
+
+            self.bound = Bound(self.datas[0])
+            self.two = TwoLines(self.datas[1])
+            self.nested = bt.indicators.SMA(Bound(self.datas[2], period=4), period=3)
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            if len(self) % 9 == 0:
+                self.extra["rows"].append((len(self), self.bound[0], self.bound.value[-1], self.two.a[0],
+                                           self.two.l.b[0], self.nested[0]))
+            if len(self) == 40:
+                self.buy(data=self.datas[0], size=10 if self.bound[0] > 0 else 20)
+
+    class IndicatorBits(Recorder):
+        """RateOfChange and StandardDeviation, compared to the last bit (``repr``)."""
+
+        def __init__(self):
+            super().__init__()
+            ind = bt.indicators
+            self.inds = [ind.RateOfChange(self.datas[0].close, period=5), ind.RateOfChange(self.datas[1].close, period=1),
+                         ind.StandardDeviation(self.datas[0].close, period=10)]
+            self.extra = {"bits": []}
+
+        def next(self):
+            super().next()
+            self.extra["bits"].append([repr(float(i[0])) for i in self.inds])
+
+    class PrivateNames(Recorder):
+        """A strategy and an indicator owning names an engine might use itself: ``_ready``,
+        ``_resolve(name, default)``, ``_step``, ``_listed``, ``_indicators`` (a dict),
+        ``_computed``, ``_timers`` (corpus ``regimes_of_index…``, ``credit_informed…``)."""
+
+        def __init__(self):
+            super().__init__()
+
+            class Ind(bt.Indicator):
+                lines = ("x",)
+
+                def __init__(self):
+                    self._computed = False
+                    self._step = 0
+                    self._ready = False
+                    self.addminperiod(3)
+
+                def next(self):
+                    self._step += 1
+                    self.lines.x[0] = self.data.close[0] - self.data.close[-2]
+
+            self._ready = False
+            self._step = 0
+            self._listed = set()
+            self._indicators = {d._name: Ind(d) for d in self.datas[:3]}
+            self._computed = False
+            self._timers = []
+
+        def _resolve(self, name, default=None):
+            return self.getdatabyname(name) if name in self.getdatanames() else default
+
+        def next(self):
+            super().next()
+            self._step += 1
+            self._ready = self._ready or self._step >= 5
+            if self._ready and self._step % 10 == 0:
+                self.order_target_percent(self._resolve("S1"), target=0.5 if (self._step // 10) % 2 else 0.1)
+                self.order_target_value(self._resolve("S2"), target=20000)
+                self.order_target_size(data=self._resolve("S0"), target=self._step)
+
+    class AddCashFlat(Recorder):
+        """``add_cash`` then ``order_target_value`` on a flat feed: the target's position read
+        lands the withdrawal, and the fill is checked against it (corpus
+        ``investing_in_the_s_p_index…``); ``order_target_size`` does not read it."""
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1, d2 = self.datas[0], self.datas[1], self.datas[2]
+            if n == 40:
+                cash = self.broker.getcash()
+                self.broker.add_cash(-0.5 * cash)
+                self.order_target_value(d0, target=int(0.9 * cash / d0.close[0]) * d0.close[0])
+            if n == 50:
+                cash = self.broker.getcash()
+                self.broker.add_cash(-0.5 * cash)
+                self.order_target_size(d1, target=int(0.9 * cash / d1.close[0]))
+            if n == 60:
+                cash = self.broker.getcash()
+                self.broker.add_cash(-0.5 * cash)
+                self.order_target_percent(d2, target=0.9)
+
+    class ChecksubmitOff(Recorder):
+        """``set_checksubmit(False)``: accepted at once (no Submitted), cancellable in the bar
+        that placed it, refused only at the fill (corpus ``robust_asset_allocation…``)."""
+
+        def __init__(self):
+            super().__init__()
+            self.broker.set_checksubmit(False)
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            if n == 33:
+                self.buy(data=d0, size=500)
+                self.buy(data=d1, size=int(2 * self.broker.getcash() / d1.close[0]))
+            if n == 36:
+                self.order_target_percent(d0, 0.0)
+                self.buy(data=d1, size=10, exectype=bt.Order.Limit, price=d1.close[0] * 0.5)
+            if n == 38:
+                self.cancel(self.buy(data=d1, size=5))
+
+    class StockLeverage(Recorder):
+        """A stock-like scheme with ``leverage = 2`` set on the scheme in place (corpus
+        ``structural_convexity…``): longs pay and count their margin, shorts the full price;
+        the pre-check, the fills, the value and the target sizes."""
+
+        def __init__(self):
+            super().__init__()
+            self.broker.setcommission(commission=0.001)
+            for ci in self.broker.comminfo.values():
+                ci.p.leverage = 2.0
+            self.extra = {"cash": []}
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            self.extra["cash"].append(repr(self.broker.getcash()))
+            if n == 32:
+                self.buy(data=d0, size=int(1.5 * self.broker.getcash() / d0.close[0]))
+            if n == 40:
+                self.buy(data=d1, size=200)
+            if n == 48:
+                self.sell(data=d0, size=300)
+            if n == 56:
+                self.close(d0)
+                self.sell(data=d1, size=500)
+            if n == 64:
+                self.close(d1)
+            if n == 70:
+                self.order_target_percent(d0, 0.5)
+            if n == 76:
+                self.order_target_value(d1, -30000)
+            if n == 82:
+                self.order_target_percent(d0, 1.6)
+            if n == 88:
+                self.close(d0)
+                self.close(d1)
+
+    class SetcashHeld(Recorder):
+        """``setcash`` while holding a position: the value becomes the cash alone until the
+        next bar (corpus ``parameter_uncertainty…`` credits a monthly rate this way)."""
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0 = self.datas[0]
+            if n == 32:
+                self.buy(data=d0, size=500)
+            if n in (40, 50):
+                self.broker.setcash(self.broker.getcash() * 1.01)
+                self.extra["rows"].append((n, self.broker.getvalue(), self.broker.get_value(datas=[d0])))
+                if n == 50:
+                    self.order_target_percent(d0, 0.5)
+
+    class ReversalFees(Recorder):
+        """Random targets that often flip the side, under a percentage fee: a reversal is two
+        executions each with its own fee, a close returns entry value + P&L -- the cash to the
+        last bit (``repr``)."""
+
+        def __init__(self):
+            super().__init__()
+            import random
+
+            self.broker.setcommission(commission=0.0013)
+            self.rng = random.Random(5)
+            self.extra = {"cash": [], "comm": []}
+
+        def next(self):
+            super().next()
+            for d in self.datas[:3]:
+                pos = self.getposition(d).size
+                tgt = self.rng.choice([-1, 1]) * self.rng.randint(1, 60)
+                if pos and (pos > 0) == (tgt > 0):
+                    tgt = -tgt
+                self.order_target_size(d, tgt)
+            # the cash to the last bit; the value within the diff's tolerance (one mark in about
+            # a hundred still differs in its last bit, spec/02 "value of a book")
+            self.extra["cash"].append((repr(self.broker.getcash()), self.broker.getvalue()))
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            if order.status == order.Completed:
+                ex = order.executed
+                self.extra["comm"].append((repr(ex.comm), repr(ex.value), repr(ex.price)))
+
+    class ExecutedValues(Recorder):
+        """``order.executed`` (closed part valued at the entry price) and ``notify_trade``
+        (heard at open and close only, a resize is silent)."""
+
+        def __init__(self):
+            super().__init__()
+            self.broker.setcommission(commission=0.001)
+            self.extra = {"executed": [], "trades": []}
+
+        def next(self):
+            super().next()
+            n = len(self)
+            d0, d1 = self.datas[0], self.datas[1]
+            if n == 33:
+                self.buy(data=d0, size=91)
+                self.sell(data=d1, size=37)
+            if n == 38:
+                self.sell(data=d0, size=30)
+                self.buy(data=d1, size=50)
+            if n == 42:
+                self.buy(data=d0, size=13)
+            if n == 45:
+                self.close(d0)
+                self.close(d1)
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            if order.status == order.Completed:
+                ex = order.executed
+                self.extra["executed"].append((order.data._name, ex.size, ex.price, ex.value, ex.comm, ex.pnl))
+
+        def notify_trade(self, trade):
+            self.extra["trades"].append((len(self), trade.data._name, trade.isclosed, trade.pnl, trade.pnlcomm,
+                                         trade.size))
+
     return {
+        "strategy_clock": StrategyClock,
+        "line_binding": LineBinding,
+        "indicator_bits": IndicatorBits,
+        "private_names": PrivateNames,
+        "add_cash_flat": AddCashFlat,
+        "checksubmit_off": ChecksubmitOff,
+        "stock_leverage": StockLeverage,
+        "setcash_held": SetcashHeld,
+        "reversal_fees": ReversalFees,
+        "executed_values": ExecutedValues,
         "line_ops": LineOps,
         "minperiod_add": MinperiodAdd,
         "minperiod_chain": MinperiodChain,
         "analyzers": Analyzers,
+        "notify_sequence": NotifySequence,
+        "cancel_timing": CancelTiming,
         "foreign_feed": ForeignFeed,
         "batch_funding": BatchFunding,
         "deficit_carry": DeficitCarry,

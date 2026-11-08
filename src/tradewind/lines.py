@@ -50,91 +50,91 @@ def _lazy(fn, *operands):
 
 class LineArithmetic:
     """Operators of a line-like object (a line, an indicator): a line in the build stage,
-    a number on the current value (``_v()``) otherwise."""
+    a number on the current value (``_tw_v()``) otherwise."""
 
     __slots__ = ()
 
-    def _v(self):
+    def _tw_v(self):
         raise NotImplementedError
 
-    def _bin(self, other, fn):
+    def _tw_bin(self, other, fn):
         if _BUILDING[0]:
             return _lazy(fn, self, other)
-        return fn(self._v(), float(other))
+        return fn(self._tw_v(), float(other))
 
-    def _rbin(self, other, fn):
+    def _tw_rbin(self, other, fn):
         if _BUILDING[0]:
             return _lazy(fn, other, self)
-        return fn(float(other), self._v())
+        return fn(float(other), self._tw_v())
 
     def __lt__(self, other):
-        return self._bin(other, operator.lt)
+        return self._tw_bin(other, operator.lt)
 
     def __le__(self, other):
-        return self._bin(other, operator.le)
+        return self._tw_bin(other, operator.le)
 
     def __gt__(self, other):
-        return self._bin(other, operator.gt)
+        return self._tw_bin(other, operator.gt)
 
     def __ge__(self, other):
-        return self._bin(other, operator.ge)
+        return self._tw_bin(other, operator.ge)
 
     def __add__(self, other):
-        return self._bin(other, operator.add)
+        return self._tw_bin(other, operator.add)
 
     def __radd__(self, other):
-        return self._rbin(other, operator.add)
+        return self._tw_rbin(other, operator.add)
 
     def __sub__(self, other):
-        return self._bin(other, operator.sub)
+        return self._tw_bin(other, operator.sub)
 
     def __rsub__(self, other):
-        return self._rbin(other, operator.sub)
+        return self._tw_rbin(other, operator.sub)
 
     def __mul__(self, other):
-        return self._bin(other, operator.mul)
+        return self._tw_bin(other, operator.mul)
 
     def __rmul__(self, other):
-        return self._rbin(other, operator.mul)
+        return self._tw_rbin(other, operator.mul)
 
     def __truediv__(self, other):
-        return self._bin(other, operator.truediv)
+        return self._tw_bin(other, operator.truediv)
 
     def __rtruediv__(self, other):
-        return self._rbin(other, operator.truediv)
+        return self._tw_rbin(other, operator.truediv)
 
     def __floordiv__(self, other):
-        return self._bin(other, operator.floordiv)
+        return self._tw_bin(other, operator.floordiv)
 
     def __rfloordiv__(self, other):
-        return self._rbin(other, operator.floordiv)
+        return self._tw_rbin(other, operator.floordiv)
 
     def __mod__(self, other):
-        return self._bin(other, operator.mod)
+        return self._tw_bin(other, operator.mod)
 
     def __rmod__(self, other):
-        return self._rbin(other, operator.mod)
+        return self._tw_rbin(other, operator.mod)
 
     def __pow__(self, other):
-        return self._bin(other, operator.pow)
+        return self._tw_bin(other, operator.pow)
 
     def __rpow__(self, other):
-        return self._rbin(other, operator.pow)
+        return self._tw_rbin(other, operator.pow)
 
     def __neg__(self):
         if _BUILDING[0]:
             return _lazy(operator.neg, self)
-        return -self._v()
+        return -self._tw_v()
 
     def __pos__(self):
         if _BUILDING[0]:
             return _lazy(operator.pos, self)
-        return +self._v()
+        return +self._tw_v()
 
     def __abs__(self):
         if _BUILDING[0]:
             return _lazy(operator.abs, self)
-        return abs(self._v())
+        return abs(self._tw_v())
 
 
 class LineBuffer(LineArithmetic):
@@ -198,19 +198,19 @@ class LineBuffer(LineArithmetic):
     def __eq__(self, other):
         if _BUILDING[0]:
             return _lazy(operator.eq, self, other)
-        return self._v() == float(other)
+        return self._tw_v() == float(other)
 
     def __ne__(self, other):
         if _BUILDING[0]:
             return _lazy(operator.ne, self, other)
-        return self._v() != float(other)
+        return self._tw_v() != float(other)
 
     def __hash__(self):
         return id(self)
 
     # arithmetic: on the current value in ``next()`` (``data.close > data.open`` is a
     # bool), on the whole line while a strategy is being built (see ``LineArithmetic``)
-    def _v(self):
+    def _tw_v(self):
         return self[0]
 
 

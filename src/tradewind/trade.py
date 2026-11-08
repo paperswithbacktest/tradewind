@@ -12,7 +12,7 @@ class Trade:
         self.ref = id(self)
         self.data = data
         self.tradeid = tradeid
-        self.size = 0.0
+        self.size = 0  # an int, as the oracle's, until a fractional fill
         self.price = 0.0
         self.value = 0.0
         self.commission = 0.0
