@@ -24,7 +24,7 @@ from .trade import Trade
 
 ind = indicators  # backtrader's short alias
 
-__version__ = "0.0.2.dev0"
+__version__ = "0.0.2"
 
 __all__ = [
     "Analyzer",
