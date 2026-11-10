@@ -33,7 +33,11 @@ class _ClockLine(DatetimeLine):
         i = self.idx + ago
         if i >= n or i < -n:
             raise IndexError("array index out of range")
-        return float(self.array[i if i >= 0 else n + i])
+        i = i if i >= 0 else n + i
+        try:
+            return self._mv[i]
+        except TypeError:        # an ``ago`` that is not a plain integer: numpy's rules
+            return float(self._array[i])
 
     def buflen(self) -> int:
         return self.idx + 1
@@ -43,7 +47,7 @@ class _ClockLine(DatetimeLine):
         start = end - size
         if start < 0 or end > self.idx + 1:
             return []
-        return self.array[start:end].tolist()
+        return self._array[start:end].tolist()
 
 
 class _DNames(dict):

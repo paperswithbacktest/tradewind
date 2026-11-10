@@ -138,7 +138,7 @@ class LineArithmetic:
 
 
 class LineBuffer(LineArithmetic):
-    __slots__ = ("_name", "_owner", "array", "idx")
+    __slots__ = ("_array", "_mv", "_name", "_owner", "idx")
 
     def __init__(self, array, name: str = "", owner=None):
         self.array = np.ascontiguousarray(array, dtype=np.float64)
@@ -146,12 +146,29 @@ class LineBuffer(LineArithmetic):
         self._name = name
         self._owner = owner  # the feed or indicator this line belongs to
 
+    # -- the buffer -----------------------------------------------------------
+    @property
+    def array(self):
+        return self._array
+
+    @array.setter
+    def array(self, value):
+        # Single values are read through a memoryview of the same memory: it hands back a
+        # Python float straight from the buffer (half the cost of boxing a numpy scalar and
+        # converting it), and a write into the array, in place, is seen at once. Anything
+        # the view cannot index the way numpy does falls back to the array itself.
+        self._array = value
+        try:
+            self._mv = memoryview(value) if value.dtype == np.float64 and value.ndim == 1 else None
+        except (AttributeError, TypeError, ValueError, BufferError):
+            self._mv = None
+
     # -- cursor ---------------------------------------------------------------
     def __len__(self) -> int:
         return self.idx + 1
 
     def buflen(self) -> int:
-        return len(self.array)
+        return len(self._array)
 
     def advance(self, n: int = 1) -> None:
         self.idx += n
@@ -167,7 +184,14 @@ class LineBuffer(LineArithmetic):
         # ``ago`` reaching before the first bar wraps around to the end of the buffer.
         # Only a position outside the buffer raises.
         try:
-            return float(self.array[self.idx + ago])
+            return self._mv[self.idx + ago]
+        except (IndexError, TypeError):
+            # out of the buffer, or an ``ago`` that is not a plain integer: numpy's rules
+            return self._read(ago)
+
+    def _read(self, ago) -> float:
+        try:
+            return float(self._array[self.idx + ago])
         except IndexError:
             raise IndexError(f"line {self._name!r}: ago={ago} at len={len(self)} of {self.buflen()}") from None
 
@@ -180,14 +204,14 @@ class LineBuffer(LineArithmetic):
         start = end - size
         if start < 0 or end > self.idx + 1:
             return []
-        return self.array[start:end].tolist()
+        return self._array[start:end].tolist()
 
     def __iter__(self):
-        return iter(self.array[: self.idx + 1].tolist())
+        return iter(self._array[: self.idx + 1].tolist())
 
     # -- writes (indicators) ----------------------------------------------------
     def __setitem__(self, ago: int, value: float) -> None:
-        self.array[self.idx + ago] = value
+        self._array[self.idx + ago] = value
 
     def __bool__(self) -> bool:
         return True
@@ -214,19 +238,46 @@ class LineBuffer(LineArithmetic):
         return self[0]
 
 
+# ``num2date`` of a line's value, kept by value: a pure function of the float, and the
+# ``datetime``/``date`` it returns is immutable, so the object can be handed out again. A
+# strategy asks for the bar's date on every bar and often on every feed (the profile of the
+# corpus: 60 % of the time spent inside the engine by the slowest strategies).
+_DATETIMES: dict = {}
+_DATES: dict = {}
+_CACHE_MAX = 1 << 20          # values; a minute feed over decades stays below it
+
+
 class DatetimeLine(LineBuffer):
     """The ``datetime`` line: float days, plus the ``date()``/``datetime()`` readers."""
 
     __slots__ = ()
 
     def datetime(self, ago: int = 0, tz=None, naive: bool = True):
-        return num2date(self[ago], tz=tz)
+        if tz is not None:
+            return num2date(self[ago], tz=tz)
+        num = self[ago]
+        out = _DATETIMES.get(num)
+        if out is None:
+            out = num2date(num)
+            if len(_DATETIMES) >= _CACHE_MAX:
+                _DATETIMES.clear()
+            _DATETIMES[num] = out
+        return out
 
     def date(self, ago: int = 0, tz=None, naive: bool = True):
-        return num2date(self[ago], tz=tz).date()
+        if tz is not None:
+            return num2date(self[ago], tz=tz).date()
+        num = self[ago]
+        out = _DATES.get(num)
+        if out is None:
+            out = num2date(num).date()
+            if len(_DATES) >= _CACHE_MAX:
+                _DATES.clear()
+            _DATES[num] = out
+        return out
 
     def time(self, ago: int = 0, tz=None, naive: bool = True):
-        return num2date(self[ago], tz=tz).time()
+        return self.datetime(ago, tz=tz).time()
 
     def dt(self, ago: int = 0):
         return self.date(ago)
