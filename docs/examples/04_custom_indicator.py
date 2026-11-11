@@ -36,9 +36,9 @@ class Breakout(tw.Strategy):
             self.order_target_percent(target=0.0)
 
 
-cerebro = tw.Cerebro()
-cerebro.adddata(tw.feeds.PandasData(dataname=bars("AAA", seed=7)), name="AAA")
-cerebro.addstrategy(Breakout)
-cerebro.broker.setcash(100_000)
-cerebro.run()
-print(f"final value {cerebro.broker.getvalue():,.2f}")
+engine = tw.Engine()
+engine.adddata(tw.feeds.PandasData(dataname=bars("AAA", seed=7)), name="AAA")
+engine.addstrategy(Breakout)
+engine.broker.setcash(100_000)
+engine.run()
+print(f"final value {engine.broker.getvalue():,.2f}")

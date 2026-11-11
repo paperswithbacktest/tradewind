@@ -24,7 +24,7 @@ and of `.github/workflows/release.yml` (where `publish` needs it):
    the allow-list's, on another Python minor version than the base's, and on an empty
    reference;
 5. negative control (`--control`): the same gate on a copy of `src/tradewind` with
-   `cerebro.py` planted as `_planted_copy.py` must fail on the planted file, or the job fails:
+   `engine.py` planted as `_planted_copy.py` must fail on the planted file, or the job fails:
    a gate that passes everything is caught.
 
 ## The allow-list

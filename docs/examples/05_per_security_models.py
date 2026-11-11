@@ -19,17 +19,17 @@ class Hold(tw.Strategy):
 
 
 def run(slipped: bool) -> float:
-    cerebro = tw.Cerebro()
-    liquid = cerebro.adddata(tw.feeds.PandasData(dataname=bars("LIQ", seed=21)), name="LIQ")
-    thin = cerebro.adddata(tw.feeds.PandasData(dataname=bars("THIN", seed=22)), name="THIN")
+    engine = tw.Engine()
+    liquid = engine.adddata(tw.feeds.PandasData(dataname=bars("LIQ", seed=21)), name="LIQ")
+    thin = engine.adddata(tw.feeds.PandasData(dataname=bars("THIN", seed=22)), name="THIN")
     if slipped:
         # 5 cents a share against the trader on THIN; LIQ keeps the broker's default models
-        cerebro.broker.set_models(thin, slippage=CompatSlippage(fixed=0.05, slip_open=True))
-    cerebro.addstrategy(Hold)
-    cerebro.broker.setcash(100_000)
-    cerebro.run()
+        engine.broker.set_models(thin, slippage=CompatSlippage(fixed=0.05, slip_open=True))
+    engine.addstrategy(Hold)
+    engine.broker.setcash(100_000)
+    engine.run()
     assert liquid.security.models is not thin.security.models or not slipped
-    return cerebro.broker.getvalue()
+    return engine.broker.getvalue()
 
 
 print(f"without slippage {run(False):,.2f}, with slippage on THIN {run(True):,.2f}")

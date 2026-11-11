@@ -27,7 +27,7 @@ _BUILDING = [0]
 
 
 class building:
-    """Context manager: the build stage, entered by Cerebro around a strategy's construction."""
+    """Context manager: the build stage, entered by the engine around a strategy's construction."""
 
     def __enter__(self):
         _BUILDING[0] += 1

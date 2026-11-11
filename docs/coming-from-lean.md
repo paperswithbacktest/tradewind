@@ -10,11 +10,11 @@ container, on data you load yourself.
 | Lean | Tradewind | notes |
 |---|---|---|
 | `QCAlgorithm` | `tw.Strategy` | |
-| `Initialize()` | `__init__()` and `start()` | data is added outside the strategy, on `Cerebro` |
+| `Initialize()` | `__init__()` and `start()` | data is added outside the strategy, on the `Engine` |
 | `OnData(slice)` | `next()` | one call per slice of the clock; read bars through the feeds, not a `Slice` object |
 | `OnWarmupFinished`, `SetWarmUp` | `nextstart()`; warm-up is implicit | `next()` waits for every indicator's minimum period |
-| `AddEquity("SPY")` | `cerebro.adddata(tw.feeds.PandasData(dataname=df), name="SPY")` | you bring the data |
-| `SetCash(100000)` | `cerebro.broker.setcash(100_000)` | |
+| `AddEquity("SPY")` | `engine.adddata(tw.feeds.PandasData(dataname=df), name="SPY")` | you bring the data |
+| `SetCash(100000)` | `engine.broker.setcash(100_000)` | |
 | `SetStartDate`, `SetEndDate` | `fromdate=`, `todate=` on the feed | |
 | `Securities["SPY"]` | `self.getdatabyname("SPY")`; `data.security` for the engine's record | |
 | `self.Securities[s].Price` | `data.close[0]` | |
@@ -35,7 +35,7 @@ container, on data you load yourself.
 | `ISettlementModel` | `SettlementModel` | default: immediate |
 | `IShortableProvider` | `ShortableProvider` | default: always shortable, no fee |
 | `IMarginInterestRateModel` | `MarginInterestRateModel` | default: none |
-| `security.SetFeeModel(...)` | `cerebro.broker.set_models(data, fee=...)` | any of the eight, per security |
+| `security.SetFeeModel(...)` | `engine.broker.set_models(data, fee=...)` | any of the eight, per security |
 | `CashBook` | `broker.cashbook` | single currency for now |
 | Universe selection, `OnSecuritiesChanged` | `UniverseProvider` (interface only) | planned |
 | Splits, dividends, delistings | `CorporateActionProvider` (interface only) | planned; today, adjust prices before loading |

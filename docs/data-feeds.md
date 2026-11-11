@@ -9,7 +9,7 @@ DataFrame (a CSV, a parquet file, a database query, an API) can be backtested.
 ```python
 frame = pd.read_parquet("spy.parquet")       # DatetimeIndex; open high low close volume
 data = tw.feeds.PandasData(dataname=frame)
-cerebro.adddata(data, name="SPY")
+engine.adddata(data, name="SPY")
 ```
 
 The index is the bar's time by default. Each line is mapped to a column:
@@ -41,7 +41,7 @@ Add one feed per instrument. The order of `adddata` calls is the order of `self.
 
 ```python
 for symbol, frame in frames.items():
-    cerebro.adddata(tw.feeds.PandasData(dataname=frame), name=symbol)
+    engine.adddata(tw.feeds.PandasData(dataname=frame), name=symbol)
 ```
 
 The feeds do not need the same dates. The run's clock is the union of all their dates

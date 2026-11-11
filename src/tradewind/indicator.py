@@ -89,7 +89,7 @@ class _IndicatorLines(Lines):
 
 # The indicators whose ``__init__`` is running, innermost last: an indicator built while
 # another one's ``__init__`` runs is that one's *child* (``self.rsi = RSI(...)`` inside a
-# corpus indicator). Cleared by Cerebro around a strategy's construction.
+# corpus indicator). Cleared by the engine around a strategy's construction.
 _CONSTRUCTING: list = []
 
 

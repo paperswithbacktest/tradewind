@@ -2,7 +2,7 @@
 
 ## The clock
 
-Before the first bar, Cerebro merges the dates of every feed into one sorted **clock**.
+Before the first bar, the engine merges the dates of every feed into one sorted **clock**.
 Each entry of the clock is a *slice*: one point in time at which one or more feeds have a
 bar. A feed with no bar on a slice (a holiday on its exchange, a symbol not listed yet, a
 gap in the data) keeps its previous bar, and its length does not grow.
@@ -38,7 +38,7 @@ Three consequences worth remembering:
 
 - **An order placed in `next()` fills on a later slice.** It is submitted at phase 13,
   accepted at phase 5 of the next slice and, for a market order, filled at phase 6 of that
-  same slice, at its open. With `cerebro.broker.set_coc(True)` the fill price becomes the
+  same slice, at its open. With `engine.broker.set_coc(True)` the fill price becomes the
   close of the bar the order was placed on; everything else stays the same.
 - **Inside `notify_order` you already see the fill bar.** Notifications are delivered at
   phase 12, after the feeds moved (phase 2) and the portfolio was marked (phase 8).

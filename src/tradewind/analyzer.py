@@ -9,7 +9,7 @@ from .params import ParamsBase
 
 class Analyzer(ParamsBase):
     def _tw_before_init(self):
-        # set by Cerebro before the user's __init__: strategy, datas, data aliases
+        # set by the engine before the user's __init__: strategy, datas, data aliases
         self.rets = collections.OrderedDict()
         self._tw_children = []
         if not hasattr(self, "strategy"):

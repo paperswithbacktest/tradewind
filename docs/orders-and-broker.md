@@ -63,13 +63,13 @@ Two practical rules follow:
    today's close and filled at tomorrow's open; a buy target of exactly 100 % is refused
    whenever the price rises overnight.
 
-`cerebro.broker.set_checksubmit(False)` skips the batch check: orders are accepted at once
+`engine.broker.set_checksubmit(False)` skips the batch check: orders are accepted at once
 and checked only at the fill.
 
 ## Cash and value
 
 ```python
-cerebro.broker.setcash(100_000)        # before the run
+engine.broker.setcash(100_000)        # before the run
 self.broker.getcash()
 self.broker.getvalue()                 # cash + positions at this slice's closes
 self.broker.add_cash(amount)           # deposit (or withdrawal if negative), lands next slice
@@ -78,17 +78,17 @@ self.broker.add_cash(amount)           # deposit (or withdrawal if negative), la
 ## Commissions
 
 ```python
-cerebro.broker.setcommission(commission=0.001)                 # 0.1 % of the traded value
-cerebro.broker.setcommission(commission=0.005, commtype=tw.CommInfoBase.COMM_FIXED,
+engine.broker.setcommission(commission=0.001)                 # 0.1 % of the traded value
+engine.broker.setcommission(commission=0.005, commtype=tw.CommInfoBase.COMM_FIXED,
                              stocklike=True)                   # 0.5 cent per share
-cerebro.broker.setcommission(commission=0.001, name="SPY")    # for one feed only
+engine.broker.setcommission(commission=0.001, name="SPY")    # for one feed only
 ```
 
 When `commtype` is given, give `stocklike=True` too for shares: without it the instrument is
 treated as a future (valued through a margin, which is not set), as in backtrader.
 
 For any other rule, subclass `tw.CommInfoBase` and override `_getcommission(size, price,
-pseudoexec)`; register it with `cerebro.broker.addcommissioninfo(scheme, name=None)`.
+pseudoexec)`; register it with `engine.broker.addcommissioninfo(scheme, name=None)`.
 
 ```python
 class SpreadCost(tw.CommInfoBase):
@@ -105,14 +105,14 @@ A scheme's `leverage` applies to long positions in stock-like schemes: buying pa
 portfolio value. Short positions always move the full price.
 
 ```python
-cerebro.broker.setcommission(commission=0.0, leverage=2.0)
+engine.broker.setcommission(commission=0.0, leverage=2.0)
 ```
 
 ## Slippage
 
 ```python
-cerebro.broker.set_slippage_perc(0.0005)     # 5 bp against the trader
-cerebro.broker.set_slippage_fixed(0.01)      # one cent a share
+engine.broker.set_slippage_perc(0.0005)     # 5 bp against the trader
+engine.broker.set_slippage_fixed(0.01)      # one cent a share
 ```
 
 As in backtrader, the default leaves a fill **at the open** unslipped. Market orders fill at
@@ -128,8 +128,8 @@ security without touching the others:
 ```python
 from tradewind.models import CompatSlippage
 
-thin = cerebro.adddata(tw.feeds.PandasData(dataname=frame), name="THIN")
-cerebro.broker.set_models(thin, slippage=CompatSlippage(fixed=0.05, slip_open=True))
+thin = engine.adddata(tw.feeds.PandasData(dataname=frame), name="THIN")
+engine.broker.set_models(thin, slippage=CompatSlippage(fixed=0.05, slip_open=True))
 ```
 
 A model is a small class with one or two methods (for example a fee model has
