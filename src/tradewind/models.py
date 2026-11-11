@@ -276,8 +276,8 @@ class CompatCashBuyingPower:
       close (limit/stop at their own price);
     * ``cash_consumed`` is the order's cash flow **even when refused** (the observed deficit
       carry); an order is accepted iff the running cash stays >= 0 after it;
-    * at the fill, a reducing or closing order always passes, an opening one is re-checked
-      at the fill price, a reversal fills its closing part and refuses its opening part when
+    * at the fill, a reducing or closing order always passes, an opening one -- a short
+      sale included -- is re-checked at the fill price, a reversal fills its closing part and refuses its opening part when
       the cash left cannot cover it (Partial then Margin);
     * ``order_target_value`` truncates the value gap toward zero;
     * shorts need no margin (the oracle's ``shortcash``).
@@ -330,7 +330,12 @@ class CompatCashBuyingPower:
         position = security._broker.getposition(security.feed)
         pos_size = position.size
         opening = (pos_size == 0) or ((pos_size > 0) == (size > 0))
-        if opening and not (comminfo.stocklike and not order.isbuy()):
+        if opening:
+            # Observed on the oracle (probe ``short_fill_deficit``; corpus
+            # ``investing_just_another_hype…`` 2024-01-02, LCID): an opening short sale is
+            # re-checked too -- its proceeds less its fee must leave the cash >= 0, which
+            # only fails when closing buys earlier in the same pass drove the cash below
+            # zero (a closing or reducing order always fills).
             fee = _fee(security, order, size, price, time)
             if not cash + self.cash_delta(order, price, pos_size, fee, position.price) >= 0:
                 return None

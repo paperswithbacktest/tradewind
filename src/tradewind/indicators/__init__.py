@@ -103,6 +103,15 @@ class RateOfChange(Indicator):
 ROC = RateOfChange
 
 
+def _true_range(high, low, prev_close):
+    """``max(high, prev close) - min(low, prev close)``. Observed on the oracle (probe
+    ``true_range_inverted``): on a bar whose high is below its low -- the inverted
+    series of the catalogue -- this, not ``max(h - l, |h - c1|, |l - c1|)``, is the
+    range (0 when the previous close lies between them). The two agree bit for bit
+    whenever high >= low."""
+    return np.maximum(high, prev_close) - np.minimum(low, prev_close)
+
+
 class TrueRange(Indicator):
     lines = ("tr",)
 
@@ -115,7 +124,7 @@ class TrueRange(Indicator):
         h, lo, c = d.lines.high.array, d.lines.low.array, d.lines.close.array
         out = np.full(len(c), np.nan)
         prev = c[:-1]
-        out[1:] = np.maximum(h[1:] - lo[1:], np.maximum(np.abs(h[1:] - prev), np.abs(lo[1:] - prev)))
+        out[1:] = _true_range(h[1:], lo[1:], prev)
         self.lines.tr.array[:] = out
 
 
@@ -134,7 +143,7 @@ class AverageTrueRange(Indicator):
         h, lo, c = d.lines.high.array, d.lines.low.array, d.lines.close.array
         tr = np.full(len(c), np.nan)
         prev = c[:-1]
-        tr[1:] = np.maximum(h[1:] - lo[1:], np.maximum(np.abs(h[1:] - prev), np.abs(lo[1:] - prev)))
+        tr[1:] = _true_range(h[1:], lo[1:], prev)
         p = self.p.period
         out = np.full(len(c), np.nan)
         if len(c) > p:
@@ -189,6 +198,13 @@ class RelativeStrengthIndex(Indicator):
 
 
 RSI = RelativeStrengthIndex
+
+
+class RSI_Safe(RelativeStrengthIndex):
+    """The RSI with ``safediv`` on by default: ``safelow`` where both smoothed moves are
+    zero (a flat window), ``safehigh`` where only the down move is."""
+
+    params = (("safediv", True),)
 
 
 class MACD(Indicator):
@@ -312,6 +328,7 @@ __all__ = [
     "MinN",
     "MovingAverageExponential",
     "MovingAverageSimple",
+    "RSI_Safe",
     "RateOfChange",
     "RelativeStrengthIndex",
     "SimpleMovingAverage",

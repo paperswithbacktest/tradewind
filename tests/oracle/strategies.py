@@ -876,7 +876,258 @@ def build(bt):
             self.extra["trades"].append((len(self), trade.data._name, trade.isclosed, trade.pnl, trade.pnlcomm,
                                          trade.size))
 
+    # -- probes of the 0.1.47 parity pass (spec/02 § "parity 0.1.47") ---------------------------
+
+    class StrategyMinperiod(Recorder):
+        """``addminperiod`` / ``updateminperiod`` called on a strategy (corpus
+        ``MomentumRSIStrategy``): accepted, and the first ``next`` stays where the feeds
+        (S3 lists 30 bars late) and the indicators (an SMA(5)) put it."""
+
+        def __init__(self):
+            super().__init__()
+            self.addminperiod(40)
+            self.sma = bt.indicators.SMA(self.datas[1].close, period=5)
+            self.updateminperiod(200)
+            self.extra = {"prenext": 0, "first": None}
+
+        def prenext(self):
+            self.extra["prenext"] += 1
+
+        def next(self):
+            super().next()
+            if self.extra["first"] is None:
+                self.extra["first"] = (len(self), self.datas[0].datetime.date(0).isoformat())
+                self.buy(data=self.datas[1], size=25)
+
+    class ChildIndicators(Recorder):
+        """Indicators built inside another indicator's ``__init__`` (corpus
+        ``RSIBullRangeMomentum`` builds an ``RSI_Safe``): the parent's ``next`` reads the
+        child on the bar being computed, the parent's min period is the maximum of its
+        own (``addminperiod`` included) and its children's, the strategy reads a child
+        frozen on its last value; ``RSI_Safe`` on flat (0/0) and rising (x/0) stretches."""
+
+        def __init__(self):
+            super().__init__()
+
+            class Signal(bt.Indicator):
+                lines = ("long",)
+                params = (("lookback", 10), ("rsi_period", 5))
+
+                def __init__(self):
+                    super().__init__()
+                    self.rsi = bt.indicators.RSI_Safe(self.data.close, period=self.p.rsi_period)
+                    self.addminperiod(self.p.lookback + self.p.rsi_period)
+
+                def next(self):
+                    vals = [self.rsi[-i] for i in range(self.p.lookback)]
+                    entered = min(vals) >= 40.0 and max(vals) > 70.0
+                    both_reversed = min(vals) < 40.0 and max(vals) <= 70.0
+                    if not bool(self.lines.long[-1]):
+                        self.lines.long[0] = 1 if entered else 0
+                    else:
+                        self.lines.long[0] = 0 if both_reversed else 1
+
+            class NextParent(bt.Indicator):
+                lines = ("v",)
+
+                def __init__(self):
+                    self.child = bt.indicators.SMA(self.data.close, period=20)
+                    self.addminperiod(3)
+
+                def next(self):
+                    self.lines.v[0] = self.child[0] - self.child[-1]
+
+            class OnceParent(bt.Indicator):
+                lines = ("v",)
+
+                def __init__(self):
+                    self.child = bt.indicators.SMA(self.data.close, period=4)
+
+                def once(self, start, end):
+                    dst, src = self.lines.v.array, self.child.lines.sma.array
+                    for i in range(start, end):
+                        dst[i] = src[i] * 2.0
+
+            class BindParent(bt.Indicator):
+                lines = ("v",)
+
+                def __init__(self):
+                    self.child = bt.indicators.SMA(self.data.close, period=4)
+                    self.lines.v = bt.indicators.SMA(self.child, period=3)
+
+            class Ramp(bt.Indicator):
+                """Flat, then rising, then flat, then falling, then data0's close."""
+
+                lines = ("close",)
+
+                def once(self, start, end):
+                    dst, src = self.lines.close.array, self.data.close.array
+                    for i in range(start, end):
+                        if i < 30:
+                            dst[i] = 50.0
+                        elif i < 50:
+                            dst[i] = 50.0 + (i - 29)
+                        elif i < 60:
+                            dst[i] = 70.0
+                        elif i < 75:
+                            dst[i] = 70.0 - (i - 59)
+                        else:
+                            dst[i] = src[i]
+
+            self.addminperiod(15)
+            self.sigs = [Signal(d) for d in self.datas[:3]]
+            self.next_parent = NextParent(self.datas[0])
+            self.once_parent = OnceParent(self.datas[1])
+            self.bind_parent = BindParent(self.datas[2])
+            self.chained = [bt.indicators.SMA(self.next_parent, period=3), bt.indicators.SMA(self.once_parent, period=3)]
+            ramp = Ramp(self.datas[0])
+            self.safe = [bt.indicators.RSI_Safe(ramp, period=5), bt.indicators.RSI(ramp, period=5, safediv=True)]
+            self.extra = {"rows": [], "prenext": 0}
+
+        def prenext(self):
+            self.extra["prenext"] += 1
+
+        def next(self):
+            super().next()
+            self.extra["rows"].append((
+                len(self), [repr(s.long[0]) for s in self.sigs], [repr(s.rsi[0]) for s in self.sigs],
+                [len(s.rsi) for s in self.sigs], repr(self.next_parent[0]), repr(self.next_parent.child[0]),
+                len(self.next_parent.child), repr(self.once_parent[0]), repr(self.once_parent.child[0]),
+                len(self.once_parent.child), repr(self.bind_parent[0]), repr(self.bind_parent.child[0]),
+                [repr(c[0]) for c in self.chained], [repr(r[0]) for r in self.safe]))
+            longs = [d for d, s in zip(self.datas, self.sigs) if s.long[0] == 1]
+            for d in self.datas[:3]:
+                self.order_target_percent(d, target=0.9 / len(longs) if d in longs else 0.0)
+
+    class InertIndicator(Recorder):
+        """An indicator with lines that defines neither ``once`` nor ``next`` and binds
+        nothing (corpus ``DecileMomentumSignal``): it holds the feeds and a ``compute()``
+        the strategy calls monthly; its line is NaN, its length the clock's."""
+
+        def __init__(self):
+            super().__init__()
+
+            class Holder(bt.Indicator):
+                lines = ("signal",)
+                params = (("top", 1), ("lookback", 20))
+
+                def __init__(self, *datas):
+                    super().__init__()
+                    self._feeds = list(datas) if datas else list(self.datas)
+
+                def compute(self):
+                    lb = self.p.lookback
+                    mom = [(d, d.close[0] / d.close[-lb] - 1.0) for d in self._feeds if len(d) > lb]
+                    if len(mom) < 2:
+                        return None
+                    mom.sort(key=lambda x: x[1], reverse=True)
+                    return [d for d, _ in mom[: self.p.top]]
+
+            self.sig = Holder(*self.datas, top=1)
+            self.month = None
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self.extra["rows"].append((len(self), repr(self.sig.signal[0]), len(self.sig), len(self.sig._feeds)))
+            month = self.datas[0].datetime.date(0).month
+            if month == self.month:
+                return
+            self.month = month
+            pick = self.sig.compute()
+            if pick is None:
+                return
+            for d in self.datas:
+                self.order_target_percent(d, target=0.9 if d in pick else 0.0)
+
+    class TrueRangeInverted(Recorder):
+        """``TrueRange`` and ``ATR`` on bars whose high is below their low (the inverted
+        series of the catalogue, corpus ``following_the_trend``), every bar or one in
+        two, and fractional sizes from the ATR as that strategy sizes them."""
+
+        def __init__(self):
+            super().__init__()
+
+            class Swapped(bt.Indicator):
+                lines = ("high", "low", "close")
+                params = (("mode", "all"),)
+
+                def __init__(self):
+                    d = self.data
+                    if self.p.mode == "all":
+                        self.lines.high = d.low
+                        self.lines.low = d.high
+                    else:
+                        self.lines.high = bt.If(d.close > d.open, d.low, d.high)
+                        self.lines.low = bt.If(d.close > d.open, d.high, d.low)
+                    self.lines.close = d.close
+
+            swapped, mixed = Swapped(self.datas[0], mode="all"), Swapped(self.datas[1], mode="mixed")
+            self.tr = [bt.indicators.TrueRange(swapped), bt.indicators.TrueRange(mixed)]
+            self.atr = [bt.indicators.ATR(swapped, period=5), bt.indicators.ATR(mixed, period=5),
+                        bt.indicators.ATR(self.datas[2], period=5)]
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self.extra["rows"].append((len(self), [repr(t[0]) for t in self.tr], [repr(a[0]) for a in self.atr]))
+            n = len(self)
+            if n % 10 == 0:
+                for d, a in zip(self.datas[:3], self.atr):
+                    if self.getposition(d).size:
+                        self.close(data=d)
+                    else:
+                        self.sell(data=d, size=0.002 * self.broker.getvalue() / a[0])
+
+    class ShortFillDeficit(Recorder):
+        """A short sale re-checked at its fill when closing buys earlier in the same pass
+        drove the cash below zero (corpus ``investing_just_another_hype…``, LCID on
+        2024-01-02): a small short is ``Margin``, a large one fills, a later small one
+        too. Checked at the fill only (``checksubmit`` off) and with the batch check."""
+
+        params = (("checksubmit", False),)
+
+        def __init__(self):
+            super().__init__()
+            if not self.p.checksubmit:
+                self.broker.set_checksubmit(False)
+            self.extra = {"rows": []}
+            self.step = 0
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            if order.status in (order.Completed, order.Margin, order.Partial):
+                self.extra["rows"].append((len(self), order.data._name, order.getstatusname(), order.size,
+                                           repr(self.broker.getcash())))
+
+        def next(self):
+            super().next()
+            self.step += 1  # ``next`` starts once S3 has listed
+            n = self.step
+            d0, d1, d2 = self.datas[:3]
+            if n == 2:
+                self.buy(data=d0, size=int(90_000 / d0.close[0]))
+            if n == 5:
+                self.sell(data=d1, size=int(20_000 / d1.close[0]))
+            if n == 8:
+                self.buy(data=d2, size=int(0.9 * self.broker.getcash() / d2.close[0]))
+                self.close(data=d1)
+                self.sell(data=d1, size=10)
+                self.sell(data=d1, size=int(40_000 / d1.close[0]))
+                self.sell(data=d1, size=5)
+            if n == 12:
+                self.sell(data=d0, size=10)
+
+    class ShortFillDeficitChecked(ShortFillDeficit):
+        params = (("checksubmit", True),)
+
     return {
+        "short_fill_deficit": ShortFillDeficit,
+        "short_fill_deficit_checked": ShortFillDeficitChecked,
+        "strategy_minperiod": StrategyMinperiod,
+        "child_indicators": ChildIndicators,
+        "inert_indicator": InertIndicator,
+        "true_range_inverted": TrueRangeInverted,
         "strategy_clock": StrategyClock,
         "line_binding": LineBinding,
         "indicator_bits": IndicatorBits,

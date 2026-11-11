@@ -77,10 +77,28 @@ as type and message only:
 | The marked value is **`cash + t`**, `t` the positions' values summed from zero in the order the positions were first touched: `size × close` for a long or a short (a leveraged long: margin then P&L). Queued `add_cash` amounts land **one after the other**, not summed first; a short's `getvalue` (what `order_target_value` reads) is `size × close` too | kept, residual | scratch probes `value_terms` (893 of 904 marks bit for bit, against 164 for `cash + v1 + v2...`); `high_dimensional_minimum_variance…` 2025-05-26 (a target of ~0 on a 1 204-share short: 1 204 shares on the oracle, 1 203 from entry + P&L); `profitable_mean_reversion…` 2010-03-12 (nine toolbox additions). **Residual**: a few marks in a hundred still differ in their last bit, cash identical; the first-touch order of the oracle's positions is the suspect (switching the feeds' order for it moved the count both ways) |
 | A strategy that draws from `np.random` without a seed is not reproducible on either engine | n/a | `large_scale_portfolio_allocation…`: two oracle runs at the same hash seed end at 326 551 and 386 278; with `np.random.seed(0)` both engines end at 416 048.7958239279 |
 
+Observed on 2026-11-11 during the parity pass on pwb-toolbox 0.1.47 (grand remeasure of
+2026-11-10: two errors and two divergences of Tradewind 0.0.2). Probes in
+`tests/oracle/strategies.py`; order logs of both engines compared through
+`tools/run_corpus_strategy.py --fills`; oracle exceptions read as type and message only:
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| `addminperiod(n)` / `updateminperiod(n)` on a **strategy** are accepted and change nothing: before or after its indicators, with `n` past the end of the data, the first `next` stays where the feeds and the indicators put it | kept | probe `strategy_minperiod`; corpus `finding_consistent_trends…` (`AttributeError` on 0.0.2) |
+| An indicator built inside another indicator's `__init__` is its **child**: complete before its parent computes (a `once` reading `self.child.lines.x.array` sees every value), walked bar by bar with a `next`-only parent (its `next` reads `self.child[-k]` at the bar being computed); the parent's min period is the **maximum** of its own (`addminperiod` included, in any order) and its children's -- a child SMA(20) with `addminperiod(3)` starts at bar 20, a child SMA(5) with `addminperiod(30)` at bar 30 -- while an input's adds; a child still holds the strategy in `prenext` until its own warm-up | kept | probe `child_indicators`; corpus `RSIBullRangeMomentum` |
+| In `runonce` mode the strategy **does not move a child's cursor**: read from the strategy, a child of a `next`-only indicator sits on the last bar (`len` = the whole series), one of a `once` or binding indicator before the first (`len` 0); both read the series' **last value** at `[0]` | kept, flagged | probe `child_indicators`. **Look-ahead**: a strategy reading `self.ind.child[0]` sees the last bar of the run; the corrected default (chantier 4) keeps children on the clock. Live mode (`runonce=False`) keeps them on the clock, not probed |
+| `RSI_Safe` is the RSI with `safediv` on: `safelow` (50) where both smoothed moves are zero, `safehigh` (100) where only the down move is | kept | probe `child_indicators` (flat and rising stretches, bit for bit). The plain RSI raises `ZeroDivisionError` on a flat window in the oracle; Tradewind 0.0.2 returns 100 there -- **seen, not reproduced** (see below) |
+| An indicator that defines neither `once` nor `next` and binds no line is **inert**: no error, lines NaN, `len` the clock's; its own methods (`compute()`) are the strategy's to call | kept | probe `inert_indicator`; corpus `DecileMomentumSignal` (`NotImplementedError` on 0.0.2) |
+| `TrueRange` (and the range `ATR` smooths) is `max(high, close[-1]) - min(low, close[-1])`: on a bar whose **high is below its low** it differs from `max(h - l, |h - c1|, |l - c1|)` (0 when the previous close lies between them); the two agree bit for bit when high >= low | kept | probe `true_range_inverted`; corpus `following_the_trend` 1994-08-12: GB1Y (an inverted series, high/low swapped) short of 6 397.94 on the oracle against 5 030.61, the ATR(100) differing |
+| At the fill an **opening short sale is re-checked** like any opening order: its proceeds less its fee must leave the cash non-negative. It fails only when the cash is already below zero -- closing or reducing orders always fill, so a buy covering a short earlier in the same pass can take the cash below zero -- and the next short large enough to bring it back fills | kept | probes `short_fill_deficit` (cash checked at the fill only) and `short_fill_deficit_checked`; corpus `investing_just_another_hype…` 2024-01-02: covering A and MRNA took the cash to -1 522.60, then LCID's 5-share short (208.48 net) was `Margin` on the oracle and filled on 0.0.2 |
+
 Seen and **not** reproduced yet: in `runonce` mode a `next`-only indicator whose input is
 another indicator reads `self.data[0]` as NaN on every bar (it reads the value with
 `runonce=False`). No corpus strategy is known to depend on it; to be probed before the
-4 200-NAV pass.
+4 200-NAV pass. Also seen on 2026-11-11 and not reproduced: the plain `RSI` (`safediv`
+off) raises `ZeroDivisionError` in the oracle when its window is flat (0/0); Tradewind
+returns 100. A corpus strategy with a plain RSI on a back-filled flat prefix would end in
+error on the oracle; none of the four strategies of the 0.1.47 pass does.
 
 ## Clock and bars
 

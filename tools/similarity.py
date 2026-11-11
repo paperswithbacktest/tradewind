@@ -161,7 +161,8 @@ def _strip_docstrings(tree: ast.AST) -> None:
             and isinstance(body[0].value, ast.Constant)
             and isinstance(body[0].value.value, str)
         ):
-            node.body = body[1:] or [ast.Pass()]
+            # a docstring-only body becomes a located ``pass`` (statement_units reads lineno)
+            node.body = body[1:] or [ast.copy_location(ast.Pass(), body[0])]
 
 
 def _ser(node, counter: list[int]) -> str:

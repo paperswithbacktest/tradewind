@@ -87,6 +87,16 @@ class _IndicatorLines(Lines):
         self._tw_owner._tw_bind_line(range(len(self._names))[i], value)
 
 
+# The indicators whose ``__init__`` is running, innermost last: an indicator built while
+# another one's ``__init__`` runs is that one's *child* (``self.rsi = RSI(...)`` inside a
+# corpus indicator). Cleared by Cerebro around a strategy's construction.
+_CONSTRUCTING: list = []
+
+
+def reset_construction() -> None:
+    _CONSTRUCTING.clear()
+
+
 class Indicator(LineArithmetic, ParamsBase):
     lines: tuple = ()
     plotinfo: ClassVar[dict] = {}
@@ -98,6 +108,8 @@ class Indicator(LineArithmetic, ParamsBase):
         self._tw_clock = None
         self._tw_strategy = None
         self._tw_bindings = []
+        self._tw_parent = None
+        self._tw_children = []
 
     def _tw_consume_args(self, *inputs):
         """Bind the input lines before the user's ``__init__`` runs; nothing is passed on,
@@ -107,6 +119,11 @@ class Indicator(LineArithmetic, ParamsBase):
         for i, d in enumerate(self.datas):
             setattr(self, f"data{i}", d)
         self._tw_clock = _owner_line(self.data) if self.data is not None else None
+        # the clock is the feed's line at the root of the inputs: an indicator built on
+        # another's line follows the feed, not that line's cursor (a child's stays put)
+        clock_owner = getattr(self._tw_clock, "_owner", None)
+        if isinstance(clock_owner, Indicator) and clock_owner._tw_clock is not None:
+            self._tw_clock = clock_owner._tw_clock
         # Observed on the oracle: an indicator starts from the largest minimum period of its
         # inputs (an indicator, or a line of one; a feed counts 1) -- SMA(5) of SMA(3) first
         # delivers at bar 7, a line operation on Highest(20) at bar 20.
@@ -119,7 +136,23 @@ class Indicator(LineArithmetic, ParamsBase):
         for name, buf in zip(names, buffers):
             setattr(self, name, buf)
         self._tw_register()
+        if _CONSTRUCTING:
+            self._tw_parent = _CONSTRUCTING[-1]
+            self._tw_parent._tw_children.append(self)
+        _CONSTRUCTING.append(self)
         return ()
+
+    def _tw_after_init(self):
+        """Observed on the oracle (probe ``child_indicators``): the indicators an indicator
+        builds in its ``__init__`` raise its minimum period to theirs by **maximum**, after
+        any ``addminperiod`` of its own (a child SMA(20) and ``addminperiod(3)``, in either
+        order: first ``next`` at bar 20; a child SMA(5) and ``addminperiod(30)``: bar 30) --
+        unlike an input, whose period ``addminperiod`` adds to."""
+        if _CONSTRUCTING and _CONSTRUCTING[-1] is self:
+            _CONSTRUCTING.pop()
+        if self._tw_children:
+            self._tw_minperiod = max([self._tw_minperiod] + [c._tw_minperiod for c in self._tw_children])
+            self._tw_push_minperiod()
 
     def __init__(self):
         pass
@@ -216,11 +249,19 @@ class Indicator(LineArithmetic, ParamsBase):
         """
         inputs = self._tw_input_lines()
         saved = [buf.idx for buf in inputs]
+        # The children (indicators built in ``__init__``) walk with the indicator, so
+        # ``self.rsi[-k]`` in ``next()`` reads the bar being computed; observed on the
+        # oracle, they are then left on the last bar (see ``_tw_sync``).
+        # (only those on a clock as long as this one's: a child on another feed is not walked)
+        n_own = self.lines[0].buflen() if len(self.lines._buffers) else 0
+        kids = [buf for child in self._tw_children for buf in child.lines if buf.buflen() == n_own]
         try:
             for i in range(start, end):
                 for buf in self.lines:
                     buf.idx = i
                 for buf in inputs:
+                    buf.idx = i
+                for buf in kids:
                     buf.idx = i
                 if i + 1 < self._tw_minperiod:
                     continue
@@ -230,7 +271,10 @@ class Indicator(LineArithmetic, ParamsBase):
                 buf.idx = idx
 
     def next(self):
-        raise NotImplementedError(f"{type(self).__name__} defines neither once() nor next()")
+        """Nothing by default. Observed on the oracle (probe ``inert_indicator``): an
+        indicator that defines neither ``once`` nor ``next`` and binds no line runs
+        without error, its lines NaN on every bar (the corpus uses one as a holder of
+        feeds and of a ``compute()`` method the strategy calls)."""
 
     @property
     def _tw_vectorised(self) -> bool:
@@ -244,7 +288,7 @@ class Indicator(LineArithmetic, ParamsBase):
     def _tw_steps(self) -> bool:
         """Does the class compute anything bar by bar? An indicator whose lines are all
         bound in ``__init__`` defines neither ``once`` nor ``next`` and has nothing to step."""
-        return not self._tw_vectorised and (type(self).next is not Indicator.next or not self._tw_bindings)
+        return not self._tw_vectorised and type(self).next is not Indicator.next
 
     def _tw_runonce(self) -> bool:
         env = self._tw_env
@@ -257,6 +301,10 @@ class Indicator(LineArithmetic, ParamsBase):
             owner = inp._owner if isinstance(inp, LineBuffer) else inp
             if isinstance(owner, Indicator):
                 owner._tw_compute()
+        # observed on the oracle: a child is complete before its parent computes (a
+        # ``once`` reading ``self.child.lines.x.array`` sees every value)
+        for child in self._tw_children:
+            child._tw_compute()
         n = self._tw_clock.buflen()
         for i, source in self._tw_bindings:
             owner = source._owner if isinstance(source, LineBuffer) else source
@@ -297,10 +345,21 @@ class Indicator(LineArithmetic, ParamsBase):
         """Align the cursor with the clock feed's cursor; step a live next-only indicator."""
         if not self._tw_computed:
             self._tw_compute()
+        live = not self._tw_runonce()
+        if self._tw_parent is not None and not live:
+            # Observed on the oracle (runonce, its default; probe ``child_indicators``): the
+            # strategy does not move a child's cursor during the run. Read from the
+            # strategy, a child of a ``next``-only indicator stays on the last bar (``len``
+            # the whole series), one of a ``once`` or binding indicator before the first
+            # (``len`` 0) -- both read the series' last value at ``[0]``.
+            return
+        if live:
+            for child in self._tw_children:
+                child._tw_sync()
         idx = self._tw_clock.idx
         for buf in self.lines:
             buf.idx = idx
-        if self._tw_steps and not self._tw_runonce() and idx > self._tw_stepped:
+        if self._tw_steps and live and idx > self._tw_stepped:
             self._tw_stepped = idx
             if idx + 1 >= self._tw_minperiod:
                 self.next()
