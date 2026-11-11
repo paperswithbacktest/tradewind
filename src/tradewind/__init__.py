@@ -8,9 +8,9 @@ black-box tests, and no third-party engine source is ever consulted.
 from . import analyzers, indicators
 from .analyzer import Analyzer, TimeReturn
 from .broker import BackBroker, BrokerBase, SimulatedBroker
-from .engine import Cerebro, Engine
 from .comminfo import CommInfoBase, CommissionInfo
 from .dateutils import date2num, num2date, num2dt
+from .engine import Cerebro, Engine
 from .feeds import DataBase, PandasData, TimeFrame, feeds
 from .indicator import Indicator
 from .lineops import If, LineIterator, LineRoot, LinesOperation
@@ -32,10 +32,10 @@ __all__ = [
     "BrokerBase",
     "BuyOrder",
     "Cerebro",
-    "Engine",
     "CommInfoBase",
     "CommissionInfo",
     "DataBase",
+    "Engine",
     "If",
     "Indicator",
     "LineBuffer",
