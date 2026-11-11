@@ -83,7 +83,7 @@ class Momentum(tw.Indicator):              # same, vectorised
   series before the run. During that pass every feed that is **not one of its inputs** sits
   at its last bar: an indicator that reads another feed through a parameter sees one
   constant value (backtrader does the same). Pass that feed as an input
-  (`MyIndicator(self.data0, self.data1)`), or run with `tw.Cerebro(runonce=False)`.
+  (`MyIndicator(self.data0, self.data1)`), or run with `tw.Engine(runonce=False)`.
 - An indicator can also be defined by binding lines built from other indicators, with no
   `next()` nor `once()`:
 

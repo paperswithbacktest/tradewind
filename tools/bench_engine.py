@@ -8,7 +8,7 @@ Two strategies, both on the same seeded bars:
 * ``rebalance``: equal weight through ``order_target_percent`` on every name at each month's
   first bar -- the order path (batch acceptance, fills, notifications) on top.
 
-The figure is the wall time of ``Cerebro.run`` (feed start included, DataFrame building
+The figure is the wall time of ``Engine.run`` (feed start included, DataFrame building
 excluded) divided by symbols × bars, best of ``--repeat``. The spec's budget is about
 0.6 µs of engine time per security-bar.
 """
@@ -69,16 +69,16 @@ class Rebalance(tw.Strategy):
 
 
 def run_once(strategy, fr):
-    cerebro = tw.Cerebro(stdstats=False)
+    engine = tw.Engine(stdstats=False)
     for i, f in enumerate(fr):
-        cerebro.adddata(tw.feeds.PandasData(dataname=f), name=f"S{i}")
-    cerebro.addstrategy(strategy)
-    cerebro.broker.set_cash(10_000_000)
+        engine.adddata(tw.feeds.PandasData(dataname=f), name=f"S{i}")
+    engine.addstrategy(strategy)
+    engine.broker.set_cash(10_000_000)
     gc.collect()
     t0 = time.perf_counter()
-    cerebro.run()
+    engine.run()
     elapsed = time.perf_counter() - t0
-    return elapsed, cerebro.broker.getvalue()
+    return elapsed, engine.broker.getvalue()
 
 
 def main():

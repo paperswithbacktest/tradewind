@@ -35,21 +35,21 @@
  },
  "entries": [
   {
-   "file": "cerebro.py",
+   "file": "engine.py",
    "kind": "tokens",
-   "digest": "6e949fe8a1c8deb5",
+   "digest": "b8a8703954838092",
    "size": 139,
    "lines_at_review": [
-    22,
-    46
+    26,
+    50
    ],
    "class": "API",
-   "what": "Cerebro.params: the 19 documented parameters with their defaults",
+   "what": "Cerebro.params: the 19 documented parameters with their defaults (re-keyed on 2026-11-11: same 139-token span, the class renamed Engine)",
    "accepted": "2026-11-08",
    "review": "spec/similarity-review-0.0.2.md § 4 row 1"
   },
   {
-   "file": "cerebro.py",
+   "file": "engine.py",
    "kind": "ast",
    "digest": "9a2751aea478b4c3",
    "size": 60,
@@ -259,7 +259,7 @@
    "review": "spec/similarity-review-0.0.2.md § 4 row 15"
   },
   {
-   "file": "cerebro.py",
+   "file": "engine.py",
    "kind": "tokens",
    "digest": "89bef11f0a9f76d3",
    "size": 44,

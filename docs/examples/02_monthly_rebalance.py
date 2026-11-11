@@ -26,12 +26,12 @@ class EqualWeight(tw.Strategy):
             print(f"{self.datetime.date(0)} {order.data._name}: {order.getstatusname()}")
 
 
-cerebro = tw.Cerebro()
+engine = tw.Engine()
 for i, symbol in enumerate(["AAA", "BBB", "CCC", "DDD"]):
-    cerebro.adddata(tw.feeds.PandasData(dataname=bars(symbol, seed=10 + i)), name=symbol)
-cerebro.addstrategy(EqualWeight)
-cerebro.addanalyzer(tw.analyzers.DrawDown, _name="dd")
-cerebro.broker.setcash(1_000_000)
-strategy = cerebro.run()[0]
-print(f"fills {strategy.fills}, final value {cerebro.broker.getvalue():,.2f}, "
+    engine.adddata(tw.feeds.PandasData(dataname=bars(symbol, seed=10 + i)), name=symbol)
+engine.addstrategy(EqualWeight)
+engine.addanalyzer(tw.analyzers.DrawDown, _name="dd")
+engine.broker.setcash(1_000_000)
+strategy = engine.run()[0]
+print(f"fills {strategy.fills}, final value {engine.broker.getvalue():,.2f}, "
       f"max drawdown {strategy.analyzers.dd.get_analysis()['max']['drawdown']:.2f} %")

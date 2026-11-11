@@ -20,9 +20,9 @@ class BuyTheDipMonthly(tw.Strategy):
             print(f"{self.datetime.date(0)} trade closed, net P&L {trade.pnlcomm:,.2f}")
 
 
-cerebro = tw.Cerebro()
-cerebro.adddata(tw.feeds.PandasData(dataname=bars("AAA", years=2, seed=3)), name="AAA")
-cerebro.addstrategy(BuyTheDipMonthly)
-cerebro.broker.setcash(50_000)
-cerebro.run()
-print(f"final value {cerebro.broker.getvalue():,.2f}")
+engine = tw.Engine()
+engine.adddata(tw.feeds.PandasData(dataname=bars("AAA", years=2, seed=3)), name="AAA")
+engine.addstrategy(BuyTheDipMonthly)
+engine.broker.setcash(50_000)
+engine.run()
+print(f"final value {engine.broker.getvalue():,.2f}")

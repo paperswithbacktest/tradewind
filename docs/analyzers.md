@@ -4,8 +4,8 @@ An analyzer watches the run and summarises it. Add it before `run()`, with a nam
 it from the strategy afterwards:
 
 ```python
-cerebro.addanalyzer(tw.analyzers.DrawDown, _name="dd")
-strategy = cerebro.run()[0]
+engine.addanalyzer(tw.analyzers.DrawDown, _name="dd")
+strategy = engine.run()[0]
 result = strategy.analyzers.dd.get_analysis()
 ```
 
@@ -26,7 +26,7 @@ included.
 ### `SharpeRatio`
 
 ```python
-cerebro.addanalyzer(tw.analyzers.SharpeRatio, _name="sharpe",
+engine.addanalyzer(tw.analyzers.SharpeRatio, _name="sharpe",
                     timeframe=tw.TimeFrame.Days, riskfreerate=0.0, annualize=True)
 strategy.analyzers.sharpe.get_analysis()["sharperatio"]
 ```

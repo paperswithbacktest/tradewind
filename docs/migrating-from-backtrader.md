@@ -22,6 +22,10 @@ sys.modules["backtrader.feeds"] = tradewind.feeds
 sys.modules["backtrader.indicators"] = tradewind.indicators
 ```
 
+`bt.Cerebro()` keeps working: in Tradewind the class is called `Engine`, and `Cerebro` is a
+permanent alias of it (so is `self.cerebro` inside a strategy, next to `self.engine`). The rest
+of this documentation writes `tw.Engine()`.
+
 ## How "the same results" is checked
 
 Every release runs a set of probe strategies on both engines and compares, bar by bar, the
@@ -34,7 +38,7 @@ The behaviours that match are listed one by one in
 
 ## What is supported
 
-- `Cerebro`: `adddata`, `addstrategy`, `addanalyzer`, `broker`, `run`, `runonce`.
+- `Cerebro` (Tradewind's `Engine`, the same class under backtrader's name): `adddata`, `addstrategy`, `addanalyzer`, `broker`, `run`, `runonce`.
 - `Strategy`: `params`, `__init__`, `start`, `prenext`, `nextstart`, `next`, `stop`,
   `notify_order`, `notify_trade`, `notify_timer`, `buy`, `sell`, `close`, `cancel`,
   `order_target_size/value/percent`, `getposition`, `positions`, `getdatabyname`,

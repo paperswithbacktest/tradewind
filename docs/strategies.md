@@ -1,6 +1,6 @@
 # Strategies
 
-A strategy is a subclass of `tw.Strategy`. Cerebro builds it once (its `__init__`), then
+A strategy is a subclass of `tw.Strategy`. The engine builds it once (its `__init__`), then
 calls one of its hooks on every slice.
 
 ```python
@@ -17,7 +17,7 @@ class MyStrategy(tw.Strategy):
 ## Parameters
 
 `params` is a tuple of `(name, default)` pairs or a dict. Values given to
-`cerebro.addstrategy(MyStrategy, lookback=120)` override the defaults; both are read as
+`engine.addstrategy(MyStrategy, lookback=120)` override the defaults; both are read as
 `self.p.lookback` (or `self.params.lookback`). Parameters are set before `__init__` runs.
 
 ## Lifecycle

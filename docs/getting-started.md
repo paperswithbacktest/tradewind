@@ -12,7 +12,7 @@ compiled.
 ## A first backtest
 
 A backtest has four parts: a **strategy** (what to do on each bar), one or more **data
-feeds** (the bars), a **broker** (cash, positions, fills, costs) and **Cerebro**, which runs
+feeds** (the bars), a **broker** (cash, positions, fills, costs) and the **engine** (`tw.Engine`), which runs
 the loop.
 
 ```python
@@ -37,14 +37,14 @@ class SmaTrend(tw.Strategy):
 
 prices = pd.read_csv("prices.csv", index_col="date", parse_dates=True)  # open high low close volume
 
-cerebro = tw.Cerebro()
-cerebro.adddata(tw.feeds.PandasData(dataname=prices), name="SPY")
-cerebro.addstrategy(SmaTrend, period=50)
-cerebro.broker.setcash(100_000)
-cerebro.broker.setcommission(commission=0.001)   # 0.1 % of each fill's value
+engine = tw.Engine()
+engine.adddata(tw.feeds.PandasData(dataname=prices), name="SPY")
+engine.addstrategy(SmaTrend, period=50)
+engine.broker.setcash(100_000)
+engine.broker.setcommission(commission=0.001)   # 0.1 % of each fill's value
 
-strategy = cerebro.run()[0]
-print(cerebro.broker.getvalue())
+strategy = engine.run()[0]
+print(engine.broker.getvalue())
 ```
 
 The same strategy on synthetic data, with nothing to download, is
@@ -54,7 +54,7 @@ The same strategy on synthetic data, with nothing to download, is
 
 - `__init__` ran once. The SMA was computed over the whole series right away; the strategy
   reads it bar by bar through `self.sma[0]`.
-- For the first 49 bars the SMA has no value yet, so Cerebro called `prenext()` (empty by
+- For the first 49 bars the SMA has no value yet, so the engine called `prenext()` (empty by
   default) instead of `next()`. From bar 50 on, `next()` runs on every bar.
 - `order_target_percent(target=0.95)` compared 95 % of the portfolio value with the current
   position and placed a market order for the difference, in whole shares.
@@ -66,10 +66,10 @@ The same strategy on synthetic data, with nothing to download, is
 ## Reading results
 
 ```python
-cerebro.addanalyzer(tw.analyzers.DrawDown, _name="dd")
-cerebro.addanalyzer(tw.analyzers.SharpeRatio, _name="sharpe", timeframe=tw.TimeFrame.Days,
+engine.addanalyzer(tw.analyzers.DrawDown, _name="dd")
+engine.addanalyzer(tw.analyzers.SharpeRatio, _name="sharpe", timeframe=tw.TimeFrame.Days,
                     annualize=True)
-strategy = cerebro.run()[0]
+strategy = engine.run()[0]
 print(strategy.analyzers.dd.get_analysis()["max"]["drawdown"])   # percent
 print(strategy.analyzers.sharpe.get_analysis()["sharperatio"])
 ```

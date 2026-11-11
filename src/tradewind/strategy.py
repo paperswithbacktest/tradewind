@@ -1,6 +1,6 @@
 """The strategy contract: what a corpus ``strategy.py`` inherits.
 
-Parameters are consumed before ``__init__`` (``params.MetaParams``); Cerebro binds the
+Parameters are consumed before ``__init__`` (``params.MetaParams``); the engine binds the
 feeds, the broker and the environment before ``__init__`` too, so an ``__init__`` that
 builds indicators from ``self.data`` works. Order helpers delegate to the broker.
 """
@@ -79,7 +79,7 @@ class _Positions(dict):
 
 class Strategy(ParamsBase):
     def _tw_before_init(self):
-        # Filled by Cerebro right before this is called; defaults keep a bare
+        # Filled by the engine right before this is called; defaults keep a bare
         # ``Strategy()`` constructible in tests.
         if not hasattr(self, "datas"):
             self._tw_bind(env=None, datas=[], broker=None)
@@ -94,7 +94,7 @@ class Strategy(ParamsBase):
         self.stats = []
 
     def _tw_bind(self, env, datas, broker):
-        self.env = self.cerebro = env
+        self.engine = self.env = self.cerebro = env
         self.datas = list(datas)
         self.data = self.datas[0] if self.datas else None
         for i, d in enumerate(self.datas):
@@ -107,7 +107,7 @@ class Strategy(ParamsBase):
         self.datetime = _ClockLine(np.empty(0), "datetime", owner=self)
 
     def _tw_start_clock(self, times):
-        """The run's slice times, before the first slice (``Cerebro.run``)."""
+        """The run's slice times, before the first slice (``Engine.run``)."""
         self.datetime = _ClockLine(np.asarray(times, dtype=np.float64), "datetime", owner=self)
 
     def _tw_tick(self, position: int):

@@ -18,10 +18,10 @@ class SmaTrend(tw.Strategy):
             self.order_target_percent(target=0.0)
 
 
-cerebro = tw.Cerebro()
-cerebro.adddata(tw.feeds.PandasData(dataname=bars("AAA", seed=1)), name="AAA")
-cerebro.addstrategy(SmaTrend, period=50)
-cerebro.broker.setcash(100_000)
-cerebro.broker.setcommission(commission=0.001)        # 0.1 % of each fill's value
-strategy = cerebro.run()[0]
-print(f"final value {cerebro.broker.getvalue():,.2f}")
+engine = tw.Engine()
+engine.adddata(tw.feeds.PandasData(dataname=bars("AAA", seed=1)), name="AAA")
+engine.addstrategy(SmaTrend, period=50)
+engine.broker.setcash(100_000)
+engine.broker.setcommission(commission=0.001)        # 0.1 % of each fill's value
+strategy = engine.run()[0]
+print(f"final value {engine.broker.getvalue():,.2f}")

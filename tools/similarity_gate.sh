@@ -10,7 +10,7 @@
 #
 #   tools/similarity_gate.sh            the gate on src/tradewind
 #   tools/similarity_gate.sh --control  then a negative control: the same gate on a copy of
-#                                       the tree with cerebro.py planted under a new name
+#                                       the tree with engine.py planted under a new name
 #                                       must FAIL, or the gate is vacuous
 #
 # Environment: PYTHON (default python; its minor version must be the allow-list's base
@@ -66,9 +66,9 @@ gate "$TARGET"
 
 if [ "${1:-}" = "--control" ]; then
   echo
-  echo "negative control: cerebro.py planted as _planted_copy.py must fail the gate"
+  echo "negative control: engine.py planted as _planted_copy.py must fail the gate"
   cp -R "$TARGET" "$WORK/planted"
-  cp "$TARGET/cerebro.py" "$WORK/planted/_planted_copy.py"
+  cp "$TARGET/engine.py" "$WORK/planted/_planted_copy.py"
   if JSON_OUT="" gate "$WORK/planted" >"$WORK/control.txt"; then
     echo "the gate passed a planted copy: it is vacuous"
     exit 1
