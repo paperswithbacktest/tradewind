@@ -13,6 +13,7 @@ from .broker import BackBroker
 from .clock import Phase, UnionClock
 from .dateutils import num2date
 from .events import OrderEvent, TradeEvent, UniverseEvent
+from .indicator import reset_construction
 from .lines import building
 from .market import MarketState
 from .params import ParamsBase
@@ -338,11 +339,13 @@ class Cerebro(ParamsBase):
                                            "__qualname__": cls.__qualname__})
         # The build stage: an operator on lines inside ``__init__`` builds a line
         # (``lineops``), the same operator in ``next()`` reads current values.
+        reset_construction()
         try:
             with building():
                 strat = bound(*args, **skwargs)
         finally:
             env._building = None
+            reset_construction()
         strat.__class__ = cls
         env._building = None
         for ind in strat._tw_indicators:

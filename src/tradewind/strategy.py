@@ -141,6 +141,15 @@ class Strategy(ParamsBase):
     def getpositions(self, broker=None):
         return (self.broker if broker is None else broker).positions
 
+    def addminperiod(self, minperiod):
+        """Accepted and ignored on a strategy. Observed on the oracle (probe
+        ``strategy_minperiod``): ``addminperiod(n)`` / ``updateminperiod(n)`` called on a
+        strategy, before or after its indicators are built, with ``n`` up to past the end
+        of the data, leave the first ``next`` where the feeds and the indicators put it."""
+
+    def updateminperiod(self, minperiod):
+        """Accepted and ignored on a strategy (see ``addminperiod``)."""
+
     def getsizing(self, data=None, isbuy=True):
         return 1
 
