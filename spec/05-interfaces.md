@@ -736,3 +736,14 @@ values. The gains: phase 2 from the mask (no per-feed date comparison, no bar tu
 mark vectorised, `get_value(datas=[d])` without a scan of the book, the readiness gate
 cached, notifications cloned without `copy.copy`.
 
+Chantier 3 (2026-11-15), speed without changing a bit (`docs/performance.md`): the seven
+line buffers of a feed share one cursor (phase 2: one increment per feed with a bar); a root
+indicator computed before the run shares its clock feed's cursor and leaves the phase 10
+list; order and trade events are built only when a strategy or analyzer of the run defines
+`notify_order` / `notify_trade`, something else subscribed to the bus, or the bus keeps a
+journal; under the default `NextBarFillModel`, `CommInfoFeeModel` and `ImmediateSettlement`
+(exact types, not subclasses) phase 6 calls the slippage model and the commission scheme
+directly. Acceptance and fills stay one order at a time in `ref` order: the running cash of
+the batch and the cash re-check at the fill are sequential, and the fee is whatever the
+scheme computes. `tools/nav_parity.py` compares two checkouts mark by mark as hex floats.
+
