@@ -530,8 +530,8 @@ def test_model_set_oracle_realistic_replace():
     ms = ModelSet.oracle(coc=True, checksubmit=False, slip_perc=0.01)
     assert ms.fill.coc and not ms.buying_power.checksubmit and ms.slippage.perc == 0.01
     assert len(list(ms)) == 8
-    with pytest.raises(NotImplementedError):
-        ModelSet.realistic()
+    real = ModelSet.realistic()
+    assert len(list(real)) == 8 and type(real.fill).__name__ == "VolumeShareFillModel"
     other = ms.replace(fee=FlatFee())
     assert isinstance(other.fee, FlatFee) and other.fill is ms.fill and not isinstance(ms.fee, FlatFee)
     broker = tw.BackBroker()

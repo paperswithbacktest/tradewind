@@ -36,7 +36,9 @@ container, on data you load yourself.
 | `IShortableProvider` | `ShortableProvider` | default: always shortable, no fee |
 | `IMarginInterestRateModel` | `MarginInterestRateModel` | default: none |
 | `security.SetFeeModel(...)` | `engine.broker.set_models(data, fee=...)` | any of the eight, per security |
-| `CashBook` | `broker.cashbook` | single currency for now |
+| `CashBook` | `broker.cashbook`; `broker.set_conversion("EUR", eurusd_feed)`, `set_account_currency` | a balance per currency, the value in the account currency ([Realistic models and currencies](realistic-models.md)) |
+| `SecurityMarginModel`, `CashBuyingPowerModel`, margin calls | `tradewind.realistic.MarginAccount`, `CashAccount`, `MarginCallModel` | opt-in: `broker.set_profile("realistic")` |
+| `VolumeShareSlippageModel`, partial fills | `VolumeShareFillModel(participation=0.1)` | the rest of the order fills on the next bars |
 | Universe selection | `UniverseProvider` (interface only) | planned |
 | `MarketHoursDatabase`, time zones | `tw.calendars` (NYSE, NASDAQ, CME, CRYPTO), `ExchangeClock` | opt-in; the default clock is the union of the feeds' dates |
 | Splits, dividends, delistings | `CorporateActionProvider`; `tw.intraday.split_actions` for splits on unadjusted minute prices | the engine applies them at phase 3, before fills |
@@ -65,4 +67,5 @@ bar's open, not at the current bar's close or at the next tick.
 - **Data**: nothing is bundled. Any DataFrame works; the [Papers With
   Backtest](https://paperswithbacktest.com) datasets plug in through its SDK.
 - **Fidelity**: the default models reproduce backtrader, not Lean. Volume-capped fills,
-  T+1 settlement, borrow costs and margin calls come with the realistic model set.
+  T+1 settlement, borrow costs and margin calls come with the realistic model set
+  (`engine.broker.set_profile("realistic")`).

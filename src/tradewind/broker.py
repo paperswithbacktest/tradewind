@@ -187,6 +187,11 @@ class BackBroker(BrokerBase):
         # the order / trade events are then not built at all
         self._tw_quiet_orders = False
         self._tw_quiet_trades = False
+        # multi-currency and delayed settlement (``set_conversion``, ``set_properties``,
+        # ``set_profile``): off by default, and then the mark is the oracle's
+        self._fx_sources: dict = {}          # currency -> (feed, invert)
+        self._foreign = False                # a security is quoted outside the account currency
+        self._multi_cash = False             # the mark adds foreign balances and unsettled cash
 
     # -- cash (the account currency's balance of the cash book) -------------------------
     @property
@@ -225,6 +230,9 @@ class BackBroker(BrokerBase):
         security._market = self.market
         data.security = security
         self._mark_cache = None
+        if security.properties.quote_currency != self.cashbook.account_currency:
+            self.cashbook.ensure(security.properties.quote_currency)
+            self._refresh_cash_flags()
         return security
 
     _security = register
@@ -240,7 +248,118 @@ class BackBroker(BrokerBase):
         if security is not None and security._broker is self:
             security.models = chosen
         self._accruals = self._needs_accruals()
+        self._refresh_cash_flags()
         return chosen
+
+    def set_profile(self, profile="realistic", margin_call: bool | None = None, **options) -> ModelSet:
+        """Install a model profile as the default of every security without its own models:
+        ``"realistic"`` (``ModelSet.realistic(**options)``), ``"oracle"``, or a ``ModelSet``.
+        ``margin_call`` (default: when the buying-power model has a maintenance margin, as
+        ``MarginAccount`` does) adds the phase 9 liquidation model. Call it before ``run``;
+        the compat setters (``set_coc``, ``set_checksubmit``...) still reach the new set."""
+        if isinstance(profile, ModelSet):
+            models = profile
+        elif profile == "realistic":
+            models = ModelSet.realistic(**options)
+        elif profile == "oracle":
+            models = ModelSet.oracle(**options)
+        else:
+            raise ValueError("profile is 'realistic', 'oracle' or a ModelSet")
+        old = self.models
+        self.models = models
+        for security in self.securities:
+            if security.models is old and id(security.feed) not in self._model_overrides:
+                security.models = models
+        from .realistic import MarginAccount, MarginCallModel
+
+        if margin_call is None:
+            margin_call = isinstance(models.buying_power, MarginAccount)
+        if margin_call:
+            self.margin_call_model = MarginCallModel()
+        else:
+            self.margin_call_model = None
+        self._accruals = self._needs_accruals()
+        self._refresh_cash_flags()
+        return models
+
+    # -- currencies ---------------------------------------------------------------------
+    def set_account_currency(self, currency: str) -> None:
+        """The currency of the cash, the value and ``getcash()`` (USD by default). Call it
+        before ``run``; the starting cash keeps its amount, now in ``currency``."""
+        if currency == self.cashbook.account_currency:
+            return
+        old = self.cashbook
+        book = CashBook(currency, old.account.amount)
+        for cash in old:
+            if cash is not old.account:
+                book.ensure(cash.currency, cash.conversion_rate, cash.conversion_source).amount += cash.amount
+        self.cashbook = book
+        for security in self.securities:
+            if security.properties.quote_currency != currency:
+                book.ensure(security.properties.quote_currency)
+        self._refresh_cash_flags()
+
+    def set_properties(self, data, properties) -> None:
+        """Contract terms of ``data``'s security (``SymbolProperties``: quote currency,
+        multiplier, lot...). A quote currency other than the account's needs a conversion
+        (``set_conversion``) for the value to be marked."""
+        data.symbol_properties = properties
+        security = getattr(data, "security", None)
+        if security is not None and security._broker is self:
+            security.properties = properties
+            self.portfolio.multiplier[security.id] = properties.contract_multiplier
+            if properties.quote_currency != self.cashbook.account_currency:
+                self.cashbook.ensure(properties.quote_currency)
+        self._mark_cache = None
+        self._refresh_cash_flags()
+
+    def set_conversion(self, currency: str, data, invert: bool = False) -> None:
+        """Price ``currency`` in the account currency from the closes of the feed ``data``
+        (added to the engine like any other): its close is the value of one unit of
+        ``currency`` in the account currency (``EURUSD`` for EUR in a USD account), or its
+        inverse with ``invert`` (``USDJPY`` for JPY). The rate moves at each slice (phase 2),
+        to the feed's last close."""
+        cash = self.cashbook.ensure(currency)
+        self._fx_sources[currency] = (data, bool(invert))
+        security = getattr(data, "security", None)
+        cash.conversion_source = security.id if security is not None and security._broker is self else None
+        self._refresh_cash_flags()
+
+    def _refresh_cash_flags(self) -> None:
+        account = self.cashbook.account_currency
+        props = [s.properties for s in self.securities]
+        self._foreign = bool(self._fx_sources) or any(p.quote_currency != account for p in props) or \
+            len(self.cashbook) > 1
+        sets = [s.models for s in self.securities] or [self.models]
+        self._multi_cash = self._foreign or any(type(m.settlement) is not ImmediateSettlement for m in sets)
+
+    def _update_rates(self) -> None:
+        """Phase 2, broker side: each converted currency at its feed's last close."""
+        book = self.cashbook
+        for currency, (data, invert) in self._fx_sources.items():
+            if len(data):
+                rate = data.close[0]
+                book[currency].conversion_rate = 1.0 / rate if invert else rate
+
+    def fx_rates(self, ids) -> np.ndarray:
+        """The conversion rate of each security's quote currency (1.0 for the account's)."""
+        book = self.cashbook
+        account = book.account_currency
+        out = np.ones(len(ids))
+        securities = self.securities
+        for k, sid in enumerate(np.asarray(ids).tolist()):
+            ccy = securities[sid].properties.quote_currency
+            if ccy != account:
+                out[k] = book[ccy].conversion_rate
+        return out
+
+    def _cash_total(self) -> float:
+        """Every balance in the account currency plus the unsettled proceeds."""
+        book = self.cashbook
+        total = book.total_in_account_currency()
+        if book._unsettled:
+            total += book.unsettled().amount
+        return total
 
     def start(self, datas, market: MarketState) -> None:
         """Bind the run's feeds (``SecurityId`` = adddata order) and its market state."""
@@ -250,7 +369,16 @@ class BackBroker(BrokerBase):
         for security in self.securities:
             security._market = market
         self._accruals = self._needs_accruals()
+        self._refresh_cash_flags()
         self._mark_cache = None
+        if self._multi_cash:
+            # the settlement models' unsettled cash counts in the value from the first mark
+            seen = set()
+            for security in self.securities:
+                m = security.models.settlement
+                if id(m) not in seen and not isinstance(m, ImmediateSettlement):
+                    seen.add(id(m))
+                    self.cashbook.register_unsettled(m.unsettled)
 
     def _needs_accruals(self) -> bool:
         sets = [s.models for s in self.securities] or [self.models]
@@ -292,12 +420,19 @@ class BackBroker(BrokerBase):
         self._coo = bool(coo)
 
     def set_slippage_perc(self, perc, slip_open=True, slip_limit=True, slip_match=True, slip_out=False):
-        slip = self.models.slippage
+        slip = self._compat_slippage()
         slip.perc, slip.fixed = float(perc), 0.0
 
     def set_slippage_fixed(self, fixed, slip_open=True, slip_limit=True, slip_match=True, slip_out=False):
-        slip = self.models.slippage
+        slip = self._compat_slippage()
         slip.fixed, slip.perc = float(fixed), 0.0
+
+    def _compat_slippage(self):
+        slip = self.models.slippage
+        if not hasattr(slip, "perc"):
+            raise TypeError(f"the broker's slippage model is {type(slip).__name__}, not the compatible one: "
+                            "replace it with set_models(data, slippage=...) or set_profile(...)")
+        return slip
 
     def set_checksubmit(self, checksubmit):
         self.p.checksubmit = checksubmit
@@ -343,6 +478,8 @@ class BackBroker(BrokerBase):
                 m = data.security.properties.contract_multiplier
                 if m != 1.0:
                     value = value * m
+                if self._foreign:
+                    value = value * self.fx_rates([data.security.id])[0]
             return value
         for data, pos in self.positions.items():
             if data not in datas:
@@ -354,7 +491,10 @@ class BackBroker(BrokerBase):
             comminfo = self.getcommissioninfo(data)
             m = self._security(data).properties.contract_multiplier
             v = comminfo.getvalue(pos, data.close[0])
-            value += v if m == 1.0 else v * m
+            v = v if m == 1.0 else v * m
+            if self._foreign:
+                v = v * self.fx_rates([data.security.id])[0]
+            value += v
         return value
 
     getvalue = get_value
@@ -372,11 +512,14 @@ class BackBroker(BrokerBase):
                 m = self._security(data).properties.contract_multiplier
                 if m != 1.0:
                     e, u = e * m, u * m
+                if self._foreign:
+                    r = self.fx_rates([data.security.id])[0]
+                    e, u = e * r, u * r
                 terms += e
                 terms += u
-            return self.cash + terms
+            return (self._cash_total() if self._multi_cash else self.cash) + terms
         order = self.positions.order
-        cash = self.cashbook.account.amount
+        cash = self._cash_total() if self._multi_cash else self.cashbook.account.amount
         if not order:
             return cash
         cache = self._mark_cache
@@ -406,6 +549,11 @@ class BackBroker(BrokerBase):
             # contract multipliers (options): value = quantity x price x multiplier
             entry = entry * cmult
             pnl = pnl * cmult
+        if self._foreign:
+            # securities quoted in another currency, valued in the account currency
+            rates = self.fx_rates(ids)
+            entry = entry * rates
+            pnl = pnl * rates
         terms = np.column_stack((entry[live], pnl[live])).ravel()
         # sequential, not pairwise: ``add.accumulate`` adds left to right like the loop
         return cash + float(np.add.accumulate(np.concatenate(((0.0,), terms)))[-1])
@@ -547,6 +695,8 @@ class BackBroker(BrokerBase):
     def accruals(self, s: TimeSlice | None) -> None:
         """Settlement scan, borrow fees on shorts, margin interest; skipped entirely while
         every security has the no-op oracle models."""
+        if self._fx_sources:
+            self._update_rates()
         if not self._accruals or s is None:
             return
         now = s.time
@@ -673,7 +823,8 @@ class BackBroker(BrokerBase):
                 # this bar's open moved by the slippage model -- what ``fill`` computes,
                 # without building the bar and the parameters
                 proposal = FillProposal(order.size, slipped(models.slippage, security, order, data.open[0], True))
-                self._execute(security, order, proposal, self._dtnum)
+                if self._execute(security, order, proposal, self._dtnum):
+                    remaining.append(order)
                 continue
             bar = Bar(self._dtnum, data.open[0], data.high[0], data.low[0], data.close[0], data.volume[0])
             if fill_model.expired(order, bar):
@@ -688,10 +839,13 @@ class BackBroker(BrokerBase):
             if proposal is None:
                 remaining.append(order)
                 continue
-            self._execute(security, order, proposal, self._dtnum)
+            if self._execute(security, order, proposal, self._dtnum):
+                remaining.append(order)    # a part filled, the rest waits for the next bar
         self.pending = remaining
 
-    def _execute(self, security, order, proposal, dt):
+    def _execute(self, security, order, proposal, dt) -> bool:
+        """Fill ``proposal``; True when the order stays open (a part filled, the rest
+        left for the next bars by a volume-capped fill model)."""
         data = order.data
         comminfo = order.comminfo
         models = security.models
@@ -704,10 +858,11 @@ class BackBroker(BrokerBase):
         if allowed is None:
             order.margin()
             self.notify(order)
-            return
+            return False
         settlement = models.settlement
         cashbook = self.cashbook
-        ccy = cashbook.account_currency
+        # every cash flow of a security is in its quote currency (the account's by default)
+        ccy = security.properties.quote_currency
         if type(settlement) is ImmediateSettlement:
             # the oracle default: the funds land at once (``apply_funds`` is this add)
             def settle(security, flow, now, cashbook):
@@ -770,15 +925,20 @@ class BackBroker(BrokerBase):
         order.execute(dt, size, price, closed, closed_value, closedcomm, opened, opened_value,
                       openedcomm, 0.0, pnl)
         self._account(security, comm_final, pnl)
+        alive = False
         if partial:
             order.partial()
             self.notify(order)
             order.margin()
+        elif order.executed.remsize:
+            order.partial()                # volume-capped: the rest stays open
+            alive = True
         else:
             order.completed()
         self.notify(order)
         self._update_trade(order, data, size, price, opened, closed, pnl, comm_final, dt, newsize,
                            parts=trade_parts)
+        return alive
 
     @staticmethod
     def _confirm_fee(fee_model, security, order, size, price):

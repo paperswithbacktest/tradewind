@@ -801,3 +801,52 @@ loaded by the strategy and not declared, generators the strategy creates unseede
 (`np.random.default_rng()`), string-set iteration under a random hash seed (recorded as
 `hash_seed: "random"`).
 
+
+## 13. As built, chantier 4: realistic models and currencies (2026-11-15)
+
+**Models (§ 5).** `realistic.py`, every class opt-in next to the `Compat*` defaults:
+
+| model | protocol | rule |
+|---|---|---|
+| `CostTable` | — | full spread per `(symbol, year)` in bp (PWB's cost-parameters tables, `from_frame`); missing year → nearest year of the symbol (`max_gap`, unlimited by default, as PWB's harness); unknown symbol → `default_half_spread` (1 bp); zero, negative, NaN dropped; `aliases`, `max_spread_bps`. No estimator: Roll stays the harness's business |
+| `SpreadFeeModel` | `FeeModel` (§ 5.1) | `|q| × price × multiplier × half-spread(year of the fill) × spread_fraction + max(per_share × |q|, minimum) + impact_factor × λ × notional/1e6 × notional/1e4`, in the quote currency |
+| `SpreadSlippage` | `SlippageModel` (§ 5.2) | half-spread of the year × `fraction`, at the open too |
+| `VolumeShareFillModel` | `FillModel` (§ 5.3) | the oracle's prices; quantity ≤ `participation × volume` (whole units), the rest left open: `Partial` after each part, `Completed` after the last; zero volume fills nothing, NaN volume is not capped |
+| `MarginAccount`, `CashAccount` | `BuyingPowerModel` (§ 5.4) | Reg T: equity (all currencies + unsettled + positions at the open, account currency) − initial margin of the book ≥ 0 after the order; batch in submission order, no carry of a refused order, a reducing order always passes, fees count; re-check at the fill, the margin a sale frees funds later fills of the slice, reversal → closing part only; shortable quantity checked; `CashAccount` = 100 %, settled cash only, no shorts |
+| `MarginCallModel` | phase 9 | equity < Σ maintenance margin → every position cut pro rata to `equity / requirement`, market orders `info["margin_call"]` |
+| `DelayedSettlement`, `UsEquitySettlement` | `SettlementModel` (§ 5.5) | positive flows wait T+n business days (calendar holidays optional), payments leave at once; US: T+3, T+2 from 2017-09-05, T+1 from 2024-05-28, NYSE holidays |
+| `BorrowRates` | `ShortableProvider` (§ 5.6) | annual rate (0.25 %), per-symbol rates, easy-to-borrow list, shortable quantities, rebate subtracted |
+| `FlatMarginInterest` | `MarginInterestRateModel` (§ 5.7) | debit and credit rates on every balance, per elapsed year |
+
+`ModelSet.realistic(costs=None, **options)` assembles them (`realistic_models`); options in
+`docs/realistic-models.md`. `BackBroker.set_profile("realistic" | "oracle" | ModelSet,
+margin_call=None, **options)` installs a set as the default of every security without its
+own and, for a `MarginAccount`, the margin-call model. `BatchState` gained `scratch`, a
+model's running state for the batch (the margin left).
+
+**Broker changes, all inert on the default path.** `_execute` books every flow in the
+security's quote currency (the account's by default) and returns whether the order stays
+open: a fill smaller than the order's remaining size leaves it `Partial` and pending (the
+reversal case -- closing part then `Margin` -- is unchanged). The compat slippage setters
+raise `TypeError` on a non-compatible slippage model instead of writing attributes into it.
+
+**Currencies (§ 4.5).** `set_properties(data, SymbolProperties(...))`, `set_conversion(currency,
+feed, invert=False)` (the feed's last close, refreshed at phase 4 before any accrual -- the
+feeds moved at phase 2), `set_account_currency`, `fx_rates(ids)`. A security's price, fees,
+borrow fees and dividends move its quote currency's balance, which may go negative (no
+sweep). Phase 8 then marks `CashBook.total_in_account_currency() + unsettled` plus each term
+× its rate; `get_value(datas)` converts too. The flags `_foreign` / `_multi_cash` are false
+unless a security is quoted in another currency, a conversion is set or a settlement model is
+not `ImmediateSettlement`: the mark is then the oracle's, float for float. An empty foreign
+balance adds nothing even before its rate exists (NaN).
+
+**Defaults unchanged.** `tools/nav_parity.py`: 50 runs, 7 800 marks, 5 007 orders identical bit
+for bit to `main`. `tools/bench_engine.py` 200 × 500 (best of three, interleaved with `main`):
+idle 0.152-0.157 vs 0.153-0.160 µs, rebalance 0.582-0.590 vs 0.591-0.599 µs; 2 000 × 500:
+0.262/0.668 vs 0.246/0.663 µs (noise). Under the realistic profile (`--profile realistic`),
+2 000 × 500: idle 0.40 µs, monthly rebalance 1.30 µs per security-bar.
+
+**Not done.** Tick rounding and a symbol-properties database; intrabar fill paths;
+dividends on the pay date; a pattern-day-trader rule; Lean's per-security cash buying power
+for foreign securities (a foreign purchase under the compat buying-power model compares a
+quote-currency cost with account-currency cash: use `MarginAccount` or `CashAccount`).

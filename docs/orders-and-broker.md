@@ -16,8 +16,9 @@ self.sell(data, size=100, exectype=tw.Order.Limit, price=105.0)     # limit
 self.buy(data, size=100, exectype=tw.Order.Stop, price=98.0)        # stop
 ```
 
-An order fills in full or not at all: no partial fills, no cap on the share of the bar's
-volume. `StopTrail`, `StopTrailLimit`, brackets, OCO groups and order expiry (`valid`) are
+An order fills in full or not at all under the default models: no partial fills, no cap
+on the share of the bar's volume (the realistic profile caps it, see
+[Realistic models and currencies](realistic-models.md)). `StopTrail`, `StopTrailLimit`, brackets, OCO groups and order expiry (`valid`) are
 not available yet.
 
 ## Order states
@@ -134,7 +135,11 @@ engine.broker.set_models(thin, slippage=CompatSlippage(fixed=0.05, slip_open=Tru
 
 A model is a small class with one or two methods (for example a fee model has
 `get_order_fee(params) -> CashAmount`); the protocols are in `tradewind.models` and in
-[`spec/05-interfaces.md`](../spec/05-interfaces.md). A second set, `ModelSet.realistic()`
-(fills capped by volume, T+1 settlement, borrow costs, a cash check without the
-refused-order carry), is planned; it raises `NotImplementedError` today. See
+[`spec/05-interfaces.md`](../spec/05-interfaces.md). See
 [`examples/05_per_security_models.py`](examples/05_per_security_models.py).
+
+A second set, `ModelSet.realistic()`, prices what backtrader leaves out: a measured spread
+per security and per year, fills capped by the bar's volume (partial fills), a Reg T margin
+account without the refused-order carry, margin calls, borrow fees, T+1/T+2 settlement. It is
+opt-in, `engine.broker.set_profile("realistic", costs=...)`, and several currencies come with
+it: see [Realistic models and currencies](realistic-models.md).

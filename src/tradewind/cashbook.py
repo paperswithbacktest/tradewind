@@ -71,7 +71,11 @@ class CashBook:
         currency first, so a single-currency book returns its amount exactly)."""
         total = 0.0
         for cash in self._cash.values():
-            total += cash.amount if cash is self.account else cash.amount * cash.conversion_rate
+            if cash is self.account:
+                total += cash.amount
+            elif cash.amount:
+                # an empty balance adds nothing, even before its rate is known (NaN)
+                total += cash.amount * cash.conversion_rate
         return total
 
     def register_unsettled(self, source: Callable[[], CashAmount]) -> None:
@@ -83,7 +87,8 @@ class CashBook:
         total = 0.0
         for source in self._unsettled:
             amount = source()
-            total += self.convert(amount.amount, amount.currency, self.account_currency)
+            if amount.amount:
+                total += self.convert(amount.amount, amount.currency, self.account_currency)
         return CashAmount(total, self.account_currency)
 
     def __repr__(self):
