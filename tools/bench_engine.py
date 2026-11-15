@@ -129,12 +129,14 @@ SCENARIOS = {"idle": Idle, "rebalance": Rebalance, "notified": Notified, "reader
              "indicators": Indicators}
 
 
-def run_once(strategy, fr):
+def run_once(strategy, fr, profile=None):
     engine = tw.Engine(stdstats=False)
     for i, f in enumerate(fr):
         engine.adddata(tw.feeds.PandasData(dataname=f), name=f"S{i}")
     engine.addstrategy(strategy)
     engine.broker.set_cash(10_000_000)
+    if profile is not None:
+        engine.broker.set_profile(profile)
     gc.collect()
     t0 = time.perf_counter()
     engine.run()
@@ -151,6 +153,8 @@ def main():
     p.add_argument("--scenarios", default=",".join(SCENARIOS), help="comma-separated, of: "
                    + ", ".join(SCENARIOS))
     p.add_argument("--json", default=None, help="write the figures there")
+    p.add_argument("--profile", default=None, help="a model profile for the broker (``realistic``); "
+                   "the default is the oracle's")
     args = p.parse_args()
     n_bars = args.bars or round(252 * args.years)
     fr = frames(args.symbols, n_bars)
@@ -160,7 +164,7 @@ def main():
         cls = SCENARIOS[name]
         times, value = [], None
         for _ in range(args.repeat):
-            t, value = run_once(cls, fr)
+            t, value = run_once(cls, fr, args.profile)
             times.append(t)
         best = min(times)
         out[name] = {"seconds": best, "us_per_security_bar": best / cells * 1e6, "final_value": value}

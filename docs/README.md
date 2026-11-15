@@ -30,7 +30,9 @@ backtrader's own results, bar by bar:
 | Run fingerprint (data, code, parameters, seed) | done: `engine.fingerprint` |
 | Minute bars: consolidation to N minutes / hours / sessions, a bounded loader, splits on unadjusted prices | done ([Intraday data](intraday.md)) |
 | Listed options: contracts with their multiplier, chains, Black-Scholes-Merton and implied volatility, exercise and assignment at expiry | done on daily option tables ([Options](options.md)) |
-| Universes, multi-currency, futures | interfaces in place, implementations planned |
+| Realistic models: spread per security and year, volume-capped fills, Reg T margin and margin calls, borrow fees, T+1/T+2 settlement, interest | done, opt-in ([Realistic models and currencies](realistic-models.md)) |
+| Several currencies: cash per currency, conversion from FX feeds, value in the account currency | done, opt-in |
+| Universes, futures | interfaces in place, implementations planned |
 | Live trading on Interactive Brokers (paper first): `tradewind.live`, `pip install 'tradewind[ibkr]'` | preview, see [`spec/07-live-ibkr.md`](../spec/07-live-ibkr.md) and `examples/live_ibkr_paper.py` |
 | backtrader's resampling and replay, plotting, `optstrategy` | not available yet |
 
@@ -60,6 +62,8 @@ faster than on backtrader, data loading included. See [Performance](performance.
 12. [Options](options.md): contracts, chains, Greeks and implied volatility, expiry.
 13. [Typed API](typed-api.md): strategies as annotated classes, parameters in a dataclass,
     typed events and orders, on the same engine.
+14. [Realistic models and currencies](realistic-models.md): measured spreads, partial fills,
+    margin, borrow fees, settlement, several currencies.
 
 The [examples](examples/) run as they are, on synthetic data: `cd docs/examples && python
 01_sma_crossover.py`.

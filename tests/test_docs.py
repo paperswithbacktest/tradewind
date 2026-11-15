@@ -164,5 +164,3 @@ def test_unsupported_features_fail_loudly():
     for call in (cerebro.resampledata, cerebro.replaydata, cerebro.optstrategy, cerebro.plot):
         with pytest.raises(NotImplementedError):
             call()
-    with pytest.raises(NotImplementedError):
-        tw.ModelSet.realistic()

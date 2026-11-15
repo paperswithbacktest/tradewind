@@ -213,6 +213,7 @@ class BatchState:
     running_cash: float                                  # carried through the batch by the broker
     pseudo_positions: dict[SecurityId, float]            # position sizes as the batch moves them
     time: Timestamp = 0
+    scratch: dict | None = None                          # a model's own running state for the batch
 
 
 class BuyingPowerCheck(NamedTuple):
@@ -676,10 +677,16 @@ class ModelSet:
         )
 
     @classmethod
-    def realistic(cls) -> ModelSet:
-        """The profile chantier 4 assembles (volume-share fills, cash account without the
-        deficit carry, T+1 settlement, borrow fees, ...)."""
-        raise NotImplementedError("ModelSet.realistic() comes with chantier 4; oracle() is the default")
+    def realistic(cls, costs=None, **options) -> ModelSet:
+        """The realistic profile of chantier 4 (``tradewind.realistic``): spread per
+        security and year from ``costs`` (a ``CostTable``) charged as a fee, fills capped
+        at 10 % of the bar's volume, a Reg T margin account (50 % / 25 %) without the
+        refused-order carry, 0.25 % a year to borrow a short, US equity settlement (T+3,
+        T+2, T+1). Every choice is an option of ``realistic_models``; opt-in, the default
+        stays ``oracle()``."""
+        from .realistic import realistic_models
+
+        return realistic_models(cls, costs, **options)
 
     def replace(self, **changes) -> ModelSet:
         """A copy with some models swapped (the others stay the same instances)."""
