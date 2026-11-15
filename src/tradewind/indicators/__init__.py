@@ -310,6 +310,85 @@ class StandardDeviation(Indicator):
 
 StdDev = StandardDeviation
 
+
+class SumN(Indicator):
+    """The sum of the last ``period`` values (``period`` 1 by default: the input itself).
+
+    Observed on the oracle (probe ``sumn_divbyzero``): the window is summed the way the
+    simple average sums it (``_window_sum``, Python's compensated ``sum``), bit for bit;
+    a window of zeros sums to exactly 0.0; the minimum period is the input's plus
+    ``period - 1``."""
+
+    lines = ("sumn",)
+    params = (("period", 1),)
+
+    def __init__(self):
+        super().__init__()
+        self.addminperiod(self.p.period)
+
+    def once(self, start, end):
+        x = _as_array(self.data)
+        p = self.p.period
+        out = np.full(len(x), np.nan)
+        if len(x) >= p:
+            out[p - 1:] = _window_sum(x, p)
+        out[:self._tw_minperiod - 1] = np.nan
+        self.lines.sumn.array[:] = out
+
+
+class Average(Indicator):
+    """The simple average of the **first** input over ``period`` bars (1 by default).
+
+    Observed on the oracle (probe ``mean_pctchange``; corpus
+    ``exploration_of_long_short_etf_momentum…`` writes ``Mean(*four_rocs)``): with several
+    inputs only the first is averaged -- ``Mean(roc3, roc5, roc7, roc9)`` is ``roc3`` bit
+    for bit --, the others only raise the minimum period to theirs (``Mean(ROC(2),
+    ROC(45))`` is NaN until bar 46, then ``ROC(2)``); the average is ``_window_sum`` over
+    the period divided by it, as the simple moving average's."""
+
+    lines = ("av",)
+    params = (("period", 1),)
+
+    def __init__(self):
+        super().__init__()
+        self.addminperiod(self.p.period)
+
+    def once(self, start, end):
+        out = _rolling_mean(_as_array(self.data), self.p.period)
+        out[:self._tw_minperiod - 1] = np.nan
+        self.lines.av.array[:] = out
+
+
+ArithmeticMean = Mean = Average
+
+
+class PercentChange(Indicator):
+    """``x / x[-period] - 1.0``, ``period`` 30 by default.
+
+    Observed on the oracle (probe ``mean_pctchange``): the ratio form, not the difference
+    over the old value that ``RateOfChange`` computes -- the two differ in the last bits;
+    first value at the input's minimum period plus ``period``."""
+
+    lines = ("pctchange",)
+    params = (("period", 30),)
+
+    def __init__(self):
+        super().__init__()
+        self.addminperiod(self.p.period + 1)
+
+    def once(self, start, end):
+        x = _as_array(self.data)
+        p = self.p.period
+        out = np.full(len(x), np.nan)
+        if len(x) > p:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out[p:] = x[p:] / x[:-p] - 1.0
+        out[:self._tw_minperiod - 1] = np.nan
+        self.lines.pctchange.array[:] = out
+
+
+PctChange = PercentChange
+
 __all__ = [
     "ATR",
     "EMA",
@@ -317,6 +396,8 @@ __all__ = [
     "ROC",
     "RSI",
     "SMA",
+    "ArithmeticMean",
+    "Average",
     "AverageTrueRange",
     "CrossDown",
     "CrossOver",
@@ -325,14 +406,18 @@ __all__ = [
     "Highest",
     "Lowest",
     "MaxN",
+    "Mean",
     "MinN",
     "MovingAverageExponential",
     "MovingAverageSimple",
+    "PctChange",
+    "PercentChange",
     "RSI_Safe",
     "RateOfChange",
     "RelativeStrengthIndex",
     "SimpleMovingAverage",
     "StandardDeviation",
     "StdDev",
+    "SumN",
     "TrueRange",
 ]

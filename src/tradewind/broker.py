@@ -500,6 +500,20 @@ class BackBroker(BrokerBase):
 
     getvalue = get_value
 
+    def _get_value(self, datas=None, lever=False):
+        """The broker's own revaluation, which four published corpus strategies call right
+        after ``add_cash`` to settle it inside the bar. Observed on the oracle (probe
+        ``private_get_value``): every queued addition lands at once (``getcash`` shows it
+        from then on, so do the next bar's batch check and fills), the portfolio is marked
+        again, and that value is both returned and what the plain ``getvalue()`` reads for
+        the rest of the bar; with nothing queued the mark is unchanged."""
+        if datas is not None:
+            return self.get_value(datas=datas, lever=lever)
+        if self._cash_addition:
+            self._land_additions()
+        self.mark(None)
+        return self._value
+
     def _mark_value(self):
         """``cash + t``, ``t`` the terms of every open position (``_mark_terms``) summed left
         to right from zero, in the order the positions were first touched."""
@@ -654,8 +668,54 @@ class BackBroker(BrokerBase):
             self.pending.remove(order)
             order.cancel()
             self.notify(order)
+            if order._tw_bracket is not None:
+                self._tw_end_bracket(order)
             return True
         return False
+
+    # -- brackets ----------------------------------------------------------------------------
+    def _tw_link_bracket(self, legs):
+        """Tie the orders of a bracket together, as observed on the oracle (probes
+        ``bracket_orders``, ``bracket_batch``): the children name the entry as their
+        ``parent``; only the last order carries ``transmit``; a child cannot fill before
+        the bar after the entry's fill."""
+        for leg in legs:
+            leg._tw_bracket = legs
+            leg.transmit = False
+        legs[-1].transmit = True
+        for child in legs[1:]:
+            child.parent = legs[0]
+            child._tw_waiting = True
+
+    def _tw_end_bracket(self, order, remaining=None):
+        """``order`` filled as a child, or ended without filling: every other live order of
+        its bracket ends now, in bracket order -- ``Canceled`` once accepted, ``Rejected``
+        while still waiting for the batch check (observed on the oracle, probe
+        ``bracket_batch``: a refused entry rejects its children; a refused child cancels the
+        accepted entry and rejects its sibling)."""
+        for other in order._tw_bracket:
+            if other is order or not other.alive():
+                continue
+            if other in self.submitted:
+                self.submitted.remove(other)
+                other.reject(self)
+                self.notify(other)
+                continue
+            for queue in (self.pending, remaining):
+                if queue is not None and other in queue:
+                    queue.remove(other)
+            other.cancel()
+            self.notify(other)
+
+    def _tw_bracket_step(self, order, remaining, activate):
+        """After ``order`` of a bracket went through the fill phase."""
+        if order.status == Order.Completed:
+            if order.parent is None:
+                activate.extend(order._tw_bracket[1:])
+            else:
+                self._tw_end_bracket(order, remaining)
+        elif not order.alive():
+            self._tw_end_bracket(order, remaining)
 
     # -- the slice: phases 3 to 8 --------------------------------------------------------------
     def on_slice(self, s: TimeSlice) -> None:
@@ -820,6 +880,8 @@ class BackBroker(BrokerBase):
             if not check.accepted:
                 order.margin()
                 self.notify(order)
+                if order._tw_bracket is not None:
+                    self._tw_end_bracket(order)
                 continue
             order.accept(self)
             self.notify(order)
@@ -852,8 +914,16 @@ class BackBroker(BrokerBase):
         has_bar = self.market.has_bar if (s is None and self.market is not None) else (
             s.has_bar if s is not None else None)
         remaining = collections.deque()
+        activate: list = []
         while pending:
             order = pending.popleft()
+            if order._tw_bracket is not None:
+                if order._tw_waiting:
+                    remaining.append(order)
+                    continue
+                self._tw_fill_one(order, has_bar, remaining)
+                self._tw_bracket_step(order, remaining, activate)
+                continue
             data = order.data
             security = data.security
             if has_bar is not None and (security.id >= len(has_bar) or not has_bar[security.id]):
@@ -886,6 +956,30 @@ class BackBroker(BrokerBase):
             if self._execute(security, order, proposal, self._dtnum):
                 remaining.append(order)    # a part filled, the rest waits for the next bar
         self.pending = remaining
+        for child in activate:
+            child._tw_waiting = False
+
+    def _tw_fill_one(self, order, has_bar, remaining) -> None:
+        """The fill phase of one order, by the general path (a bracket's orders)."""
+        data = order.data
+        security = data.security
+        if has_bar is not None and (security.id >= len(has_bar) or not has_bar[security.id]):
+            remaining.append(order)
+            return
+        fill_model = security.models.fill
+        bar = Bar(self._dtnum, data.open[0], data.high[0], data.low[0], data.close[0], data.volume[0])
+        if fill_model.expired(order, bar):
+            order.expire()
+            self.notify(order)
+            return
+        placed = None
+        if getattr(fill_model, "needs_placed_bar", True) and len(data) >= 2:
+            placed = Bar(data.datetime[-1], data.open[-1], data.high[-1], data.low[-1], data.close[-1],
+                         data.volume[-1])
+        proposal = fill_model.fill(FillParameters(security, order, bar, placed, self._now,
+                                                  security.models.slippage))
+        if proposal is None or self._execute(security, order, proposal, self._dtnum):
+            remaining.append(order)
 
     def _execute(self, security, order, proposal, dt) -> bool:
         """Fill ``proposal``; True when the order stays open (a part filled, the rest

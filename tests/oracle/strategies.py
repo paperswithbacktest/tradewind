@@ -1147,6 +1147,304 @@ def build(bt):
     class ShortFillDeficitChecked(ShortFillDeficit):
         params = (("checksubmit", True),)
 
+    class PrivateGetValue(Recorder):
+        """``broker._get_value()`` right after ``add_cash`` (corpus: four published
+        strategies settle a synthetic sleeve inside the bar this way): what it returns, and
+        what ``getcash`` / ``getvalue`` read before and after it, in that bar and the next;
+        an order placed after it; a call with no addition queued."""
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"rows": []}
+
+        def _row(self, tag, r=None):
+            b = self.broker
+            self.extra["rows"].append((getattr(self, "tw_step", 0), tag, repr(b.getcash()), repr(b.getvalue()),
+                                       None if r is None else repr(r)))
+
+        def next(self):
+            super().next()
+            self.tw_step = getattr(self, "tw_step", 0) + 1  # ``next`` starts once S3 lists
+            n = self.tw_step
+            d0, d1 = self.datas[:2]
+            self._row("top")
+            if n == 2:
+                self.buy(data=d0, size=300)
+                self.sell(data=d1, size=100)
+            if n in (6, 9, 15):
+                self.broker.add_cash(1234.5 * n)
+                self._row("added")
+                self._row("settled", self.broker._get_value())
+                self._row("again", self.broker._get_value())
+            if n == 9:
+                # sized on the settled cash: accepted only if the batch sees it
+                self.buy(data=d0, size=int(self.broker.getcash() / d0.close[0]))
+            if n == 12:
+                self._row("plain", self.broker._get_value())
+            if n == 15:
+                self.broker.add_cash(-500.25)
+                self.broker.add_cash(77.125)
+                self._row("two", self.broker._get_value())
+                self.order_target_value(d1, target=0.0)
+
+    class SumNDivByZero(Recorder):
+        """``bt.ind.SumN`` and ``bt.DivByZero`` as the corpus builds a volume-weighted price
+        (``a_comparative_study_of_the_macd…``) and counts flat closes (``do_options_markets…``):
+        values bit for bit, zero volumes on a stretch of S0, a NaN-led next-only line."""
+
+        @staticmethod
+        def oracle_frames(fr):
+            import numpy as np
+
+            out = {}
+            for i, (k, f) in enumerate(fr.items()):
+                f = f.copy()
+                rng = np.random.default_rng(100 + i)
+                f["volume"] = np.round(rng.uniform(1e3, 5e5, len(f)) * (1 + i))
+                if k == "S0":
+                    f.iloc[40:52, f.columns.get_loc("volume")] = 0.0
+                    f.iloc[70:74, f.columns.get_loc("close")] = f["close"].iloc[69]
+                out[k] = f
+            return out
+
+        def __init__(self):
+            super().__init__()
+
+            class Flat(bt.Indicator):
+                lines = ("flat",)
+
+                def __init__(self):
+                    self.addminperiod(2)
+
+                def next(self):
+                    self.l.flat[0] = 1.0 if self.data.close[0] == self.data.close[-1] else 0.0
+
+            class Vwap(bt.Indicator):
+                lines = ("vw", "raw")
+                params = (("period", 5),)
+
+                def __init__(self):
+                    d = self.data
+                    pv = (d.high + d.low + d.close) / 3.0 * d.volume
+                    self.l.vw = bt.DivByZero(bt.ind.SumN(pv, period=self.p.period),
+                                             bt.ind.SumN(d.volume, period=self.p.period), 0.0)
+                    self.l.raw = bt.ind.SumN(pv, period=self.p.period)
+
+            self.vw = [Vwap(d, period=p) for d, p in zip(self.datas[:3], (5, 12, 3))]
+            self.nanzero = bt.DivByZero(self.datas[0].close, self.datas[0].volume, float("nan"))
+            self.flat = bt.ind.SumN(Flat(self.datas[0]).flat, period=6)
+            self.sum_close = bt.ind.SumN(self.datas[1].close, period=20)
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self.extra["rows"].append((
+                len(self), [repr(v.vw[0]) for v in self.vw], [repr(v.raw[0]) for v in self.vw],
+                [len(v) for v in self.vw], repr(self.nanzero[0]), repr(self.flat[0]),
+                repr(self.sum_close[0])))
+            d0 = self.datas[0]
+            if self.flat[0] > 0 and not self.getposition(d0).size:
+                self.buy(data=d0, size=50)
+            elif d0.close[0] > self.vw[0].vw[0] > 0 and self.getposition(d0).size:
+                self.close(data=d0)
+
+    class MeanPctChange(Recorder):
+        """``bt.ind.Mean(*rocs)`` and ``bt.ind.PctChange(close, period=1)`` as the corpus
+        writes them (``exploration_of_long_short_etf_momentum…``), feeding a standard
+        deviation with ``movav=SMA``; ``Mean`` with an explicit period too."""
+
+        def __init__(self):
+            super().__init__()
+
+            class Signal(bt.Indicator):
+                lines = ("avg_mom", "vol")
+                params = (("mom_periods", [3, 5, 7, 9]), ("vol_period", 6))
+
+                def __init__(self):
+                    moms = [bt.ind.RateOfChange(self.data.close, period=p) for p in self.p.mom_periods]
+                    self._mom_mean = bt.ind.Mean(*moms)
+                    daily_ret = bt.ind.PctChange(self.data.close, period=1)
+                    self._vol = bt.ind.StandardDeviation(daily_ret, period=self.p.vol_period, movav=bt.ind.SMA)
+
+                def next(self):
+                    self.lines.avg_mom[0] = self._mom_mean[0]
+                    self.lines.vol[0] = self._vol[0]
+
+            self.sig = [Signal(d) for d in self.datas[:3]]
+            self.mean4 = bt.ind.Mean(self.datas[1].close, period=4)
+            self.pct = [bt.ind.PctChange(self.datas[2].close), bt.ind.PercentChange(self.datas[2], period=3)]
+            self.avg = bt.ind.Average(self.datas[0].close, period=7)
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self.extra["rows"].append((
+                len(self), [repr(s.avg_mom[0]) for s in self.sig], [repr(s.vol[0]) for s in self.sig],
+                repr(self.mean4[0]), [repr(p[0]) for p in self.pct], repr(self.avg[0]),
+                [len(s) for s in self.sig]))
+            if len(self) % 5:
+                return
+            moms = [(d, s.avg_mom[0]) for d, s in zip(self.datas[:3], self.sig)]
+            best = max(moms, key=lambda x: x[1])[0]
+            for d, _ in moms:
+                self.order_target_percent(d, target=0.6 if d is best else 0.0)
+
+    class BracketOrders(Recorder):
+        """``buy_bracket`` / ``sell_bracket`` (corpus ``double_bottom_country_trading…``):
+        the three orders returned, their notifications, which child fills, the other one
+        cancelled, a parent cancelled before it fills, a child cancelled by hand."""
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"brackets": [], "rows": []}
+            self.br = {}
+
+        def _keep(self, tag, orders):
+            self.br[tag] = orders
+            self.extra["brackets"].append((len(self), tag, [
+                (o.getordername(), o.isbuy(), o.size, repr(o.price), o.getstatusname(),
+                 None if o.parent is None else orders.index(o.parent),
+                 bool(o.transmit))
+                for o in orders]))
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            for tag, orders in self.br.items():
+                if any(order.ref == o.ref for o in orders):
+                    which = [o.ref for o in orders].index(order.ref)
+                    self.extra["rows"].append((len(self), tag, which, order.getstatusname(),
+                                               float(order.executed.size), repr(order.executed.price),
+                                               [o.getstatusname() for o in orders], order.alive()))
+
+        def next(self):
+            super().next()
+            self.tw_step = getattr(self, "tw_step", 0) + 1  # ``next`` starts once S3 lists
+            n = self.tw_step
+            d0, d1, d2 = self.datas[:3]
+            c0, c1, c2 = d0.close[0], d1.close[0], d2.close[0]
+            if n == 3:
+                self._keep("limit_entry", self.buy_bracket(data=d0, size=40, price=c0 * 0.995,
+                                                           exectype=bt.Order.Limit,
+                                                           limitprice=c0 * 1.03, stopprice=c0 * 0.97))
+                self._keep("market_entry", self.buy_bracket(data=d1, size=30, exectype=bt.Order.Market,
+                                                            limitprice=c1 * 1.02, stopprice=c1 * 0.98))
+                self._keep("never_fills", self.buy_bracket(data=d2, size=20, price=c2 * 0.7,
+                                                           limitprice=c2 * 0.8, stopprice=c2 * 0.6))
+            if n == 10:
+                self.cancel(self.br["never_fills"][0])
+            if n == 40:
+                self._keep("short", self.sell_bracket(data=d0, size=25, exectype=bt.Order.Market,
+                                                      stopprice=c0 * 1.04, limitprice=c0 * 0.96))
+                self._keep("cancel_child", self.buy_bracket(data=d1, size=15, exectype=bt.Order.Market,
+                                                            limitprice=c1 * 1.5, stopprice=c1 * 0.5))
+                self._keep("child_first", self.buy_bracket(data=d2, size=10, price=c2 * 0.5,
+                                                           limitprice=c2 * 0.9, stopprice=c2 * 0.4))
+            if n == 45:
+                self.cancel(self.br["cancel_child"][1])
+                self.cancel(self.br["child_first"][2])
+            if n == 50:
+                self.cancel(self.br["child_first"][0])
+            if n == 60:
+                self._keep("default_exec", self.buy_bracket(data=d0, size=12, price=c0,
+                                                            limitprice=c0 * 1.01, stopprice=c0 * 0.99))
+            if n == 80:
+                self._keep("stop_entry", self.buy_bracket(data=d1, size=11, price=c1 * 1.01,
+                                                          exectype=bt.Order.Stop,
+                                                          limitprice=c1 * 1.08, stopprice=c1 * 0.95))
+
+    class PositionByName(Recorder):
+        """``self.positionbyname`` (corpus ``feasible_momentum_strategies…`` calls it with a
+        name): what kind of object it is, which feed's position it reads, and what calling
+        it does."""
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self.tw_step = getattr(self, "tw_step", 0) + 1  # ``next`` starts once S3 lists
+            n = self.tw_step
+            if n == 2:
+                self.buy(data=self.datas[0], size=7)
+                self.sell(data=self.datas[1], size=3)
+            if n in (1, 5):
+                p = self.positionbyname
+                try:
+                    called = repr(p("S1").size)
+                except TypeError as e:
+                    called = type(e).__name__
+                self.extra["rows"].append((n, type(p).__name__, p.size, repr(p.price),
+                                           p is self.position, p is self.getposition(self.datas[0]),
+                                           p.size == self.getpositionbyname("S1").size,
+                                           self.positionsbyname["S1"].size, called))
+
+    class BracketBatch(Recorder):
+        """Brackets inside the batch pre-check: whether a bracket's children weigh on the
+        running cash of the orders placed after them, a parent refused (Margin) with its
+        children, a bracket placed with ``checksubmit`` off."""
+
+        params = (("checksubmit", True),)
+
+        def __init__(self):
+            super().__init__()
+            if not self.p.checksubmit:
+                self.broker.set_checksubmit(False)
+            self.extra = {"rows": []}
+            self.br = []
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            for k, orders in enumerate(self.br):
+                refs = [o.ref for o in orders]
+                if order.ref in refs:
+                    self.extra["rows"].append((len(self), k, refs.index(order.ref), order.getstatusname(),
+                                               repr(order.executed.price)))
+
+        def next(self):
+            super().next()
+            self.tw_step = getattr(self, "tw_step", 0) + 1  # ``next`` starts once S3 lists
+            n = self.tw_step
+            d0, d1, d2 = self.datas[:3]
+            cash = self.broker.getcash()
+            if n == 2:
+                # the children's sells would fund the next buy if they counted
+                size = int(0.6 * cash / d0.close[0])
+                self.br.append(self.buy_bracket(data=d0, size=size, exectype=bt.Order.Market,
+                                                limitprice=d0.close[0] * 1.2, stopprice=d0.close[0] * 0.8))
+                self.buy(data=d1, size=int(0.6 * cash / d1.close[0]))
+            if n == 20:
+                for d in self.datas:
+                    self.close(data=d)
+                for o in self.br[0][1:]:
+                    self.cancel(o)
+            if n == 25:
+                # a short bracket: its buy children would drain the running cash
+                size = int(0.9 * cash / d1.close[0])
+                self.br.append(self.sell_bracket(data=d1, size=size, exectype=bt.Order.Market,
+                                                 stopprice=d1.close[0] * 1.2, limitprice=d1.close[0] * 0.8))
+                self.buy(data=d2, size=int(0.5 * cash / d2.close[0]))
+            if n == 40:
+                for d in self.datas:
+                    self.close(data=d)
+                for o in self.br[1][1:]:
+                    self.cancel(o)
+            if n == 45:
+                # a parent too large: refused, and its children?
+                self.br.append(self.buy_bracket(data=d2, size=int(3 * cash / d2.close[0]), exectype=bt.Order.Market,
+                                                limitprice=d2.close[0] * 1.05, stopprice=d2.close[0] * 0.95))
+                self.buy(data=d0, size=10)
+            if n == 60:
+                # children refused by the pre-check while their parent is accepted
+                self.buy(data=d0, size=int(0.95 * cash / d0.close[0]))
+                size = int(0.5 * cash / d1.close[0])
+                self.br.append(self.sell_bracket(data=d1, size=size, exectype=bt.Order.Market,
+                                                 stopprice=d1.close[0] * 1.2, limitprice=d1.close[0] * 0.8))
+                self.buy(data=d2, size=3)
+
+    class BracketBatchUnchecked(BracketBatch):
+        params = (("checksubmit", False),)
+
     return {
         "short_fill_deficit": ShortFillDeficit,
         "short_fill_deficit_checked": ShortFillDeficitChecked,
@@ -1188,4 +1486,11 @@ def build(bt):
         "commissioned": Commissioned,
         "sma_cross": SmaCross,
         "rsi": Rsi,
+        "private_get_value": PrivateGetValue,
+        "sumn_divbyzero": SumNDivByZero,
+        "mean_pctchange": MeanPctChange,
+        "bracket_orders": BracketOrders,
+        "bracket_batch": BracketBatch,
+        "bracket_batch_unchecked": BracketBatchUnchecked,
+        "position_by_name": PositionByName,
     }
