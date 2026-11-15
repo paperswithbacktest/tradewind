@@ -24,6 +24,7 @@ Source = "https://github.com/paperswithbacktest/tradewind"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.5"]
+ibkr = ["ib_async>=2.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

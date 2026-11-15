@@ -28,7 +28,8 @@ backtrader's own results, bar by bar:
 | Exchange calendars (NYSE, Nasdaq, CME, crypto), minute clock, timers in exchange time | done, opt-in; the default clock stays backtrader's |
 | Run fingerprint (data, code, parameters, seed) | done: `engine.fingerprint` |
 | Universes, corporate actions, multi-currency, futures | interfaces in place, implementations planned |
-| Resampling, replay, plotting, `optstrategy`, live trading | not available yet |
+| Live trading on Interactive Brokers (paper first): `tradewind.live`, `pip install 'tradewind[ibkr]'` | preview, see [`spec/07-live-ibkr.md`](../spec/07-live-ibkr.md) and `examples/live_ibkr_paper.py` |
+| Resampling, replay, plotting, `optstrategy` | not available yet |
 
 Speed: the engine itself costs 0.2 to 1 µs per security and bar on a 2 000-security
 universe (`tools/bench_engine.py`); on the corpus the median strategy runs about 2.3 times
