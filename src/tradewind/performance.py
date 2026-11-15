@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from . import metrics
 from .analyzer import Analyzer
@@ -64,6 +65,13 @@ class PerformanceReport:
         return asdict(self)
 
 
+#: the parameters of ``Performance`` and their defaults (documented on the class)
+_DEFAULTS: dict[str, Any] = {
+    "benchmark": None, "periods_per_year": 252, "risk_free_rate": 0.0, "psr_benchmark": 0.0,
+    "participation": 0.01, "adv_window": 20, "capacity_quantile": 0.05,
+}
+
+
 def _asset_class(feed: Any) -> str:
     """The asset class of a feed: its ``asset_class`` attribute when set, ``option`` for an
     option contract, else ``unclassified``."""
@@ -87,15 +95,7 @@ class Performance(Analyzer):
     of close × volume over the security's last ``adv_window`` bars, the fill bar included).
     """
 
-    params = (
-        ("benchmark", None),
-        ("periods_per_year", 252),
-        ("risk_free_rate", 0.0),
-        ("psr_benchmark", 0.0),
-        ("participation", 0.01),
-        ("adv_window", 20),
-        ("capacity_quantile", 0.05),
-    )
+    params = tuple(_DEFAULTS.items())
 
     def start(self) -> None:
         self.times: list[Any] = []
@@ -130,7 +130,7 @@ class Performance(Analyzer):
             labels = self._labels = (ccys, classes)
         return labels
 
-    def _exposure(self, broker: Any) -> np.ndarray:
+    def _exposure(self, broker: Any) -> npt.NDArray[np.float64]:
         """The signed market value of every position (quantity × last close × multiplier),
         in the account currency, one row per security."""
         pf, market = broker.portfolio, broker.market

@@ -11,6 +11,7 @@ import datetime as dt
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.typing as npt
 
 import tradewind as tw
 from tradewind.performance import PerformanceReport
@@ -30,7 +31,7 @@ class Momentum(tw.TypedStrategy[Params]):
     def on_bar(self, bar: tw.BarEvent) -> None:
         spy: tw.BarSeries = self.bars["SPY"]
         last: float = spy.close[0]
-        past: np.ndarray = spy.close.history(self.params.lookback)
+        past: npt.NDArray[np.float64] = spy.close.history(self.params.lookback)
         when: dt.datetime = bar.time
         lookback: int = self.params.lookback
         holding: tw.Holding = self.portfolio["SPY"]

@@ -35,6 +35,7 @@ from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
 import numpy as np
+import numpy.typing as npt
 
 from .dateutils import num2date
 from .order import Order
@@ -113,7 +114,7 @@ class Series:
     def __len__(self) -> int:
         return len(self._line)
 
-    def history(self, size: int) -> np.ndarray:
+    def history(self, size: int) -> npt.NDArray[np.float64]:
         """The last ``size`` values, oldest first (fewer at the start of the run)."""
         size = min(int(size), len(self._line))
         if size <= 0:
