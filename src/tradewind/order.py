@@ -60,6 +60,11 @@ class Order:
 
     Buy, Sell = 0, 1
 
+    # the orders of a ``buy_bracket`` / ``sell_bracket`` share one list (entry, stop,
+    # limit); a child waits until the bar after its entry fills (spec/02, "Bracket orders")
+    _tw_bracket: list | None = None
+    _tw_waiting = False
+
     def __init__(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None,
                  ordtype=None, tradeid=0, info=None, **kwargs):
         self.ref = next(_refs)

@@ -26,7 +26,7 @@ from .engine import Cerebro, Engine
 from .feeds import DataBase, PandasData, TimeFrame, feeds
 from .fingerprint import RunFingerprint
 from .indicator import Indicator
-from .lineops import If, LineIterator, LineRoot, LinesOperation
+from .lineops import DivByZero, If, LineIterator, LineRoot, LinesOperation
 from .lines import LineBuffer, Lines
 from .models import ModelSet
 from .order import BuyOrder, Order, SellOrder
@@ -66,6 +66,7 @@ __all__ = [
     "CommInfoBase",
     "CommissionInfo",
     "DataBase",
+    "DivByZero",
     "Engine",
     "ExchangeCalendar",
     "ExchangeClock",

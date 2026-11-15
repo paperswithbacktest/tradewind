@@ -18,7 +18,9 @@ probes on the oracle (``tests/oracle/strategies.py``, probe ``line_ops``):
   non-zero (NaN included, as in Python);
 * a division by zero raises ``ZeroDivisionError`` when the line is computed, as Python
   float arithmetic does;
-* a built line has no truth value: ``bool()`` raises ``TypeError``.
+* a built line has no truth value: ``bool()`` raises ``TypeError``;
+* ``DivByZero(x, y, zero)`` divides without raising: ``zero`` where ``y`` is 0 (probe
+  ``sumn_divbyzero``).
 
 ``LineRoot`` and ``LineIterator`` are the names of two classes of the line hierarchy the
 corpus reads in type annotations (``Dict[bt.LineRoot, ...]``, ``List[bt.LineIterator]``).
@@ -127,6 +129,21 @@ def operate(fn, *operands):
 def If(cond, a, b):
     """``a`` where ``cond`` is true, else ``b``: a line, built in a strategy's ``__init__``."""
     return operate(_if, cond, a, b)
+
+
+def _divbyzero(a, b, zero):
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(b != 0, np.true_divide(a, np.where(b != 0, b, 1.0)), zero)
+
+
+def DivByZero(x, y, zero=0.0):
+    """``x / y``, or ``zero`` where ``y`` is 0: a line, built in a strategy's ``__init__``.
+
+    Observed on the oracle (probe ``sumn_divbyzero``, corpus
+    ``a_comparative_study_of_the_macd…``): a zero divisor gives ``zero`` (``nan`` passed
+    as ``zero`` gives NaN) instead of raising; any other divisor the plain quotient, bit
+    for bit."""
+    return operate(_divbyzero, x, y, zero)
 
 
 # -- class markers ---------------------------------------------------------------------------

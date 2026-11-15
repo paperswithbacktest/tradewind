@@ -100,6 +100,35 @@ off) raises `ZeroDivisionError` in the oracle when its window is flat (0/0); Tra
 returns 100. A corpus strategy with a plain RSI on a back-filled flat prefix would end in
 error on the oracle; none of the four strategies of the 0.1.47 pass does.
 
+
+### Surface the catalogue reads without a guard (2026-11-15)
+
+The codemod's dry run (PR #24) listed nine corpus strategies that read, outside any `try`
+or `hasattr`, a name the oracle has and Tradewind lacked. Each name was then observed on the
+oracle through black-box probes (`tests/oracle/strategies.py`: `private_get_value`,
+`sumn_divbyzero`, `mean_pctchange`, `bracket_orders`, `bracket_batch`,
+`bracket_batch_unchecked`, `position_by_name`), printing values (`repr`), dates, statuses
+and type or exception names only; scratch probes for the default periods and for `Mean`
+with several inputs printed values and lengths only. The public documentation gave the
+names, the parameters and the order of the bracket list:
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| `broker._get_value()` (private, called right after `add_cash` to settle it in the bar) **lands every queued addition at once** (`getcash` shows it, and so do the next bar's batch check and fills) and **marks the portfolio again**; the value is returned and is what the plain `getvalue()` reads for the rest of the bar; with nothing queued it changes nothing | kept | probe `private_get_value` (bit for bit); corpus `the_volatility_risk_premium…`, `time_varying_risk_aversion…`, `which_is_worse_heavy_tails…`, `yet_another_note_on_the_leland_s…` |
+| `bt.ind.SumN(x, period)` is the window summed like the simple average's (Python's compensated `sum`), `period` 1 by default; a window of zeros is exactly 0.0 | kept | probe `sumn_divbyzero`; corpus `a_comparative_study_of_the_macd…`, `do_options_markets_anticipate…` (held) |
+| `bt.DivByZero(x, y, zero)` is a line: `x / y`, or `zero` where `y` is 0 (a `nan` zero gives NaN), never raising | kept | same probe, a stretch of zero volumes |
+| `bt.ind.Mean` (= `Average`, `ArithmeticMean`) averages **its first input only** over `period` bars, `period` **1** by default: `Mean(roc3, roc5, roc7, roc9)` is `roc3` bit for bit, the other inputs only raise the minimum period (`Mean(ROC(2), ROC(45))`: NaN to bar 45, then `ROC(2)`) | kept, flagged | probe `mean_pctchange` and a scratch probe; corpus `exploration_of_long_short_etf_momentum…` (published) means to average four momenta and gets the 3-month one. **The strategy's intent is not what runs**: a defect of the strategy, to be fixed in the corpus, not in the engine |
+| `bt.ind.PctChange` (= `PercentChange`) is `x / x[-period] - 1.0`, `period` 30 by default -- the ratio form, which differs in the last bits from `RateOfChange`'s difference over the old value | kept | probe `mean_pctchange` |
+| `buy_bracket` / `sell_bracket` return `[entry, stop, limit]`; the entry is a `Limit` by default; the children are on the other side, same size, `Stop` at `stopprice` and `Limit` at `limitprice`, with `parent` the entry; only the last order has `transmit` true. All three are `Submitted` at once and go through the batch check as ordinary orders, in that order (a child sell funds the orders after it, a child buy spends) | kept | probes `bracket_orders`, `bracket_batch`; corpus `double_bottom_country_trading…` (which reads the list as `[entry, tp, sl]`: only names, it cancels all three alike) |
+| A child **cannot fill on the bar its entry fills**, even when that bar crosses its price; from the next bar it fills as any stop or limit | kept | probe `bracket_orders` (`default_exec`: the limit child's price inside the entry bar's range, filled two bars later) |
+| When one order of a bracket fills as a child, or ends without filling (cancelled by the strategy, `Margin`, and by extension `Expired`), **every other live order of the bracket ends right after it**, in bracket order: `Canceled` once accepted, `Rejected` while still waiting for the batch check. An entry refused by the batch check rejects its children (which then neither spend nor fund the running cash); a refused child cancels the accepted entry and rejects its sibling; an entry refused at its fill (`checksubmit` off) cancels its children; cancelling a child before the entry fills cancels the entry and the other child | kept | probes `bracket_orders`, `bracket_batch`, `bracket_batch_unchecked` (notification order checked). Expiry of a bracket order not probed |
+| `self.positionbyname` is an **attribute**: the very `Position` object of `self.position` (the first feed's); calling it, as `feasible_momentum_strategies…` does with a name, raises `TypeError`. `self.positionsbyname` maps every feed's name to its live position | kept, flagged | probe `position_by_name`. **The call is a crash on both engines** when the strategy reaches it (only when every cohort NAV is negative) |
+
+Nine names the same report shows **guarded** (`set_cashinterest`, `setslippage_perc`,
+`addcash`, `broker.Order`, `strategy.adddata`, `strategy.log`, `position_percent`,
+`get_latest_weights`, `get_market_cap`) are absent from the oracle too (checked with
+`hasattr` on live oracle objects): the guarded branch runs on both engines, nothing to add.
+
 ## Clock and bars
 
 | behaviour | kept / corrected | note |

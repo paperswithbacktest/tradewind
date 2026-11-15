@@ -109,7 +109,6 @@ class Strategy(ParamsBase):
         self.dnames = _DNames((d._name, d) for d in self.datas if d._name)
         self.broker = broker
         self.positions = _Positions(broker, self.datas) if broker is not None else {}
-        self.positionsbyname = _DNames()
         self.datetime = _ClockLine(np.empty(0), "datetime", owner=self)
 
     def _tw_start_clock(self, times):
@@ -134,6 +133,20 @@ class Strategy(ParamsBase):
     @property
     def position(self):
         return self.getposition()
+
+    @property
+    def positionsbyname(self):
+        """Every feed's position by the feed's name (observed on the oracle, probe
+        ``position_by_name``: the live ``Position`` objects)."""
+        return _DNames((d._name, self.getposition(d)) for d in self.datas)
+
+    @property
+    def positionbyname(self):
+        """Observed on the oracle (probe ``position_by_name``): an attribute, not a method --
+        the very ``Position`` object ``self.position`` returns (the first feed's), so
+        calling it with a name, as corpus ``feasible_momentum_strategies…`` does, raises
+        ``TypeError``. ``getpositionbyname(name)`` is the lookup by name."""
+        return self.position
 
     def getposition(self, data=None, broker=None):
         data = self.data if data is None else data
@@ -226,6 +239,43 @@ class Strategy(ParamsBase):
                                  valid=valid, tradeid=tradeid, **kwargs)
         self._tw_orders.append(order)
         return order
+
+    def buy_bracket(self, data=None, size=None, price=None, plimit=None, exectype=Order.Limit, valid=None,
+                    tradeid=0, trailamount=None, trailpercent=None, oargs=None, stopprice=None,
+                    stopexec=Order.Stop, stopargs=None, limitprice=None, limitexec=Order.Limit,
+                    limitargs=None, **kwargs):
+        """An entry with a protective stop and a take-profit limit on the other side: the
+        list ``[entry, stop, limit]`` (spec/02, "Bracket orders")."""
+        return self._tw_bracket(True, data, size, price, plimit, exectype, valid, tradeid, oargs, stopprice,
+                                stopexec, stopargs, limitprice, limitexec, limitargs, kwargs)
+
+    def sell_bracket(self, data=None, size=None, price=None, plimit=None, exectype=Order.Limit, valid=None,
+                     tradeid=0, trailamount=None, trailpercent=None, oargs=None, stopprice=None,
+                     stopexec=Order.Stop, stopargs=None, limitprice=None, limitexec=Order.Limit,
+                     limitargs=None, **kwargs):
+        """The short counterpart of ``buy_bracket``: a sell entry, a buy stop above, a buy
+        limit below."""
+        return self._tw_bracket(False, data, size, price, plimit, exectype, valid, tradeid, oargs, stopprice,
+                                stopexec, stopargs, limitprice, limitexec, limitargs, kwargs)
+
+    def _tw_bracket(self, long, data, size, price, plimit, exectype, valid, tradeid, oargs, stopprice,
+                    stopexec, stopargs, limitprice, limitexec, limitargs, kwargs):
+        data = self.data if data is None else self._tw_resolve(data)
+        size = self.getsizing(data, isbuy=long) if size is None else size
+        if not size:
+            return []
+        enter, leave = (self.broker.buy, self.broker.sell) if long else (self.broker.sell, self.broker.buy)
+        legs = [enter(self, data, size=abs(size), price=price, plimit=plimit, exectype=exectype, valid=valid,
+                      tradeid=tradeid, **{**kwargs, **(oargs or {})})]
+        if stopexec is not None:
+            legs.append(leave(self, data, size=abs(size), price=stopprice, exectype=stopexec, tradeid=tradeid,
+                              **{**kwargs, **(stopargs or {})}))
+        if limitexec is not None:
+            legs.append(leave(self, data, size=abs(size), price=limitprice, exectype=limitexec,
+                              tradeid=tradeid, **{**kwargs, **(limitargs or {})}))
+        self.broker._tw_link_bracket(legs)
+        self._tw_orders.extend(legs)
+        return legs
 
     def close(self, data=None, size=None, **kwargs):
         data = self.data if data is None else self._tw_resolve(data)
