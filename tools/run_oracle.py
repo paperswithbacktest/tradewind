@@ -97,7 +97,8 @@ def main():
         if args.only and name != args.only:
             continue
         commission = 0.0005 if name == "commissioned" else None
-        results[name] = run_one(bt, cls, fr, commission=commission)
+        frames_hook = getattr(cls, "oracle_frames", None)
+        results[name] = run_one(bt, cls, frames_hook(fr) if frames_hook else fr, commission=commission)
         print(f"{args.engine:10s} {name:24s} final_value={results[name]['final_value']:.2f} "
               f"fills={len(results[name]['fills'])}")
     with open(args.out, "w") as fh:
