@@ -60,6 +60,10 @@ class Engine(ParamsBase):
         self._universe_provider = None
         if self.p.cheat_on_open:
             self._broker.set_coo(True)
+        # Tradewind's own: the clock (None: UnionClock, the oracle default), the seed of the
+        # global generators (None: left as they are), declared data revisions, fingerprint
+        self._clock_spec = self._exchange_clock = self.seed = self._fingerprint = None
+        self._provenance = {}
 
     # -- configuration -----------------------------------------------------------------
     @property
@@ -80,9 +84,14 @@ class Engine(ParamsBase):
     def getbroker(self):
         return self._broker
 
-    def adddata(self, data, name=None):
+    def adddata(self, data, name=None, provenance=None):
+        """Add a feed (``SecurityId`` = adddata order). ``provenance`` (Tradewind): where
+        the data comes from, such as ``{"dataset": ..., "revision": ...}``, recorded in the
+        run's fingerprint."""
         if name is not None:
             data._name = name
+        if provenance is not None:
+            data.provenance = dict(provenance)
         data._tw_env = self
         self.datas.append(data)
         # SecurityId = adddata order (spec/05 § 4.1)
@@ -138,11 +147,59 @@ class Engine(ParamsBase):
         oracle's feeds are adjusted upstream)."""
         self._actions_provider = provider
 
+    def set_clock(self, clock) -> None:
+        """Run on ``clock`` instead of the default ``UnionClock``: an object with
+        ``bind(dtnums, actions=, universe=)`` returning the clock, such as
+        ``clock.ExchangeClock(calendars.NYSE, interval="1min", fill_forward=True)``.
+        ``None`` restores the default."""
+        if clock is not None and not hasattr(clock, "bind"):
+            raise TypeError("set_clock needs a clock with bind(dtnums, actions=, universe=)")
+        self._clock_spec = clock
+
+    def set_hours(self, hours, data=None) -> None:
+        """The ``ExchangeHours`` of every security (or of ``data``'s alone), read through
+        ``data.security.hours``; ``AlwaysOpen`` by default. A name (``"NYSE"``, ``"CME"``,
+        ``"CRYPTO"``) picks a shipped calendar. It does not change the clock: see
+        ``set_clock``."""
+        if isinstance(hours, str):
+            from .calendars import get_calendar
+
+            hours = get_calendar(hours)
+        broker = self._broker
+        if data is None:
+            broker.hours = hours
+            for security in broker.securities:
+                security.hours = hours
+        else:
+            broker.register(data).hours = hours
+
+    def set_seed(self, seed) -> None:
+        """Seed Python's and numpy's global generators at ``run()``, before the strategies
+        are built (also ``run(seed=...)``). ``None``, the default, seeds nothing: the
+        generators are left as they are. Recorded in the run's fingerprint."""
+        self.seed = seed
+
+    def add_provenance(self, name: str, **info) -> None:
+        """Declare data the strategy reads by itself (a file, a dataset at a revision) so
+        that the run's fingerprint records it: ``add_provenance("fundamentals",
+        dataset="...", revision="...")``."""
+        self._provenance[str(name)] = dict(info)
+
+    @property
+    def fingerprint(self):
+        """The ``RunFingerprint`` of the last ``run()`` (None before): engine version, data
+        hashes and revisions, strategy code and parameters, broker configuration, seed.
+        Built on first read."""
+        recorder = self._fingerprint
+        return recorder.build() if recorder is not None else None
+
     def set_universe(self, provider) -> None:
         """A ``UniverseProvider`` whose changes reach phase 1 (none by default)."""
         self._universe_provider = provider
 
     def run(self, **kwargs):
+        if "seed" in kwargs:
+            self.seed = kwargs.pop("seed")
         for k, v in kwargs.items():
             if k in self.p:
                 setattr(self.p, k, v)
@@ -158,15 +215,35 @@ class Engine(ParamsBase):
         for feed in feeds:
             if not feed._started:
                 feed._start()
-        clock = UnionClock([f._dtnum for f in feeds], actions=getattr(self, "_actions_provider", None),
-                           universe=getattr(self, "_universe_provider", None))
+        dtnums = [f._dtnum for f in feeds]
+        if self._clock_spec is None:
+            clock = UnionClock(dtnums, actions=getattr(self, "_actions_provider", None),
+                               universe=getattr(self, "_universe_provider", None))
+            self._exchange_clock = None
+        else:
+            clock = self._clock_spec.bind(dtnums, actions=self._actions_provider,
+                                          universe=self._universe_provider)
+            self._exchange_clock = clock if getattr(clock, "sessions", None) is not None else None
         market = MarketState(feeds)
         broker.start(feeds, market)
 
+        seed = self.seed
+        if seed is not None:
+            import random
+
+            import numpy as np
+
+            random.seed(seed)
+            np.random.seed(seed)
+        from .fingerprint import FingerprintRecorder
+
+        recorder = FingerprintRecorder(self, seed)
+        self._fingerprint = recorder
         strategies = []
         for cls, args, skwargs in self.strats:
             strat = self._build_strategy(cls, args, skwargs)
             strategies.append(strat)
+        recorder.set_strategies(strategies)
         self.runstrats = [strategies]
         self.clock = clock
         # phase 10 steps only the indicators that need it: one computed before the run
@@ -224,6 +301,7 @@ class Engine(ParamsBase):
             strat.stop()
             for an in strat.analyzers:
                 an.stop()
+        recorder.finish()
         return strategies
 
     def _slice(self, s, broker, market, bus, strategies):
@@ -286,8 +364,12 @@ class Engine(ParamsBase):
         if trace is not None:
             trace.append(Phase.TIMERS_START)
         date = None
+        exchange = self._exchange_clock
         for strat in strategies:
             if strat._tw_timers:
+                if exchange is not None:
+                    strat._tw_check_timers_at(exchange, s, False)
+                    continue
                 if date is None:
                     date = num2date(s.dtnum).date()
                 strat._tw_check_timers(date, Timer.SESSION_START)
@@ -317,6 +399,9 @@ class Engine(ParamsBase):
             trace.append(Phase.TIMERS_END)
         for strat in strategies:
             if strat._tw_timers:
+                if exchange is not None:
+                    strat._tw_check_timers_at(exchange, s, True)
+                    continue
                 if date is None:
                     date = num2date(s.dtnum).date()
                 strat._tw_check_timers(date, Timer.SESSION_END)

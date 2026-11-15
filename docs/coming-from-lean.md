@@ -40,7 +40,7 @@ container, on data you load yourself.
 | Universe selection, `OnSecuritiesChanged` | `UniverseProvider` (interface only) | planned |
 | Splits, dividends, delistings | `CorporateActionProvider` (interface only) | planned; today, adjust prices before loading |
 | Consolidators | not yet | resample with pandas |
-| `MarketHoursDatabase`, time zones | not yet | the clock is the union of the feeds' dates |
+| `MarketHoursDatabase`, time zones | `tw.calendars` (NYSE, NASDAQ, CME, CRYPTO), `ExchangeClock` | opt-in; the default clock is the union of the feeds' dates |
 | Options and futures chains | not yet | |
 | Alpha / Portfolio construction / Execution / Risk framework | not planned for now | write it in the strategy |
 | Live brokerages | not yet | the interfaces (`Broker`, `DataFeed`) are designed for it |

@@ -61,7 +61,8 @@ one. That has three effects to keep in mind with a universe of many symbols:
 ## Bar sizes
 
 Bars can be of any size: the clock is built from the feeds' own timestamps and does not
-assume days. Mixing bar sizes in one run is not supported. Resampling (building weekly bars from daily ones inside
+assume days. For minute bars, an exchange clock adds sessions, holidays and time zones
+(see [the clock](concepts.md#exchange-hours-and-minute-bars)). Mixing bar sizes in one run is not supported. Resampling (building weekly bars from daily ones inside
 the engine) and replaying are not available yet: resample with pandas before adding the
 feed.
 

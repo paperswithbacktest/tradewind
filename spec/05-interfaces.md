@@ -1,7 +1,8 @@
 # 05. Interfaces of the engine (chantier 2)
 
 **Status: validated by Édouard on 2026-11-03 (§ 10); implemented on 2026-11-06 behind the
-v0 engine with the oracle defaults (§ 11 lists where the code departs from the text).** It fixes the seams of the engine that chantier 2 builds and chantier 4
+v0 engine with the oracle defaults (§ 11 lists where the code departs from the text); calendars,
+the exchange clock and the run fingerprint added on 2026-11-15 (§ 12).** It fixes the seams of the engine that chantier 2 builds and chantier 4
 fills: `Security` (currency, multiplier, tick size, lot), `Broker`, the pluggable reality
 models, the clock, the event bus and the feeds. The six design decisions are at the
 end (§ 10).
@@ -746,4 +747,56 @@ journal; under the default `NextBarFillModel`, `CommInfoFeeModel` and `Immediate
 directly. Acceptance and fills stay one order at a time in `ref` order: the running cash of
 the batch and the cash re-check at the fill are sequential, and the fee is whatever the
 scheme computes. `tools/nav_parity.py` compares two checkouts mark by mark as hex floats.
+## 12. As built, chantier 4: calendars and the run fingerprint (2026-11-15)
+
+**Calendars (§ 6.1).** `calendars.py`: `ExchangeCalendar` implements `ExchangeHours`
+(`is_open`, `is_trading_day`, `session`) plus `sessions(start, end)` (a `SessionTable` of
+trade dates, opens and closes in int64 ns UTC), `bar_times(start, end, interval)`,
+`holidays(year)`, `early_closes(year)`, `local(time)` and `to_ns(day, time)`. The rules are
+written in the code (no data file, no network, time zones from the standard `zoneinfo`):
+
+| calendar | hours | rules |
+|---|---|---|
+| `NYSE`, `NASDAQ` | 09:30-16:00 America/New_York, 13:00 early closes | the 1971 Monday-holiday rules, MLK from 1998, Juneteenth from 2022, Saturday holidays on Friday except New Year's Day, election days 1972/76/80, 15 special closures since 1972; early closes (July 3 when the 4th is Tuesday to Friday, the day after Thanksgiving, Christmas Eve Monday to Thursday) from 1993 plus three one-offs. Checked against the session dates of SPY/QQQ/DIA/IWM: 8 497 sessions from 1993-01-29 to 2026-10-30, **no difference**; against SPX 1971-1993: 5 579 sessions, three differences, all on the data side (a row on 1985-09-27, Hurricane Gloria; rows missing on 1986-09-24 and 1990-08-13) |
+| `CME` | trade date D: 17:00 America/Chicago on D-1 to 16:00 on D | closed New Year's Day, Good Friday, Christmas (as the NYSE observes them) and 2001-09-11..14; 12:00 halt on the other US holidays, 12:15 on the NYSE's early-close days. **Approximate**: one-off changes (Good Fridays with a jobs report, days of mourning) are not encoded |
+| `CRYPTO` | every day, 00:00-24:00 UTC | none |
+
+`clock.ExchangeClock(hours, interval=None, fill_forward=False)` is bound by the engine
+(`Engine.set_clock`) to the feeds' timestamps: it keeps `UnionClock`'s union (no bar is
+dropped or moved; `UnionClock` gained an `extra_times` argument, unused by default) and adds
+the session table, the session of each slice (`session_at`), and with `fill_forward` one
+slice at the end of every `interval` bar of every session (Lean's fill-forward). Bars are
+taken as stamped at their end; feeds stamped at midnight only are daily and each bar belongs
+to the session of its date. Under it, timers run in exchange time (`timer.py`):
+`SESSION_START` / `SESSION_END` at the session's open / close plus `offset`, a
+`datetime.time` on the place's wall clock (or in `tzdata`), at the first slice at or after
+the instant, once per session, `repeat` until the close, `monthdays` / `weekdays` / `allow`
+on the trade date; `notify_timer` gets the slice's wall-clock time. `Engine.set_hours(hours,
+data=None)` sets `data.security.hours`.
+
+**Default unchanged.** Without `set_clock` the engine builds the same `UnionClock` as before
+and the timers take the same date path; `security.hours` stays `AlwaysOpen`. The 40 oracle
+probes (39 + `extra_session`) give the same values, fills and statuses as `main` and as the
+oracle (only the order `ref` numbers after the new probe moved, a global counter); speed on
+2 000 names × 756 bars unchanged (0.317 vs 0.318 µs per security-bar idle).
+
+**Run fingerprint.** `fingerprint.py`; after `run()`, `engine.fingerprint` is a
+`RunFingerprint` built on first read (0.08 s on 2 000 feeds × 756 bars): `engine` (version,
+SHA-256 of the package's own source, engine params), `environment` (Python, numpy, pandas,
+system, machine, hash seed), `data` (per feed: SHA-256 of the timestamps and every line as
+the run read them, rows, first and last bar, feed params, declared `provenance` --
+`adddata(..., provenance={...})` or `data.provenance`), `provenance` (data a strategy reads
+by itself, `Engine.add_provenance(name, **info)`), `strategies` (class, SHA-256 of the
+source of every module of its MRO outside Tradewind -- bytecode for a class without a
+readable source --, resolved params, extra args), `broker` (starting cash, params,
+commission schemes and models described down to four levels, hours), `clock`, `rng`.
+`digest` is the SHA-256 of all of it in canonical JSON; `to_json` / `from_json` (the digest
+is checked), `diff`, `verify`. `Engine.set_seed(n)` (or `run(seed=n)`) seeds Python's and numpy's global
+generators before the strategies are built; without it nothing is seeded (a strategy seeding
+at import time keeps its draws). The global generators' states are recorded at the start and
+enter the digest only when the run moved them. Same digest ⇒ same NAV (sufficient, not
+necessary: a new environment changes the digest of a deterministic run). Not seen: data
+loaded by the strategy and not declared, generators the strategy creates unseeded
+(`np.random.default_rng()`), string-set iteration under a random hash seed (recorded as
+`hash_seed: "random"`).
 

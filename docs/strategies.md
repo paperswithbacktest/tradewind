@@ -116,9 +116,26 @@ and `weekcarry` work the same way per week. `SESSION_START` timers fire before `
 `SESSION_END` timers after it. See
 [`examples/03_timer_and_limit.py`](examples/03_timer_and_limit.py).
 
+With an exchange clock (`engine.set_clock(tw.ExchangeClock(NYSE, ...))`, see
+[the clock](concepts.md#exchange-hours-and-minute-bars)) timers run in the exchange's
+time: `SESSION_START` fires at the open plus `offset`, `SESSION_END` at the close plus
+`offset` (13:00 on an early-close day), `when=datetime.time(15, 45)` at 15:45 New York (or
+in the zone given as `tzdata`), each once per session at the first slice at or after that
+time, and `repeat=timedelta(minutes=30)` fires again until the close. `when` in
+`notify_timer` is then the exchange's wall-clock time.
+
 ## Reproducibility
 
 The engine is deterministic: the same data and the same strategy give the same values, to
 the last bit. Two things in a strategy break that: drawing from `np.random` (or `random`)
 without a seed, and iterating over a `set` of strings, whose order changes from one Python
 process to the next unless `PYTHONHASHSEED` is fixed. Seed the first, sort the second.
+
+`engine.set_seed(42)` (or `engine.run(seed=42)`) seeds Python's and numpy's global generators before the strategy is
+built. After `run()`, `engine.fingerprint` records what the run read: the engine's version
+and source hash, the Python/numpy/pandas versions, a content hash of every feed (plus the
+dataset revision you declare with `adddata(data, name, provenance={"revision": ...})` or
+`engine.add_provenance(...)` for data the strategy loads itself), a hash of the strategy's
+source and its parameters, the broker's configuration and the seed. Two runs with the same
+`fingerprint.digest` give the same NAV. Store it next to the results
+(`fingerprint.to_json()`), and `fingerprint.diff(other)` says what changed between two runs.

@@ -310,6 +310,16 @@ class Strategy(ParamsBase):
             if timer.when == when and timer.check(date):
                 self.notify_timer(timer, date, *timer.args, **timer.kwargs)
 
+    def _tw_check_timers_at(self, clock, s, end: bool):
+        """Timers in the place's time under an ``ExchangeClock`` (phase 11, or 15 with
+        ``end``); ``when`` handed to ``notify_timer`` is the slice's wall-clock time."""
+        local = None
+        for timer in self._tw_timers:
+            if timer.fires_end() == end and timer.check_at(clock, s.position, int(s.time)):
+                if local is None:
+                    local = clock.local_time(s.position)
+                self.notify_timer(timer, local, *timer.args, **timer.kwargs)
+
     def _tw_ready(self) -> bool:
         """``next`` runs once **every feed has delivered a bar** and **every indicator has
         reached its own min period on its own input**. Observed on the oracle (probes

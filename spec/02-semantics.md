@@ -104,10 +104,10 @@ error on the oracle; none of the four strategies of the 0.1.47 pass does.
 
 | behaviour | kept / corrected | note |
 |---|---|---|
-| One `next()` per bar of the clock feed (`datas[0]`); other feeds are aligned on it and a feed with no bar at that date repeats its last bar | kept | the corpus relies on `len(data)` growing only when a bar exists; Lean calls this fill-forward |
+| One `next()` per date of the **union** of the feeds' dates (not of `datas[0]`'s alone); a feed with no bar at that date repeats its last bar and its `len` does not grow | kept | the corpus relies on `len(data)` growing only when a bar exists; Lean calls this fill-forward. Probe `extra_session` (2026-11-15): a weekday that **only one feed** has a bar on (the shape of a stray holiday row in one name of a panel) is a slice on the oracle too, for every feed, `datas[0]` included; the other feeds keep their bar and their length; a market order placed the bar before on a feed without that bar fills at its next own bar. Identical on both engines |
 | `prenext()` while any feed has fewer bars than its minimum period, `nextstart()` once, then `next()` | kept | 0 files override them; kept for compatibility |
 | `datetime.date(0)` is the bar's date; `[−k]` looks back k bars **of that feed** | kept | |
-| Market calendar, time zones, early closes | corrected (new) | daily feeds carry dates only today; the calendar becomes explicit (Lean `MarketHoursDatabase`) and is a no-op on date-only data |
+| Market calendar, time zones, early closes | corrected (new), opt-in | daily feeds carry dates only today; the calendar becomes explicit (Lean `MarketHoursDatabase`) and is a no-op on date-only data. Delivered 2026-11-15 as `calendars.py` (NYSE, NASDAQ, CME, CRYPTO) and `clock.ExchangeClock` (minute slices, timers in exchange time), off by default: `UnionClock` + `AlwaysOpen` stay the oracle's, NAVs unchanged (spec/05 § 12) |
 
 ## Orders and execution
 
