@@ -28,3 +28,10 @@ Copyright QuantConnect Corporation, Apache License 2.0):
 Optional dependency, not distributed with Tradewind: ib_async (BSD 2-Clause License,
 https://github.com/ib-api-reloaded/ib_async), installed by the `ibkr` extra and imported
 only by tradewind.live.ibkr when it connects.
+* spec/06-intraday-and-options.md, src/tradewind/consolidators.py and
+  src/tradewind/options.py follow the concepts of Lean's TradeBarConsolidator (bins by
+  period and by count, bars stamped at their end, Scan), QCAlgorithm.Consolidate, Option
+  securities and OptionSymbolProperties (contract multiplier), OptionChain and
+  OptionFilterUniverse (Strikes, Expiration, CallsOnly, PutsOnly, FrontMonth), its
+  Black-Scholes price model and the exercise of options at expiry. The code and the
+  formulas (from their textbook definitions) are Tradewind's own.

@@ -27,9 +27,11 @@ backtrader's own results, bar by bar:
 | Pluggable reality models (fees, fills, slippage, buying power, settlement, shorting, margin interest, corporate actions), per security | interfaces done; the default set reproduces backtrader |
 | Exchange calendars (NYSE, Nasdaq, CME, crypto), minute clock, timers in exchange time | done, opt-in; the default clock stays backtrader's |
 | Run fingerprint (data, code, parameters, seed) | done: `engine.fingerprint` |
-| Universes, corporate actions, multi-currency, futures | interfaces in place, implementations planned |
+| Minute bars: consolidation to N minutes / hours / sessions, a bounded loader, splits on unadjusted prices | done ([Intraday data](intraday.md)) |
+| Listed options: contracts with their multiplier, chains, Black-Scholes-Merton and implied volatility, exercise and assignment at expiry | done on daily option tables ([Options](options.md)) |
+| Universes, multi-currency, futures | interfaces in place, implementations planned |
 | Live trading on Interactive Brokers (paper first): `tradewind.live`, `pip install 'tradewind[ibkr]'` | preview, see [`spec/07-live-ibkr.md`](../spec/07-live-ibkr.md) and `examples/live_ibkr_paper.py` |
-| Resampling, replay, plotting, `optstrategy` | not available yet |
+| backtrader's resampling and replay, plotting, `optstrategy` | not available yet |
 
 Speed: the engine itself costs 0.2 to 1 µs per security and bar on a 2 000-security
 universe (`tools/bench_engine.py`); on the corpus the median strategy runs about 2.3 times
@@ -52,6 +54,8 @@ faster than on backtrader, data loading included. See [Performance](performance.
    what is not supported, and the behaviours worth knowing.
 9. [Coming from QuantConnect Lean](coming-from-lean.md): a concept-by-concept map.
 10. [Performance](performance.md): what costs what, and how to write fast strategies.
+11. [Intraday data](intraday.md): minute bars, consolidated bars, loading a window, splits.
+12. [Options](options.md): contracts, chains, Greeks and implied volatility, expiry.
 
 The [examples](examples/) run as they are, on synthetic data: `cd docs/examples && python
 01_sma_crossover.py`.

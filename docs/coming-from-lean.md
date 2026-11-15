@@ -38,10 +38,13 @@ container, on data you load yourself.
 | `security.SetFeeModel(...)` | `engine.broker.set_models(data, fee=...)` | any of the eight, per security |
 | `CashBook` | `broker.cashbook` | single currency for now |
 | Universe selection, `OnSecuritiesChanged` | `UniverseProvider` (interface only) | planned |
-| Splits, dividends, delistings | `CorporateActionProvider` (interface only) | planned; today, adjust prices before loading |
-| Consolidators | not yet | resample with pandas |
 | `MarketHoursDatabase`, time zones | `tw.calendars` (NYSE, NASDAQ, CME, CRYPTO), `ExchangeClock` | opt-in; the default clock is the union of the feeds' dates |
-| Options and futures chains | not yet | |
+| Splits, dividends, delistings | `CorporateActionProvider`; `tw.intraday.split_actions` for splits on unadjusted minute prices | the engine applies them at phase 3, before fills |
+| `TradeBarConsolidator`, `Consolidate(symbol, timedelta(minutes=5), handler)` | `engine.consolidate(data, "5min", hours="NYSE")` (or `tz=..., session=...`); `tw.consolidators.TimeBarConsolidator` bar by bar | a consolidated feed, stamped at its bin end; see [Intraday data](intraday.md) |
+| `AddOption`, `SetFilter(lambda u: u.Strikes(-2, 2).Expiration(0, 30))` | `tw.options.add_options(engine, data, table, select=lambda c: c.strikes(-2, 2).expiration(0, 30))` | one feed per contract of a daily option table; see [Options](options.md) |
+| `OptionChain`, `contract.Greeks`, `ImpliedVolatility` | `OptionChain`, `with_greeks()`, `tw.options.bsm_greeks` / `implied_volatility` | European Black-Scholes-Merton |
+| Option exercise and assignment | `OptionExpiry`, at phase 3 after the expiry date | in the money by 0.01: exercised (long) or assigned (short); physical or cash |
+| Futures chains | not yet | |
 | Alpha / Portfolio construction / Execution / Risk framework | not planned for now | write it in the strategy |
 | Live brokerages | not yet | the interfaces (`Broker`, `DataFeed`) are designed for it |
 

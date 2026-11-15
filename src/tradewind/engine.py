@@ -15,7 +15,7 @@ from __future__ import annotations
 from .broker import BackBroker
 from .clock import Phase, UnionClock
 from .dateutils import num2date
-from .events import OrderEvent, TradeEvent, UniverseEvent
+from .events import CorporateActionEvent, OrderEvent, TradeEvent, UniverseEvent
 from .indicator import reset_construction
 from .lines import building
 from .market import MarketState
@@ -133,7 +133,21 @@ class Engine(ParamsBase):
         raise NotImplementedError("signals are not part of Tradewind v0")
 
     def resampledata(self, *args, **kwargs):
-        raise NotImplementedError("resampling is not part of Tradewind v0")
+        raise NotImplementedError("backtrader's resampling is not part of Tradewind; "
+                                  "Engine.consolidate builds a consolidated feed (spec/06)")
+
+    def consolidate(self, data, period="5min", name=None, tz="UTC", session=None, hours=None,
+                    count=None):
+        """Add a feed of ``data``'s bars consolidated by ``period`` ("5min", "1h", "D") or by
+        ``count`` bars, in the wall-clock time of ``tz`` (spec/06 § 2). ``session`` (a pair
+        of ``datetime.time``) or ``hours`` (an ``ExchangeHours``) anchors the bins at the
+        open, clips them at the close and drops the bars outside. Returns the new feed."""
+        from .consolidators import ConsolidatedData
+
+        feed = ConsolidatedData(source=data, period=period, count=count, tz=tz, session=session,
+                                hours=hours)
+        label = name or f"{getattr(data, '_name', '') or 'data'}_{count or period}"
+        return self.adddata(feed, name=label)
 
     def replaydata(self, *args, **kwargs):
         raise NotImplementedError("replaying is not part of Tradewind v0")
@@ -192,6 +206,18 @@ class Engine(ParamsBase):
         Built on first read."""
         recorder = self._fingerprint
         return recorder.build() if recorder is not None else None
+    def add_corporate_actions(self, provider) -> None:
+        """Add a ``CorporateActionProvider`` next to the ones already set (splits of a minute
+        feed, the expiries of option contracts, ...)."""
+        from .models import CombinedActions
+
+        current = self._actions_provider
+        if current is None:
+            self._actions_provider = provider
+        elif isinstance(current, CombinedActions):
+            current.providers.append(provider)
+        else:
+            self._actions_provider = CombinedActions(current, provider)
 
     def set_universe(self, provider) -> None:
         """A ``UniverseProvider`` whose changes reach phase 1 (none by default)."""
@@ -308,16 +334,27 @@ class Engine(ParamsBase):
                 strategies, "notify_order")
             broker._tw_quiet_trades = not bus._handlers.get(TradeEvent) and not _listens(
                 strategies, "notify_trade")
+
+        def deliver_action(event):
+            # opt-in (spec/06 § 5.4): a strategy that defines ``notify_corporate_action`` hears
+            # of splits, expiries, ... at phase 12; the compatible contract has no such method
+            for strat in strategies:
+                hook = getattr(strat, "notify_corporate_action", None)
+                if hook is not None:
+                    hook(event.action)
+
         bus.subscribe(OrderEvent, deliver_order)
         bus.subscribe(TradeEvent, deliver_trade)
-        self._tw_bus_handlers = (deliver_order, deliver_trade, quiet)
+        bus.subscribe(CorporateActionEvent, deliver_action)
+        self._tw_bus_handlers = (deliver_order, deliver_trade, quiet, deliver_action)
         return clock, market, strategies
 
     def _tw_release_bus(self):
-        deliver_order, deliver_trade, quiet = self._tw_bus_handlers
+        deliver_order, deliver_trade, quiet, deliver_action = self._tw_bus_handlers
         broker = self._broker
         broker.bus.unsubscribe(OrderEvent, deliver_order)
         broker.bus.unsubscribe(TradeEvent, deliver_trade)
+        broker.bus.unsubscribe(CorporateActionEvent, deliver_action)
         if quiet:
             broker._tw_quiet_orders = broker._tw_quiet_trades = False
 
