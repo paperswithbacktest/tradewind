@@ -7,7 +7,7 @@
 # Published to GitHub Pages by .github/workflows/docs.yml on every push to main.
 site_name: Tradewind
 site_description: An Apache 2.0 backtesting engine for Python, compatible with the backtrader API.
-site_url: https://paperswithbacktest.github.io/tradewind/
+site_url: https://tradewind.paperswithbacktest.com/
 repo_url: https://github.com/paperswithbacktest/tradewind
 repo_name: paperswithbacktest/tradewind
 edit_uri: edit/main/docs/
