@@ -30,12 +30,24 @@ from .clock import ALWAYS_OPEN, TimeSlice
 from .comminfo import CommInfoBase, CommissionInfo
 from .events import CorporateActionEvent, EventBus, OrderEvent, TradeEvent
 from .market import MarketState, PortfolioState
-from .models import BatchState, FeeParameters, FillParameters, ModelSet
+from .models import (
+    BatchState,
+    FillParameters,
+    FillProposal,
+    ImmediateSettlement,
+    ModelSet,
+    NextBarFillModel,
+    confirm_fee,
+    order_fee,
+    slipped,
+)
 from .order import BuyOrder, Order, SellOrder
 from .params import ParamsBase
 from .position import Position
 from .securities import ACCOUNT_CURRENCY, Bar, CashAmount, Security, SecurityHolding, Timestamp
 from .trade import Trade
+
+_MARKET = Order.Market
 
 
 @runtime_checkable
@@ -171,6 +183,10 @@ class BackBroker(BrokerBase):
         self._prev_accrual = None
         self._mark_cache = None
         self._value = self.cash
+        # set by the engine for the length of a run when nobody listens (``Engine.run``):
+        # the order / trade events are then not built at all
+        self._tw_quiet_orders = False
+        self._tw_quiet_trades = False
 
     # -- cash (the account currency's balance of the cash book) -------------------------
     @property
@@ -410,6 +426,8 @@ class BackBroker(BrokerBase):
         # A notification carries the status at the moment it was raised: the strategy
         # sees Submitted then Accepted, not Accepted twice, even though the live order
         # object has already moved on; ``executed`` is frozen with it.
+        if self._tw_quiet_orders:
+            return
         clone = order._snapshot()
         security = getattr(order.data, "security", None)
         ex = order.executed
@@ -632,6 +650,14 @@ class BackBroker(BrokerBase):
                 continue
             models = security.models
             fill_model = models.fill
+            if (type(fill_model) is NextBarFillModel and order.exectype == _MARKET and order.valid is None
+                    and not fill_model.coc):
+                # the oracle default on a plain market order: never expires, fills whole at
+                # this bar's open moved by the slippage model -- what ``fill`` computes,
+                # without building the bar and the parameters
+                proposal = FillProposal(order.size, slipped(models.slippage, security, order, data.open[0], True))
+                self._execute(security, order, proposal, self._dtnum)
+                continue
             bar = Bar(self._dtnum, data.open[0], data.high[0], data.low[0], data.close[0], data.volume[0])
             if fill_model.expired(order, bar):
                 order.expire()
@@ -655,22 +681,29 @@ class BackBroker(BrokerBase):
         size, price = proposal.quantity, proposal.price
         pos = self.positions[data]
         now = self._now
-        comm = models.fee.get_order_fee(FeeParameters(security, order, size, price, now)).amount
+        fee = models.fee
+        comm = order_fee(fee, security, order, size, price, now)
         allowed = models.buying_power.check_fill(security, order, proposal, self.cash, now)
         if allowed is None:
             order.margin()
             self.notify(order)
             return
-        settle = models.settlement.apply_funds
+        settlement = models.settlement
         cashbook = self.cashbook
         ccy = cashbook.account_currency
-        fee = models.fee
+        if type(settlement) is ImmediateSettlement:
+            # the oracle default: the funds land at once (``apply_funds`` is this add)
+            def settle(security, flow, now, cashbook):
+                cashbook.add(ccy, flow)
+        else:
+            def settle(security, flow, now, cashbook):
+                settlement.apply_funds(security, CashAmount(flow, ccy), now, cashbook)
         oldprice, oldsize = pos.price, pos.size
         partial = allowed.quantity != size
         if partial:
             # the closing part of a reversal: filled, then the rest refused (Partial, Margin)
             size = allowed.quantity
-            comm = models.fee.get_order_fee(FeeParameters(security, order, size, price, now)).amount
+            comm = order_fee(fee, security, order, size, price, now)
         newsize, _newprice, opened, closed = pos.update(size, price)
         pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0
         if comminfo.stocklike:
@@ -690,20 +723,19 @@ class BackBroker(BrokerBase):
                 parts.append((opened, -(opened * price) / lev if opened > 0 else -(opened * price)))
             fees = []
             for part, flow in parts:
-                part_fee = comm if len(parts) == 1 else fee.get_order_fee(
-                    FeeParameters(security, order, part, price, now)).amount
-                settle(security, CashAmount(flow, ccy), now, cashbook)
+                part_fee = comm if len(parts) == 1 else order_fee(fee, security, order, part, price, now)
+                settle(security, flow, now, cashbook)
                 cashbook.add(ccy, -part_fee)
-                fees.append(self._confirm_fee(fee, security, order, part, price))
+                fees.append(confirm_fee(fee, security, order, part, price))
             closedcomm = fees[0] if closed else 0.0
             openedcomm = fees[-1] if opened else 0.0
             comm_final = closedcomm + openedcomm if closed and opened else fees[0]
             trade_parts = (closedcomm, openedcomm) if closed and opened else None
         else:
             # futures-like: only the P&L moves the cash
-            settle(security, CashAmount(pnl, ccy), now, cashbook)
+            settle(security, pnl, now, cashbook)
             cashbook.add(ccy, -comm)
-            comm_final = self._confirm_fee(fee, security, order, size, price)
+            comm_final = confirm_fee(fee, security, order, size, price)
             closedcomm = comm_final if closed else 0.0
             openedcomm = comm_final if not closed else 0.0
             trade_parts = None
@@ -724,8 +756,7 @@ class BackBroker(BrokerBase):
 
     @staticmethod
     def _confirm_fee(fee_model, security, order, size, price):
-        confirm = getattr(fee_model, "confirm_order_fee", None) or fee_model.get_order_fee
-        return confirm(FeeParameters(security, order, size, price, 0)).amount
+        return confirm_fee(fee_model, security, order, size, price)
 
     def _account(self, security, fee, pnl):
         pf = self.portfolio
@@ -783,6 +814,8 @@ class BackBroker(BrokerBase):
         if not (trade.justopened or trade.isclosed):
             # observed on the oracle (probe ``executed_values``): ``notify_trade`` hears of a
             # trade when it opens and when it closes, not when a fill only resizes it
+            return
+        if self._tw_quiet_trades:
             return
         security = getattr(data, "security", None)
         self.bus.publish(TradeEvent(self._now, 0, security.id if security is not None else None, trade,
