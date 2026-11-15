@@ -135,7 +135,7 @@ engine.broker.set_models(thin, slippage=CompatSlippage(fixed=0.05, slip_open=Tru
 
 A model is a small class with one or two methods (for example a fee model has
 `get_order_fee(params) -> CashAmount`); the protocols are in `tradewind.models` and in
-[`spec/05-interfaces.md`](../spec/05-interfaces.md). See
+[`spec/05-interfaces.md`](https://github.com/paperswithbacktest/tradewind/blob/main/spec/05-interfaces.md). See
 [`examples/05_per_security_models.py`](examples/05_per_security_models.py).
 
 A second set, `ModelSet.realistic()`, prices what backtrader leaves out: a measured spread

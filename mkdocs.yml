@@ -1,0 +1,147 @@
+# The documentation site, built from docs/ (MkDocs + Material for MkDocs + mkdocstrings).
+#
+#   pip install -r docs/requirements.txt
+#   mkdocs serve            # http://127.0.0.1:8000, rebuilt on save
+#   mkdocs build --strict   # what CI runs: any broken link, missing page or snippet fails
+#
+# Published to GitHub Pages by .github/workflows/docs.yml on every push to main.
+site_name: Tradewind
+site_description: An Apache 2.0 backtesting engine for Python, compatible with the backtrader API.
+site_url: https://paperswithbacktest.github.io/tradewind/
+repo_url: https://github.com/paperswithbacktest/tradewind
+repo_name: paperswithbacktest/tradewind
+edit_uri: edit/main/docs/
+copyright: Copyright 2026 Papers With Backtest. Code and documentation under the Apache 2.0 licence.
+
+docs_dir: docs
+site_dir: site
+strict: true
+
+# docs/README.md is the home page (GitHub shows it too)
+exclude_docs: |
+  requirements.txt
+  __pycache__/
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: info
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: info
+    unrecognized_links: warn
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: [docs/examples]
+      check_paths: true
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: sphinx
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            filters: ["!^_"]
+            show_if_no_docstring: true
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            heading_level: 2
+
+nav:
+  - Home: README.md
+  - Getting started: getting-started.md
+  - Concepts:
+      - How a backtest runs: concepts.md
+      - Calendars and clock: calendars-and-clock.md
+  - Strategies:
+      - Compatible API: strategies.md
+      - Indicators: indicators.md
+      - Typed API: typed-api.md
+  - Data feeds: data-feeds.md
+  - Orders and broker: orders-and-broker.md
+  - Realistic models and currencies: realistic-models.md
+  - Universes and corporate actions: universe-and-corporate-actions.md
+  - Intraday and options:
+      - Intraday data: intraday.md
+      - Options: options.md
+  - Live trading (IB): live-trading.md
+  - Analyzers: analyzers.md
+  - Performance: performance.md
+  - Migrating from backtrader: migrating-from-backtrader.md
+  - Coming from Lean:
+      - Concept map: coming-from-lean.md
+      - Tradewind vs Lean: tradewind-vs-lean.md
+  - Reproducibility (fingerprint): reproducibility.md
+  - Examples:
+      - Runnable examples: examples.md
+      - Examples from the catalogue: catalogue-examples.md
+  - API reference:
+      - reference/index.md
+      - Engine and strategies: reference/engine.md
+      - Typed API: reference/typed.md
+      - Data feeds and lines: reference/feeds.md
+      - Orders, broker and models: reference/broker.md
+      - Realistic models and cash: reference/realistic.md
+      - Indicators: reference/indicators.md
+      - Analyzers and metrics: reference/analyzers.md
+      - Calendars and clock: reference/calendars.md
+      - Universes and corporate actions: reference/universe.md
+      - Intraday and options: reference/intraday-options.md
+      - Fingerprint: reference/fingerprint.md
+      - Live trading: reference/live.md

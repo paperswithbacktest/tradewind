@@ -84,4 +84,4 @@ class NumpyFeed(tw.DataBase):
 
 `_load_arrays` returns the float-day times (sorted, unique) and one float64 array per line.
 Live feeds will use the same class with a `poll` method; see `DataFeed` in
-[`spec/05-interfaces.md`](../spec/05-interfaces.md).
+[`spec/05-interfaces.md`](https://github.com/paperswithbacktest/tradewind/blob/main/spec/05-interfaces.md).

@@ -34,7 +34,7 @@ backtrader's own results, bar by bar:
 | Several currencies: cash per currency, conversion from FX feeds, value in the account currency | done, opt-in |
 | Point-in-time universes (members entering and leaving), splits, dividends, delistings and ticker changes from symbol tables, raw or adjusted prices | done, opt-in ([Universes and corporate actions](universe-and-corporate-actions.md)) |
 | Futures | interfaces in place, implementations planned |
-| Live trading on Interactive Brokers (paper first): `tradewind.live`, `pip install 'tradewind[ibkr]'` | preview, see [`spec/07-live-ibkr.md`](../spec/07-live-ibkr.md) and `examples/live_ibkr_paper.py` |
+| Live trading on Interactive Brokers (paper first): `tradewind.live`, `pip install 'tradewind[ibkr]'` | preview ([Live trading](live-trading.md)) |
 | backtrader's resampling and replay, plotting, `optstrategy` | not available yet |
 
 Speed: the engine itself costs 0.2 to 1 µs per security and bar on a 2 000-security
@@ -68,8 +68,19 @@ faster than on backtrader, data loading included. See [Performance](performance.
 15. [Universes and corporate actions](universe-and-corporate-actions.md): point-in-time
     membership, splits, dividends, delistings, ticker changes, raw or adjusted prices.
 
-The [examples](examples/) run as they are, on synthetic data: `cd docs/examples && python
-01_sma_crossover.py`.
+16. [Calendars and clock](calendars-and-clock.md): exchange calendars, a clock in exchange
+    hours, timers in the exchange's time.
+17. [Live trading (IB)](live-trading.md): the same strategy on an Interactive Brokers paper
+    account, journal and replay, guards.
+18. [Reproducibility](reproducibility.md): the run fingerprint, what it guarantees and what
+    it does not.
+19. [Tradewind vs Lean](tradewind-vs-lean.md): where Tradewind is at level, ahead and
+    behind, dated.
+20. [API reference](reference/index.md): generated from the docstrings.
 
-The design documents behind the engine are in [`spec/`](../spec/): scope, the behaviours
+The [runnable examples](examples.md) run as they are, on synthetic data: `cd docs/examples &&
+python 01_sma_crossover.py`. [Examples from the catalogue](catalogue-examples.md) points to
+strategies from research papers, implemented and backtested on real data.
+
+The design documents behind the engine are in [`spec/`](https://github.com/paperswithbacktest/tradewind/tree/main/spec): scope, the behaviours
 kept from backtrader and those to be corrected, the oracle, and the interfaces.

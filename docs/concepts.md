@@ -92,7 +92,7 @@ moves on every slice, even before `data0` has listed.
 > the first bar wraps around to the end of the series. backtrader behaves the same way and
 > some published strategies rely on it (`datetime.date(1)` to spot the last session of a
 > month). Do not use a positive `ago` in new code: a later version will make it raise by
-> default. See [`spec/02-semantics.md`](../spec/02-semantics.md).
+> default. See [`spec/02-semantics.md`](https://github.com/paperswithbacktest/tradewind/blob/main/spec/02-semantics.md).
 
 ## When `next()` starts
 
