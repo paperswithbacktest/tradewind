@@ -23,6 +23,16 @@ def frame(n_bars=60, seed=5, volume=None):
                          "close": close, "volume": vol}, index=index)
 
 
+def neumaier(values):
+    """Python's ``sum`` of floats since 3.12 (compensated), written out for 3.10 too."""
+    total = comp = 0.0
+    for v in map(float, values):
+        t = total + v
+        comp += (total - t) + v if abs(total) >= abs(v) else (v - t) + total
+        total = t
+    return total + comp
+
+
 def run(cls, f=None, cash=10_000.0):
     c = bt.Cerebro(stdstats=False)
     c.adddata(bt.feeds.PandasData(dataname=frame() if f is None else f), name="A")
@@ -61,7 +71,7 @@ def test_sum_mean_pctchange_values():
     assert len(s.rows) == len(c) - first + 1
     for k, (sm, mn, pc, dv) in enumerate(s.rows):
         i = k + first - 1
-        assert sm == sum(c[i - 3:i + 1].tolist())  # Python floats: the compensated sum
+        assert sm == neumaier(c[i - 3:i + 1])
         assert mn == (c[i] - c[i - 2]) / c[i - 2]  # the first input only
         assert pc == c[i] / c[i - 3] - 1.0
         v = vol[i - 1] + vol[i]
