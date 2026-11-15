@@ -24,8 +24,6 @@ import numpy as np
 
 from ..clock import TimeSlice
 from ..engine import Engine
-from ..events import OrderEvent, TradeEvent
-from ..market import MarketState
 from .adapter import BarRecord
 from .broker import LiveBroker, LiveDivergence
 from .clock import LiveClock
@@ -93,55 +91,22 @@ class LiveEngine(Engine):
         broker: LiveBroker = self._broker
         broker.session = f"tw-{self.session}"
 
-        for data in self.datas:
-            data._start()
-        for data in self.datas:
-            broker.register(data)
-        feeds = [sec.feed for sec in broker.securities]
-        if header is not None:
-            for feed in feeds:
-                if header["digests"].get(feed.symbol) != feed.history_digest():
-                    raise ValueError(f"{feed.symbol}: the history rebuilt from the journal does not match it")
-        market = MarketState(feeds)
-        broker.start(feeds, market)
+        feeds_holder = []
 
-        # the warm-up slices: the union of the histories, as the backtest's clock would give
-        hist = [f.lines.datetime.array[:f.history_rows] for f in feeds]
-        times = np.unique(np.concatenate(hist)) if hist else np.empty(0)
-        n_hist = len(times)
-        has_bar = np.zeros((n_hist, len(feeds)), dtype=bool)
-        for j, dt in enumerate(hist):
-            has_bar[np.searchsorted(times, dt), j] = True
-        capacity = max(f.buflen() - f.history_rows for f in feeds)
-        clock_times = np.full(n_hist + capacity, np.nan)
-        clock_times[:n_hist] = times
-        times_ns = np.round((times - 719163.0) * 86_400e9).astype(np.int64)
+        def warmup_clock(feeds, dtnums):
+            if header is not None:
+                for feed in feeds:
+                    if header["digests"].get(feed.symbol) != feed.history_digest():
+                        raise ValueError(f"{feed.symbol}: the history rebuilt from the journal does not match it")
+            feeds_holder.extend(feeds)
+            return _WarmupClock(feeds)
 
-        strategies = [self._build_strategy(cls, args, skwargs) for cls, args, skwargs in self.strats]
-        self.runstrats = [strategies]
-        for strat in strategies:
-            strat._tw_start_clock(clock_times.copy())
-        for strat in strategies:
-            strat.start()
-            for an in strat.analyzers:
-                an.start()
-
+        # the engine's own preparation (feeds, market state, strategies, indicators' phase-10
+        # list, bus); notifications are always built live: the session's operator may listen
+        ctx = self._tw_open_run({}, make_clock=warmup_clock, quiet_allowed=False)
+        clock0, market, strategies = ctx
+        feeds = feeds_holder
         bus = broker.bus
-        first = strategies[0] if strategies else None
-
-        def deliver_order(event):
-            order = event.order
-            target = order.owner if order.owner is not None else first
-            if target is not None:
-                target._tw_notify(order)
-
-        def deliver_trade(event):
-            target = event.owner if event.owner is not None else first
-            if target is not None:
-                target._tw_notify(event.trade)
-
-        bus.subscribe(OrderEvent, deliver_order)
-        bus.subscribe(TradeEvent, deliver_trade)
         self._ctx = (broker, market, bus, strategies, feeds)
         journal.open()
         if header is None:
@@ -154,8 +119,7 @@ class LiveEngine(Engine):
         try:
             # 1 warm-up
             broker.suppress = "warm-up"
-            for t in range(n_hist):
-                s = TimeSlice(times_ns[t], position, has_bar[t], (), None, float(times[t]), bool(has_bar[t].all()))
+            for s in clock0:
                 self._slice(s, broker, market, bus, strategies)
                 position += 1
             broker.suppress = ""
@@ -195,14 +159,10 @@ class LiveEngine(Engine):
             if self.kill_switch.tripped and not broker.replaying:
                 sent = broker.emergency_cancel()
                 journal.write("kill", reason=self.kill_switch.reason, cancelled=sent)
-            for strat in strategies:
-                strat.stop()
-                for an in strat.analyzers:
-                    an.stop()
+            self._tw_stop_run(strategies)
             journal.write("end", stopped_by=self.stopped_by or "error", live_slices=self.live_slices)
             journal.close()
-            bus.unsubscribe(OrderEvent, deliver_order)
-            bus.unsubscribe(TradeEvent, deliver_trade)
+            self._tw_release_bus()
             if connected_here:
                 self.adapter.disconnect()
         return strategies
@@ -287,6 +247,31 @@ class LiveEngine(Engine):
                 ind._tw_computed = False
         for ind in order:
             ind._tw_compute()
+
+
+class _WarmupClock:
+    """The warm-up slices: the union of the feeds' histories, as the backtest's clock gives
+    them; ``times`` reserves the live slices' rows after them (the strategies' clock line)."""
+
+    def __init__(self, feeds):
+        hist = [f.lines.datetime.array[:f.history_rows] for f in feeds]
+        times = np.unique(np.concatenate(hist)) if hist else np.empty(0)
+        self.has_bar = np.zeros((len(times), len(feeds)), dtype=bool)
+        for j, dt in enumerate(hist):
+            self.has_bar[np.searchsorted(times, dt), j] = True
+        capacity = max(f.buflen() - f.history_rows for f in feeds)
+        self.times = np.full(len(times) + capacity, np.nan)
+        self.times[:len(times)] = times
+        self._hist = times
+        self._ns = np.round((times - 719163.0) * 86_400e9).astype(np.int64)
+
+    def __len__(self):
+        return len(self._hist)
+
+    def __iter__(self):
+        for t in range(len(self._hist)):
+            row = self.has_bar[t]
+            yield TimeSlice(self._ns[t], t, row, (), None, float(self._hist[t]), bool(row.all()))
 
 
 __all__ = ["LiveEngine"]

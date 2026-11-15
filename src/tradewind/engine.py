@@ -198,13 +198,35 @@ class Engine(ParamsBase):
         self._universe_provider = provider
 
     def run(self, **kwargs):
+        ctx = self._tw_open_run(kwargs)
+        if ctx is None:
+            return []
+        clock, market, strategies = ctx
+        broker, bus = self._broker, self._broker.bus
+        try:
+            for s in clock:
+                self._slice(s, broker, market, bus, strategies)
+        finally:
+            self._tw_release_bus()
+        # Observed on the oracle: notifications are delivered at the start of the next
+        # bar only, so what an order placed on the last bar produced is never notified,
+        # and nothing is delivered after the loop.
+        self._tw_stop_run(strategies)
+        return strategies
+
+    def _tw_open_run(self, kwargs, make_clock=None, quiet_allowed=True):
+        """Everything a run does before its first slice: parameters, feeds, the clock, the
+        market state, the strategies (built, started) and the bus subscriptions. Returns
+        ``(clock, market, strategies)``, or None without feeds. ``make_clock(feeds, dtnums)``
+        replaces the backtest's clock (the live engine's warm-up clock); with
+        ``quiet_allowed`` false the broker always publishes its notifications."""
         if "seed" in kwargs:
             self.seed = kwargs.pop("seed")
         for k, v in kwargs.items():
             if k in self.p:
                 setattr(self.p, k, v)
         if not self.datas:
-            return []
+            return None
         for data in self.datas:
             data._start()
         broker = self._broker
@@ -216,7 +238,10 @@ class Engine(ParamsBase):
             if not feed._started:
                 feed._start()
         dtnums = [f._dtnum for f in feeds]
-        if self._clock_spec is None:
+        if make_clock is not None:
+            clock = make_clock(feeds, dtnums)
+            self._exchange_clock = None
+        elif self._clock_spec is None:
             clock = UnionClock(dtnums, actions=getattr(self, "_actions_provider", None),
                                universe=getattr(self, "_universe_provider", None))
             self._exchange_clock = None
@@ -272,7 +297,7 @@ class Engine(ParamsBase):
             if target is not None:
                 target._tw_notify(event.trade)
 
-        quiet = isinstance(broker, BackBroker) and bus.journal is None
+        quiet = quiet_allowed and isinstance(broker, BackBroker) and bus.journal is None
         if quiet:
             # Notifications on demand: an order or trade event exists to reach a
             # ``notify_order`` / ``notify_trade``. When no strategy or analyzer of the run
@@ -285,24 +310,23 @@ class Engine(ParamsBase):
                 strategies, "notify_trade")
         bus.subscribe(OrderEvent, deliver_order)
         bus.subscribe(TradeEvent, deliver_trade)
-        try:
-            for s in clock:
-                self._slice(s, broker, market, bus, strategies)
-        finally:
-            bus.unsubscribe(OrderEvent, deliver_order)
-            bus.unsubscribe(TradeEvent, deliver_trade)
-            if quiet:
-                broker._tw_quiet_orders = broker._tw_quiet_trades = False
+        self._tw_bus_handlers = (deliver_order, deliver_trade, quiet)
+        return clock, market, strategies
 
-        # Observed on the oracle: notifications are delivered at the start of the next
-        # bar only, so what an order placed on the last bar produced is never notified,
-        # and nothing is delivered after the loop.
+    def _tw_release_bus(self):
+        deliver_order, deliver_trade, quiet = self._tw_bus_handlers
+        broker = self._broker
+        broker.bus.unsubscribe(OrderEvent, deliver_order)
+        broker.bus.unsubscribe(TradeEvent, deliver_trade)
+        if quiet:
+            broker._tw_quiet_orders = broker._tw_quiet_trades = False
+
+    def _tw_stop_run(self, strategies):
         for strat in strategies:
             strat.stop()
             for an in strat.analyzers:
                 an.stop()
-        recorder.finish()
-        return strategies
+        self._fingerprint.finish()
 
     def _slice(self, s, broker, market, bus, strategies):
         """One slice, in the sixteen phases of spec/05 § 3.

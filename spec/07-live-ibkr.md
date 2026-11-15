@@ -64,6 +64,13 @@ The engine stays synchronous and single-threaded (`05` § 8): the adapter's libr
 event loop inside `adapter.idle(seconds)`, the only place the engine waits, so every broker
 callback lands between two slices and becomes a queued message.
 
+`LiveEngine` prepares a run through the engine's own path (`Engine._tw_open_run`: feeds,
+market state, strategies, the phase-10 indicator list, the bus) with its warm-up clock in
+place of the backtest's, and closes it through `Engine._tw_stop_run`. One difference: a live
+run always publishes its order and trade notifications (the backtest skips building them
+when no strategy listens), so an operator's subscriber or a later `notify_order` never
+misses one; the book itself never depends on them.
+
 ## 3. The adapter seam (`live/adapter.py`, `live/messages.py`)
 
 ```python
@@ -350,7 +357,7 @@ and signatures `IBAdapter` uses (no connection made); the test that builds an ib
 * Notifications arrive at the next slice, as in a backtest: an order placed on Monday's close
   and filled at Tuesday's open is notified `Accepted` and `Completed` on Tuesday's close.
 
-## 14. Tests (`tests/test_live.py`, 33 tests, no account, no network)
+## 14. Tests (`tests/test_live.py`, 34 tests, no account, no network)
 
 Live/backtest equivalence; warm-up sends nothing; look-ahead reads NaN; partial fills over
 several bars; partial fill then expiry (OPG); rejection with its reason; cancel through the

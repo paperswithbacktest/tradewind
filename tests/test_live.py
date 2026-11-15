@@ -684,3 +684,14 @@ def test_an_execution_after_the_final_status_moves_the_book_not_the_status():
     assert [x[1] for x in strat.statuses] == ["Submitted", "Accepted", "Canceled"]
     assert strat.orders[0].executed.size == 4 and live.broker.getposition(live.datas[0]).size == 4
     assert live.broker.notices and "late.1" in live.broker.notices[0]
+
+
+def test_a_strategy_without_notify_hooks_still_gets_its_fills():
+    class Silent(tw.Strategy):          # no notify_order / notify_trade: a backtest goes quiet
+        def next(self):
+            if not self.broker.suppress and not self.position:
+                self.buy(size=7)
+
+    live, _, venue, _ = _session(Silent, max_slices=3)
+    assert live.broker._tw_quiet_orders is False and live.broker._tw_quiet_trades is False
+    assert live.broker.getposition(live.datas[0]).size == 7 == venue.positions["A"][0]
