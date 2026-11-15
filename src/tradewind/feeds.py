@@ -162,7 +162,9 @@ class PandasData(DataBase):
         ("openinterest", -1),
     )
 
-    def _column(self, frame: pd.DataFrame, alias: str):
+    def _column(self, frame: pd.DataFrame, alias: str, names: dict | None = None):
+        """The column of ``alias`` as float64, or None. ``names`` caches the frame's
+        column lookups across the aliases of one load."""
         spec = getattr(self.p, alias)
         if spec is None:
             return None
@@ -170,11 +172,17 @@ class PandasData(DataBase):
             if spec >= 0:
                 return frame.iloc[:, spec].to_numpy(dtype=np.float64)
             # autodetect by name
-            cols = list(frame.columns)
+            if names is None:
+                names = {}
+            cols = names.get("cols")
+            if cols is None:
+                cols = names["cols"] = set(frame.columns)
             if alias in cols:
                 return frame[alias].to_numpy(dtype=np.float64)
             if self.p.nocase:
-                lowered = {str(c).lower(): c for c in cols}
+                lowered = names.get("lowered")
+                if lowered is None:
+                    lowered = names["lowered"] = {str(c).lower(): c for c in frame.columns}
                 if alias in lowered:
                     return frame[lowered[alias]].to_numpy(dtype=np.float64)
             return None
@@ -197,8 +205,9 @@ class PandasData(DataBase):
             dtnum = dtnum[order]
         n = len(dtnum)
         arrays = {}
+        names: dict = {}
         for alias in LINE_ALIASES[1:]:
-            col = self._column(frame, alias)
+            col = self._column(frame, alias, names)
             arrays[alias] = np.full(n, np.nan) if col is None else np.ascontiguousarray(col)
         if np.isnan(arrays["close"]).all() and self.p.close is not None:
             raise ValueError("PandasData: no close column found")

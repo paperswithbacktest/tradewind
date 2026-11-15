@@ -49,12 +49,14 @@ def stamps2num(index) -> np.ndarray:
     """A pandas ``DatetimeIndex`` (or array of datetimes) -> float-day array."""
     import pandas as pd
 
-    idx = pd.DatetimeIndex(index)
+    # (a frame's index is usually a DatetimeIndex already: not rebuilt)
+    idx = index if isinstance(index, pd.DatetimeIndex) else pd.DatetimeIndex(index)
     if idx.tz is not None:
         idx = idx.tz_convert("UTC").tz_localize(None)
     # ``asi8`` is in the index's own unit (s, ms, us or ns depending on how the frame was
     # built), so pin the unit before reading the integers.
-    idx = idx.as_unit("ns")
+    if idx.unit != "ns":
+        idx = idx.as_unit("ns")
     # Days since the proleptic ordinal epoch: ordinal(1970-01-01) == 719163.
     ns = idx.asi8.astype(np.float64)
     return 719163.0 + ns / (_SECONDS_PER_DAY * 1e9)
