@@ -12,5 +12,6 @@ concept it borrows where backtrader has none, and the tests that prove it.
 | `03-oracle.md` | the equivalence oracle: reference NAVs, tolerances, CI subset |
 | `04-design.md` | the modules of the first engine and their public names |
 | `05-interfaces.md` | chantier 2: Security, Broker, pluggable reality models, clock, event bus, feeds; event order in a bar (validated 2026-11-03, implemented 2026-11-06, § 11) |
+| `07-live-ibkr.md` | chantier 7, step 1: live trading on Interactive Brokers -- `LiveEngine`, `LiveBroker(adapter)`, `LiveClock`, journal and replay, reconciliation, restarts, disconnections and pacing, guards, paper first, ib_async vs ibapi (proposal, 2026-11-15) |
 | `similarity-review-0.0.2.md` | the clean-room similarity review of release 0.0.2 against backtrader (rule 4 of `CLEANROOM.md`), with `tools/similarity.py` |
 | `similarity-allowlist.md`, `similarity-allowlist.json` | the similarity gate of CI and of the release workflow (`tools/similarity_gate.sh`), the ranges accepted after human review, and the procedure to add one |
