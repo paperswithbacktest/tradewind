@@ -747,6 +747,7 @@ journal; under the default `NextBarFillModel`, `CommInfoFeeModel` and `Immediate
 directly. Acceptance and fills stay one order at a time in `ref` order: the running cash of
 the batch and the cash re-check at the fill are sequential, and the fee is whatever the
 scheme computes. `tools/nav_parity.py` compares two checkouts mark by mark as hex floats.
+
 ## 12. As built, chantier 4: calendars and the run fingerprint (2026-11-15)
 
 **Calendars (§ 6.1).** `calendars.py`: `ExchangeCalendar` implements `ExchangeHours`
