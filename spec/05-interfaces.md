@@ -868,7 +868,10 @@ run starts: symbols are matched to the feeds by name, the others listed in `unre
 * phase 12: a strategy defining `notify_universe(change)` (opt-in, Lean's
   `OnSecuritiesChanged`) gets the `UniverseChange` of the `UniverseEvent` (SecurityIds;
   `universe.feeds(strategy, ids)` maps them to feeds) -- the same delivery as the typed API
-  of #20, whose host turns it into `on_universe_change(SecurityChanges)`;
+  of #20, whose host turns it into `on_universe_change(SecurityChanges)`. Typed API names
+  (decision of Édouard, 2026-11-15): the key of `self.bars[...]` and the names in
+  `SecurityChanges` are the feed's name, stable for the run; after a `SymbolChange` the new
+  ticker is an attribute (`self.bars[name].symbol`, `security.symbol`), never a key;
 * `on_removal="liquidate"`: after the strategy step of the slice that removed it, a market
   order closes the position of each removed security still out and not delisted, unless an
   order on it was placed in that slice -- it joins the bar's batch and fills at the next

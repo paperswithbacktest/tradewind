@@ -421,3 +421,44 @@ def test_fingerprint_records_providers_and_normalization():
     assert a.broker["corporate_actions"]["splits"]["rows"] == 1
     assert a.broker["universe"]["table_sha256"] != b.broker["universe"]["table_sha256"]
     assert a.digest != b.digest
+
+
+def test_typed_strategy_keeps_feed_names_across_a_ticker_change():
+    # decision of 2026-11-15: in the typed API the key of ``self.bars`` and the names of
+    # ``SecurityChanges`` stay the feed's name for the whole run; the new ticker is an attribute
+    days = pd.bdate_range("2021-10-25", periods=10)
+    e = engine({"FB": frame(days, np.full(10, 300.0)), "SPY": frame(days, np.full(10, 400.0))})
+    e.set_corporate_actions(SymbolCorporateActions(
+        symbol_changes=pd.DataFrame({"date": ["2021-10-28"], "old": ["FB"], "new": ["META"]})))
+    table = pd.DataFrame([(d, "SPY") for d in days] + [(d, "FB") for d in days[2:7]],
+                         columns=["date", "symbol"])
+    e.set_universe(MembershipUniverse(table))
+
+    class Typed(tw.TypedStrategy):
+        def initialize(self):
+            self.seen = []
+            self.changes = []
+
+        def on_bar(self, bar):
+            fb = self.bars["FB"]
+            self.seen.append((bar.date, fb.name, fb.symbol, self.securities["FB"].symbol,
+                              fb.close[0]))
+            if fb.symbol == "META" and not self.portfolio.invested:
+                self.market_order("FB", 5)
+
+        def on_universe_change(self, change):
+            self.changes.append((change.time.date(), change.added, change.removed))
+
+    e.addstrategy(Typed)
+    typed = e.run()[0].typed
+    before = [s for s in typed.seen if s[0] < days[3].date()]
+    after = [s for s in typed.seen if s[0] >= days[3].date()]
+    assert before and after
+    assert all(s[1:4] == ("FB", "FB", "FB") for s in before)
+    assert all(s[1:4] == ("FB", "META", "META") for s in after)
+    assert all(s[4] == 300.0 for s in typed.seen)
+    assert "FB" in typed.bars and "META" not in typed.bars
+    assert typed.portfolio["FB"].quantity == 5
+    names = {n for _, added, removed in typed.changes for n in added + removed}
+    assert names == {"SPY", "FB"}
+    assert (days[7].date(), (), ("FB",)) in typed.changes

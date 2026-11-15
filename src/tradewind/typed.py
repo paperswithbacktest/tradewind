@@ -131,13 +131,17 @@ class Series:
 
 
 class BarSeries:
-    """The bars of one security: ``open`` ... ``volume`` as ``Series``, its time and state."""
+    """The bars of one security: ``open`` ... ``volume`` as ``Series``, its time and state.
 
-    __slots__ = ("close", "feed", "high", "low", "open", "open_interest", "symbol", "volume")
+    ``name`` is the feed's name, the key of ``strategy.bars`` and of every typed event: it
+    never changes during a run. ``symbol`` is the security's current ticker: the feed's name
+    until a ``SymbolChange`` (FB -> META) renames the security, the new ticker after it."""
+
+    __slots__ = ("close", "feed", "high", "low", "name", "open", "open_interest", "volume")
 
     def __init__(self, feed: Any) -> None:
         self.feed = feed
-        self.symbol: str = feed._name
+        self.name: str = feed._name
         lines = feed.lines
         self.open = Series(lines.open)
         self.high = Series(lines.high)
@@ -164,12 +168,19 @@ class BarSeries:
         """The engine's record of the instrument (contract terms, hours, holding)."""
         return typing.cast("Security", self.feed.security)
 
+    @property
+    def symbol(self) -> str:
+        """The current ticker (``security.symbol``): it follows ``SymbolChange`` actions, the
+        key (``name``) does not."""
+        return str(self.feed.security.symbol)
+
     def __repr__(self) -> str:
-        return f"BarSeries({self.symbol!r}, len={len(self)})"
+        return f"BarSeries({self.name!r}, len={len(self)})"
 
 
 class Bars(Mapping[str, BarSeries]):
-    """``strategy.bars["SPY"]``: the securities of the run by name, in ``adddata`` order."""
+    """``strategy.bars["SPY"]``: the securities of the run by feed name, in ``adddata``
+    order. The key stays the feed's name for the whole run, even after a ticker change."""
 
     def __init__(self, feeds: list[Any]) -> None:
         self._by_name = {feed._name: BarSeries(feed) for feed in feeds}
@@ -365,7 +376,9 @@ class OrderUpdate:
 
 @dataclasses.dataclass(frozen=True)
 class SecurityChanges:
-    """Securities entering and leaving the universe at ``time`` (Lean ``SecurityChanges``)."""
+    """Securities entering and leaving the universe at ``time`` (Lean ``SecurityChanges``),
+    by feed name -- the keys of ``strategy.bars``, unchanged by a ticker change (the current
+    ticker is ``strategy.bars[name].symbol``)."""
 
     time: _dt.datetime
     added: tuple[str, ...]
@@ -660,8 +673,8 @@ def _host_notify_universe(self: _TypedHost, change: Any) -> None:
     securities = self.broker.securities
     self.typed.on_universe_change(SecurityChanges(
         num2date(self.datetime[0]),
-        tuple(securities[i].symbol for i in change.added),
-        tuple(securities[i].symbol for i in change.removed)))
+        tuple(securities[i].feed._name for i in change.added),
+        tuple(securities[i].feed._name for i in change.removed)))
 
 
 def _host_notify_corporate_action(self: _TypedHost, action: Any) -> None:

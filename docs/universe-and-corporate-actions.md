@@ -108,7 +108,7 @@ day before an ex-date fill in post-split shares), and a strategy that defines
 | split, ratio r = `split_to / split_from` | the feed's first bar on or after the ex-date | quantity × r, average price ÷ r, open orders' sizes × r and prices ÷ r, the open trade's size and price likewise; value unchanged |
 | dividend, amount per share | the feed's first bar on or after the ex-date | quantity × amount credited (a short pays it); `total_dividends` of the holding |
 | delisting | first slice on or after the delisting date, never before the feed's last bar | open orders on it end; the position is sold at the last close (or `last_price`), less `haircut`, without fee; the trade closes (`notify_trade`, `TradeAnalyzer`); `data.security.is_delisted` |
-| ticker change | first slice on or after its date | `data.security.symbol` becomes the new ticker; the feed keeps its name, so `getdatabyname` is unchanged |
+| ticker change | first slice on or after its date | `data.security.symbol` becomes the new ticker; the feed keeps its name, so `getdatabyname` is unchanged, and in the typed API `self.bars[name]` too (the new ticker is `self.bars[name].symbol`, see [Typed API](typed-api.md#names-and-ticker-changes)) |
 
 **Dividends on the pay date.** By default the cash lands on the ex-date (the decision of
 spec/05 § 10, Q2). To credit it on the pay date instead, give the feed's securities the
