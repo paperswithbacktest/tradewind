@@ -39,16 +39,16 @@ container, on data you load yourself.
 | `CashBook` | `broker.cashbook`; `broker.set_conversion("EUR", eurusd_feed)`, `set_account_currency` | a balance per currency, the value in the account currency ([Realistic models and currencies](realistic-models.md)) |
 | `SecurityMarginModel`, `CashBuyingPowerModel`, margin calls | `tradewind.realistic.MarginAccount`, `CashAccount`, `MarginCallModel` | opt-in: `broker.set_profile("realistic")` |
 | `VolumeShareSlippageModel`, partial fills | `VolumeShareFillModel(participation=0.1)` | the rest of the order fills on the next bars |
-| Universe selection | `UniverseProvider` (interface only) | planned |
+| Universe selection, `OnSecuritiesChanged(changes)` | `on_universe_change` (typed API) / `notify_universe(change)` + `engine.set_universe(MembershipUniverse(table))` | a feed per symbol added before the run; names are feed names (see [Universes and corporate actions](universe-and-corporate-actions.md)) |
 | `MarketHoursDatabase`, time zones | `tw.calendars` (NYSE, NASDAQ, CME, CRYPTO), `ExchangeClock` | opt-in; the default clock is the union of the feeds' dates |
-| Splits, dividends, delistings | `CorporateActionProvider`; `tw.intraday.split_actions` for splits on unadjusted minute prices | the engine applies them at phase 3, before fills |
+| Splits, dividends, delistings, `SymbolChangedEvent` | `tw.corporate.SymbolCorporateActions(splits=, dividends=, delistings=, symbol_changes=)`; `notify_corporate_action(action)` | the engine applies them at phase 3, before fills |
+| `DataNormalizationMode.Raw / SplitAdjusted / Adjusted` | `engine.adddata(..., normalization="raw" / "split_adjusted" / "adjusted")` | decides which actions move the holdings |
 | `TradeBarConsolidator`, `Consolidate(symbol, timedelta(minutes=5), handler)` | `engine.consolidate(data, "5min", hours="NYSE")` (or `tz=..., session=...`); `tw.consolidators.TimeBarConsolidator` bar by bar | a consolidated feed, stamped at its bin end; see [Intraday data](intraday.md) |
 | `AddOption`, `SetFilter(lambda u: u.Strikes(-2, 2).Expiration(0, 30))` | `tw.options.add_options(engine, data, table, select=lambda c: c.strikes(-2, 2).expiration(0, 30))` | one feed per contract of a daily option table; see [Options](options.md) |
 | `OptionChain`, `contract.Greeks`, `ImpliedVolatility` | `OptionChain`, `with_greeks()`, `tw.options.bsm_greeks` / `implied_volatility` | European Black-Scholes-Merton |
 | Option exercise and assignment | `OptionExpiry`, at phase 3 after the expiry date | in the money by 0.01: exercised (long) or assigned (short); physical or cash |
 | Futures chains | not yet | |
 | Backtest statistics (Sharpe, Sortino, PSR, alpha, beta, drawdown, turnover, capacity) | `tw.analyzers.Performance` | Sharpe as the PWB catalogue computes it; capacity by Tradewind's own method ([Analyzers](analyzers.md#performance)) |
-| `OnSecuritiesChanged` | `on_universe_change` (typed API), `notify_universe(change)` (opt-in) | |
 | Alpha / Portfolio construction / Execution / Risk framework | not planned for now | write it in the strategy |
 | Live brokerages | not yet | the interfaces (`Broker`, `DataFeed`) are designed for it |
 

@@ -82,7 +82,8 @@ or `on_order_event` costs no order event, as in the compatible API.
 position in the run, from 0) and `bar.symbols` (the securities whose bar is at this slice).
 `fill` is a `tw.Fill`: `time`, `symbol`, `quantity` (signed: positive bought), `price`,
 `fee`, `ticket`. `update` is a `tw.OrderUpdate`: `time`, `symbol`, `status`, `ticket`.
-`change` is a `tw.SecurityChanges` with `added` and `removed` symbol tuples.
+`change` is a `tw.SecurityChanges` with `added` and `removed` tuples of feed names (see
+[Names and ticker changes](#names-and-ticker-changes)).
 
 ## Data
 
@@ -94,6 +95,7 @@ position in the run, from 0) and `bar.symbols` (the securities whose bar is at t
 | `self.bars["SPY"].close.history(20)` | `numpy.ndarray` | the last 20 closes, oldest first |
 | `len(self.bars["SPY"])` | `int` | bars that security has delivered |
 | `self.bars["SPY"].time`, `.has_bar`, `.security` | | its last bar's time, a bar at this slice, the engine's record |
+| `self.bars["SPY"].name`, `.symbol` | `str` | the feed's name (the key), the current ticker |
 | `self.symbols` | `tuple[str, ...]` | every security, in `adddata` order |
 | `self.time` | `datetime` | the current slice |
 | `self.securities["SPY"]` | `Security` | contract terms, hours, holding (read-only) |
@@ -107,6 +109,18 @@ Indicators: `self.indicator(factory, source, **params)` builds any compatible in
 `BarSeries`: the indicator reads the closes) or on a `Series`, and returns its output line
 as a `Series` (`line="signal"` picks another of its lines). Build them in `initialize`:
 the strategy then stays in `on_warmup` until they are warm, exactly as a compatible one.
+
+### Names and ticker changes
+
+A security is named by its feed's name, the `name` given to `adddata`, everywhere in the
+typed API: the keys of `self.bars`, `self.securities` and `self.portfolio`, the `symbol`
+argument of the order methods, `Fill.symbol`, `OrderUpdate.symbol`, `OrderTicket.symbol`
+and the names in `SecurityChanges`. That name is stable for the whole run. When a
+`SymbolChange` renames the security (FB became META on 2021-10-28, see [Universes and
+corporate actions](universe-and-corporate-actions.md)), `self.bars["FB"]` still works and
+the new ticker is an attribute: `self.bars["FB"].symbol == "META"` and
+`self.securities["FB"].symbol == "META"`, while `self.bars["FB"].name` stays `"FB"`. A
+strategy that keeps state per security keyed by name keeps it across the change.
 
 ## Orders and the portfolio
 

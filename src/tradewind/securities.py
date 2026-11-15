@@ -123,8 +123,8 @@ class SecurityHolding:
 class Security:
     """The engine's record of one instrument (Lean ``Security``), read-only for a strategy."""
 
-    __slots__ = ("_broker", "_delisted", "_holding", "_market", "_portfolio", "feed", "hours", "id",
-                 "models", "properties", "symbol")
+    __slots__ = ("_broker", "_delisted", "_holding", "_market", "_member", "_portfolio", "feed", "hours",
+                 "id", "models", "normalization", "properties", "symbol")
 
     def __init__(self, sid: SecurityId, symbol: Symbol, feed, models: ModelSet, hours: ExchangeHours,
                  properties: SymbolProperties | None = None, broker=None):
@@ -139,6 +139,10 @@ class Security:
         self._portfolio: PortfolioState | None = None
         self._holding: SecurityHolding | None = None
         self._delisted = False
+        self._member = True             # in the universe (always, without a universe provider)
+        # how the feed's prices treat splits and dividends (models.NORMALIZATIONS); None:
+        # undeclared, every corporate action applies
+        self.normalization = getattr(feed, "normalization", None)
 
     # -- market views ------------------------------------------------------------------
     @property
@@ -181,6 +185,11 @@ class Security:
     @property
     def is_delisted(self) -> bool:
         return self._delisted
+
+    @property
+    def in_universe(self) -> bool:
+        """A member of the run's universe now (always true without a universe provider)."""
+        return self._member
 
     def __repr__(self):
         return f"Security(id={self.id}, symbol={self.symbol!r})"

@@ -11,7 +11,7 @@ concept it borrows where backtrader has none, and the tests that prove it.
 | `02-semantics.md` | event order, fills, sizing, notifications: kept vs corrected (to be validated) |
 | `03-oracle.md` | the equivalence oracle: reference NAVs, tolerances, CI subset |
 | `04-design.md` | the modules of the first engine and their public names |
-| `05-interfaces.md` | chantier 2: Security, Broker, pluggable reality models, clock, event bus, feeds; event order in a bar (validated 2026-11-03, implemented 2026-11-06, § 11) |
+| `05-interfaces.md` | chantier 2: Security, Broker, pluggable reality models, clock, event bus, feeds; event order in a bar (validated 2026-11-03, implemented 2026-11-06, § 11); calendars and fingerprint (§ 12); realistic models and currencies (§ 13); point-in-time universes, corporate actions from symbol tables, data normalization (§ 14, 2026-11-15) |
 | `07-live-ibkr.md` | chantier 7, step 1: live trading on Interactive Brokers -- `LiveEngine`, `LiveBroker(adapter)`, `LiveClock`, journal and replay, reconciliation, restarts, disconnections and pacing, guards, paper first, ib_async vs ibapi (proposal, 2026-11-15) |
 | `06-intraday-and-options.md` | chantier 8, first part: consolidators, the bounded minute loader, splits on a minute stream, option contracts with their multiplier, chains, Black-Scholes-Merton, expiry (proposal and first implementation, 2026-11-15) |
 | `08-typed-api-and-analyzers.md` | chantier 5: the typed strategy API on the same engine (host strategy, typed events and orders, `py.typed`, mypy), the `Performance` analyzer and `tradewind.metrics` (the catalogue's formulas, PSR, capacity) (implemented 2026-11-15) |

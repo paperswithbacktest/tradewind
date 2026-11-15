@@ -58,6 +58,8 @@ class Engine(ParamsBase):
         self._trace = None              # a list to record the phases of each slice (tests)
         self._actions_provider = None
         self._universe_provider = None
+        self._universe_removal = "keep"
+        self._universe_gate = False
         if self.p.cheat_on_open:
             self._broker.set_coo(True)
         # Tradewind's own: the clock (None: UnionClock, the oracle default), the seed of the
@@ -84,19 +86,33 @@ class Engine(ParamsBase):
     def getbroker(self):
         return self._broker
 
-    def adddata(self, data, name=None, provenance=None):
+    def adddata(self, data, name=None, provenance=None, normalization=None):
         """Add a feed (``SecurityId`` = adddata order). ``provenance`` (Tradewind): where
         the data comes from, such as ``{"dataset": ..., "revision": ...}``, recorded in the
-        run's fingerprint."""
+        run's fingerprint. ``normalization`` (Tradewind): how its prices treat splits and
+        dividends, ``"raw"``, ``"split_adjusted"`` or ``"adjusted"`` (``models.NORMALIZATIONS``;
+        undeclared, every corporate action applies)."""
         if name is not None:
             data._name = name
         if provenance is not None:
             data.provenance = dict(provenance)
+        if normalization is not None:
+            _check_normalization(normalization)
+            data.normalization = normalization
         data._tw_env = self
         self.datas.append(data)
         # SecurityId = adddata order (spec/05 § 4.1)
-        self._broker.register(data)
+        security = self._broker.register(data)
+        if normalization is not None:
+            security.normalization = normalization
         return data
+
+    def set_normalization(self, data, normalization) -> None:
+        """Declare how ``data``'s prices treat splits and dividends (see ``adddata``)."""
+        if normalization is not None:
+            _check_normalization(normalization)
+        data.normalization = normalization
+        self._broker.register(data).normalization = normalization
 
     def addstrategy(self, strategy, *args, **kwargs):
         self.strats.append((strategy, args, kwargs))
@@ -219,9 +235,31 @@ class Engine(ParamsBase):
         else:
             self._actions_provider = CombinedActions(current, provider)
 
-    def set_universe(self, provider) -> None:
-        """A ``UniverseProvider`` whose changes reach phase 1 (none by default)."""
+    def set_universe(self, provider, on_removal: str = "keep", gate: bool = False) -> None:
+        """A ``UniverseProvider`` whose changes reach phase 1 (none by default), such as
+        ``universe.MembershipUniverse(table)``: securities enter and leave the universe during
+        the run, and a strategy defining ``notify_universe(change)`` hears of it at phase 12,
+        before its ``next``: ``change`` is the ``clock.UniverseChange`` (``time`` in ns,
+        ``added`` and ``removed`` as SecurityIds; ``self.broker.securities[i].feed`` is the
+        feed, ``tradewind.universe.feeds(self, ids)`` the list).
+
+        ``on_removal``: ``"keep"`` (default) leaves a removed security's position to the
+        strategy; ``"liquidate"`` closes it with a market order placed after the strategy's
+        ``next`` of the slice that removed it (filled at the next bar's open, like any order
+        of that bar), unless the strategy placed an order on it in that slice.
+        ``gate``: with False (default) the feeds the provider manages do not hold the
+        strategy in ``prenext`` until they have all delivered a bar -- a point-in-time
+        universe lists names years apart. ``None`` removes the provider."""
+        if on_removal not in ("keep", "liquidate"):
+            raise ValueError("on_removal is 'keep' or 'liquidate'")
         self._universe_provider = provider
+        self._universe_removal = on_removal
+        self._universe_gate = bool(gate)
+
+    @property
+    def universe(self):
+        """The ``UniverseProvider`` set by ``set_universe`` (None without one)."""
+        return self._universe_provider
 
     def run(self, **kwargs):
         ctx = self._tw_open_run(kwargs)
@@ -277,6 +315,7 @@ class Engine(ParamsBase):
             self._exchange_clock = clock if getattr(clock, "sessions", None) is not None else None
         market = MarketState(feeds)
         broker.start(feeds, market)
+        self._tw_bind_providers(broker, make_clock is None)
 
         seed = self.seed
         if seed is not None:
@@ -358,6 +397,34 @@ class Engine(ParamsBase):
         self._tw_bus_handlers = (deliver_order, deliver_trade, quiet, deliver_action, deliver_universe)
         return clock, market, strategies
 
+    def _tw_bind_providers(self, broker, backtest: bool) -> None:
+        """Give the providers that resolve symbols the run's securities (``bind``), and
+        ungate the feeds a universe manages (``set_universe(gate=False)``)."""
+        self._tw_ungated = []
+        self._tw_removed = []
+        if not backtest:
+            return
+        for provider in (self._actions_provider, self._universe_provider):
+            bind = getattr(provider, "bind", None)
+            if bind is not None:
+                bind(broker.securities)
+        universe = self._universe_provider
+        if universe is None:
+            return
+        for security in broker.securities:
+            security._member = True
+        managed = getattr(universe, "managed", None)
+        if managed is None:
+            return
+        for sid in managed:
+            # outside the universe until its first change says otherwise
+            security = broker.securities[sid]
+            security._member = False
+            feed = security.feed
+            if not self._universe_gate and getattr(feed, "_tw_gate", True):
+                feed._tw_gate = False
+                self._tw_ungated.append(feed)
+
     def _tw_release_bus(self):
         deliver_order, deliver_trade, quiet, deliver_action, deliver_universe = self._tw_bus_handlers
         broker = self._broker
@@ -367,6 +434,9 @@ class Engine(ParamsBase):
         broker.bus.unsubscribe(UniverseEvent, deliver_universe)
         if quiet:
             broker._tw_quiet_orders = broker._tw_quiet_trades = False
+        for feed in getattr(self, "_tw_ungated", ()):
+            feed._tw_gate = True
+        self._tw_ungated = []
 
     def _tw_stop_run(self, strategies):
         for strat in strategies:
@@ -454,6 +524,8 @@ class Engine(ParamsBase):
             trace.append(Phase.STRATEGY)
         for strat in strategies:
             strat._tw_step()
+        if self._tw_removed:
+            self._liquidate_removed(broker, strategies)
         # 14 analyzers, observers
         if trace is not None:
             trace.append(Phase.ANALYZERS)
@@ -477,14 +549,40 @@ class Engine(ParamsBase):
                     date = num2date(s.dtnum).date()
                 strat._tw_check_timers(date, Timer.SESSION_END)
 
-    @staticmethod
-    def _universe_change(s, broker, bus):
+    def _universe_change(self, s, broker, bus):
+        """Phase 1: the securities that enter and leave the universe now. A removed
+        security keeps its position (``on_removal="liquidate"`` closes it after this slice's
+        ``next``); it is no longer ``in_universe``. It is not delisted: it may come back."""
         change = s.universe
+        securities = broker.securities
         for sid in change.removed:
-            broker.securities[sid]._delisted = True
+            securities[sid]._member = False
         for sid in change.added:
-            broker.securities[sid]._delisted = False
+            securities[sid]._member = True
+        if self._universe_removal == "liquidate" and change.removed:
+            self._tw_removed = list(change.removed)
         bus.publish(UniverseEvent(s.time, 0, change))
+
+    def _liquidate_removed(self, broker, strategies):
+        """``on_removal="liquidate"``: close the position of each security removed at this
+        slice and still out of the universe, unless an order on it was placed in this slice
+        (the strategy's own exit). Placed after the strategy's ``next``, the orders join its
+        batch: accepted and filled at the next bar."""
+        removed, self._tw_removed = self._tw_removed, []
+        owner = strategies[0] if strategies else None
+        placed = {id(o.data) for o in broker.submitted}
+        for sid in removed:
+            security = broker.securities[sid]
+            if security._member or security._delisted:
+                continue
+            feed = security.feed
+            if id(feed) in placed:
+                continue
+            size = broker.getposition(feed).size
+            if size > 0:
+                broker.sell(owner, feed, size)
+            elif size < 0:
+                broker.buy(owner, feed, -size)
 
     def _deliver(self, strat):
         """Compat: hand every queued notification to its owner (or ``strat``) now."""
@@ -547,6 +645,13 @@ class Engine(ParamsBase):
         an = bound(*args, **kwargs)
         an.__class__ = ancls
         return an
+
+
+def _check_normalization(mode) -> None:
+    from .models import NORMALIZATIONS
+
+    if mode not in NORMALIZATIONS:
+        raise ValueError(f"normalization is one of {NORMALIZATIONS}, not {mode!r}")
 
 
 def _listens(strategies, hook: str) -> bool:

@@ -183,6 +183,7 @@ class BackBroker(BrokerBase):
         self._prev_accrual = None
         self._mark_cache = None
         self._value = self.cash
+        self._tw_receivables: list = []    # (pay time, CashAmount, security): dividends due
         # set by the engine for the length of a run when nobody listens (``Engine.run``):
         # the order / trade events are then not built at all
         self._tw_quiet_orders = False
@@ -683,13 +684,56 @@ class BackBroker(BrokerBase):
         """Splits, dividends, symbol changes and delistings effective now, applied to
         holdings and open orders before any fill (spec/05 § 10, Q2); none with the
         oracle's data."""
-        if s is None or not s.actions:
+        if s is None:
+            return
+        if self._tw_receivables:
+            self._tw_pay_receivables(s.time)
+        if not s.actions:
             return
         securities = self.securities
         for action in sorted(s.actions, key=lambda a: (a.security, a.rank)):
             securities[action.security].models.corporate_actions.apply(action, self)
             self.bus.publish(CorporateActionEvent(self._now, 0, action))
         self._mark_cache = None
+
+    def _tw_receive(self, pay_time: int, amount: CashAmount, security) -> None:
+        """A dividend entitled on its ex-date and paid on ``pay_time``: carried until then
+        (counted in the marked value), credited at phase 3 of the first slice at or after
+        it, through the security's settlement model."""
+        self._tw_receivables.append((pay_time, amount, security))
+
+    def _tw_pay_receivables(self, now) -> None:
+        due = [r for r in self._tw_receivables if r[0] <= now]
+        if not due:
+            return
+        self._tw_receivables = [r for r in self._tw_receivables if r[0] > now]
+        for _, amount, security in due:
+            security.models.settlement.apply_funds(security, amount, now, self.cashbook)
+
+    def receivables(self) -> float:
+        """Dividends entitled and not yet paid, in the account currency."""
+        total = 0.0
+        for _, amount, _ in self._tw_receivables:
+            total += self.cashbook.convert(amount.amount, amount.currency, self.cashbook.account_currency)
+        return total
+
+    def _tw_close_trade(self, data, size, price, pnl) -> None:
+        """Close ``data``'s open trade outside an order (a delisting liquidated): the trade
+        list, ``TradeAnalyzer`` and ``notify_trade`` see it closed at ``price``."""
+        trade = self.trades.get(data)
+        if trade is None or not trade.isopen:
+            return
+        trade.update(None, size, price, 0.0, size, pnl, 0.0, self._dtnum, 0)
+        if self._tw_quiet_trades:
+            return
+        owner = None
+        for order in reversed(self.orders):
+            if order.data is data:
+                owner = order.owner
+                break
+        security = getattr(data, "security", None)
+        self.bus.publish(TradeEvent(self._now, 0, security.id if security is not None else None, trade,
+                                    owner))
 
     # phase 4
     def accruals(self, s: TimeSlice | None) -> None:
@@ -971,6 +1015,9 @@ class BackBroker(BrokerBase):
     # phase 8
     def mark(self, s: TimeSlice | None) -> None:
         self._value = self._mark_value()
+        if self._tw_receivables:
+            # dividends entitled and not yet paid (``dividends="pay_date"``)
+            self._value += self.receivables()
 
     # phase 9
     def margin_call(self, s: TimeSlice | None) -> None:

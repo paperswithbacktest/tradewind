@@ -253,7 +253,38 @@ def feed_entry(data) -> dict:
     provenance = getattr(data, "provenance", None)
     if provenance:
         entry["provenance"] = canonical(dict(provenance))
+    normalization = getattr(data, "normalization", None)
+    if normalization is not None:
+        entry["normalization"] = normalization
     return entry
+
+
+def provider_entry(provider) -> dict:
+    """A corporate-action or universe provider: its class and, when it can say, the digest
+    of its tables (``describe()``); several combined providers are listed in order."""
+    out = {"class": f"{type(provider).__module__}.{type(provider).__qualname__}"}
+    inner = getattr(provider, "providers", None)
+    if inner is not None:
+        out["providers"] = [provider_entry(p) for p in inner]
+    describe = getattr(provider, "describe", None)
+    if describe is not None:
+        out.update(canonical(describe()))
+    return out
+
+
+def table_digest(*arrays) -> str:
+    """SHA-256 of a few columns of a table (numbers by their bytes, text by its values)."""
+    h = hashlib.sha256()
+    for a in arrays:
+        if a is None:
+            h.update(b"none")
+            continue
+        a = np.asarray(a)
+        if a.dtype.kind in "biufcmM":
+            h.update(_array_digest(a).encode())
+        else:
+            h.update("\x1f".join(map(str, a.tolist())).encode())
+    return h.hexdigest()
 
 
 def rng_states() -> dict:
@@ -391,10 +422,19 @@ class FingerprintRecorder:
         if overrides:
             models["per_security"] = overrides
         hours = sorted({getattr(s.hours, "name", type(s.hours).__name__) for s in broker.securities})
-        return {"class": f"{type(broker).__module__}.{type(broker).__qualname__}",
-                "starting_cash": float(broker.cash), "params": canonical(broker.p._getkwargs()),
-                "coo": bool(getattr(broker, "_coo", False)), "comminfo": comminfo, "models": models,
-                "hours": hours, "pending_cash": canonical(list(getattr(broker, "_cash_addition", [])))}
+        entry = {"class": f"{type(broker).__module__}.{type(broker).__qualname__}",
+                 "starting_cash": float(broker.cash), "params": canonical(broker.p._getkwargs()),
+                 "coo": bool(getattr(broker, "_coo", False)), "comminfo": comminfo, "models": models,
+                 "hours": hours, "pending_cash": canonical(list(getattr(broker, "_cash_addition", [])))}
+        # the providers, only when set (a run without them keeps its digest)
+        actions = getattr(engine, "_actions_provider", None)
+        if actions is not None:
+            entry["corporate_actions"] = provider_entry(actions)
+        universe = getattr(engine, "_universe_provider", None)
+        if universe is not None:
+            entry["universe"] = dict(provider_entry(universe), on_removal=engine._universe_removal,
+                                     gate=engine._universe_gate)
+        return entry
 
     def finish(self) -> None:
         """The run has ended: read the generators' states again."""
