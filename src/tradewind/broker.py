@@ -215,9 +215,12 @@ class BackBroker(BrokerBase):
         sid = len(self.securities)
         models = self._model_overrides.get(id(data), self.models)
         name = getattr(data, "_name", "") or f"data{sid}"
-        security = Security(sid, name, data, models, self.hours, broker=self)
+        # a feed may carry its contract terms (an option's multiplier of 100, spec/06 § 5)
+        props = getattr(data, "symbol_properties", None)
+        security = Security(sid, name, data, models, self.hours, properties=props, broker=self)
         self.securities.append(security)
         self.portfolio.grow(len(self.securities))
+        self.portfolio.multiplier[sid] = security.properties.contract_multiplier
         security._portfolio = self.portfolio
         security._market = self.market
         data.security = security
@@ -337,6 +340,9 @@ class BackBroker(BrokerBase):
             pos = self.positions.get(data)
             if pos is not None and pos.size and len(data):
                 value += self.getcommissioninfo(data).getvalue(pos, data.close[0])
+                m = data.security.properties.contract_multiplier
+                if m != 1.0:
+                    value = value * m
             return value
         for data, pos in self.positions.items():
             if data not in datas:
@@ -346,7 +352,9 @@ class BackBroker(BrokerBase):
             if len(data) == 0:
                 continue
             comminfo = self.getcommissioninfo(data)
-            value += comminfo.getvalue(pos, data.close[0])
+            m = self._security(data).properties.contract_multiplier
+            v = comminfo.getvalue(pos, data.close[0])
+            value += v if m == 1.0 else v * m
         return value
 
     getvalue = get_value
@@ -361,6 +369,9 @@ class BackBroker(BrokerBase):
                 if not pos.size or len(data) == 0:
                     continue
                 e, u = _mark_terms(self.getcommissioninfo(data), pos, data.close[0])
+                m = self._security(data).properties.contract_multiplier
+                if m != 1.0:
+                    e, u = e * m, u * m
                 terms += e
                 terms += u
             return self.cash + terms
@@ -371,7 +382,7 @@ class BackBroker(BrokerBase):
         cache = self._mark_cache
         if cache is None or cache[0] != len(order) or cache[1] != self._comminfo_key():
             cache = self._mark_cache = self._build_mark_cache()
-        _, _, ids, mult, lev, scalar_idx = cache
+        _, _, ids, mult, lev, scalar_idx, cmult = cache
         pf = self.portfolio
         q = pf.quantity[ids]
         live = (q != 0) & (market.length[ids] > 0)
@@ -391,6 +402,10 @@ class BackBroker(BrokerBase):
                     data = securities[ids[k]].feed
                     entry[k], pnl[k] = _mark_terms(self.getcommissioninfo(data), self.positions[data],
                                                    data.close[0])
+        if cmult is not None:
+            # contract multipliers (options): value = quantity x price x multiplier
+            entry = entry * cmult
+            pnl = pnl * cmult
         terms = np.column_stack((entry[live], pnl[live])).ravel()
         # sequential, not pairwise: ``add.accumulate`` adds left to right like the loop
         return cash + float(np.add.accumulate(np.concatenate(((0.0,), terms)))[-1])
@@ -404,7 +419,9 @@ class BackBroker(BrokerBase):
         mult = np.array([float(ci.p.mult) for ci in comminfos])
         lev = np.array([float(ci.get_leverage()) for ci in comminfos])
         scalar_idx = np.flatnonzero(~plain).tolist()
-        return (len(order), self._comminfo_key(), ids, mult, lev, scalar_idx)
+        cmult = np.array([securities[i].properties.contract_multiplier for i in order], dtype=np.float64)
+        return (len(order), self._comminfo_key(), ids, mult, lev, scalar_idx,
+                cmult if (cmult != 1.0).any() else None)
 
     def _comminfo_key(self):
         """Changes whenever a scheme is set, added or replaced (even in the dict directly)."""
@@ -706,7 +723,10 @@ class BackBroker(BrokerBase):
             comm = order_fee(fee, security, order, size, price, now)
         newsize, _newprice, opened, closed = pos.update(size, price)
         pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0
+        m = security.properties.contract_multiplier
         if comminfo.stocklike:
+            if m != 1.0:
+                pnl = pnl * m
             # Observed on the oracle (probes ``reversal_fees``, ``close_cash``): a fill is
             # one execution per part -- the closing part, then the opening part --, each
             # settled then charged its own fee. Closing gives back the position's entry
@@ -718,9 +738,12 @@ class BackBroker(BrokerBase):
             parts = []
             if closed:
                 entry = -closed * oldprice / lev if oldsize > 0 else -closed * oldprice
+                if m != 1.0:
+                    entry = entry * m
                 parts.append((closed, entry + pnl))
             if opened:
-                parts.append((opened, -(opened * price) / lev if opened > 0 else -(opened * price)))
+                flow = -(opened * price) / lev if opened > 0 else -(opened * price)
+                parts.append((opened, flow if m == 1.0 else flow * m))
             fees = []
             for part, flow in parts:
                 part_fee = comm if len(parts) == 1 else order_fee(fee, security, order, part, price, now)
@@ -741,7 +764,10 @@ class BackBroker(BrokerBase):
             trade_parts = None
         # observed on the oracle (probe ``executed_values``): the closed part is valued at
         # the position's entry price, the opened part at the fill price
-        order.execute(dt, size, price, closed, -closed * oldprice, closedcomm, opened, opened * price,
+        closed_value, opened_value = -closed * oldprice, opened * price
+        if m != 1.0 and comminfo.stocklike:
+            closed_value, opened_value = closed_value * m, opened_value * m
+        order.execute(dt, size, price, closed, closed_value, closedcomm, opened, opened_value,
                       openedcomm, 0.0, pnl)
         self._account(security, comm_final, pnl)
         if partial:

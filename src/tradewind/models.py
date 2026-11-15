@@ -279,6 +279,15 @@ def confirm_fee(fee_model, security, order, size, price) -> float:
         return order.comminfo.confirmexec(size, price)
     confirm = getattr(fee_model, "confirm_order_fee", None) or fee_model.get_order_fee
     return confirm(FeeParameters(security, order, size, price, 0)).amount
+def _security_multiplier(security) -> float:
+    """The contract multiplier of a security (1.0 for a plain feed)."""
+    props = getattr(security, "properties", None)
+    return 1.0 if props is None else props.contract_multiplier
+
+
+def _multiplier(order) -> float:
+    """The contract multiplier of the order's security."""
+    return _security_multiplier(getattr(order.data, "security", None))
 
 
 def _fee(security, order, size, price, time) -> float:
@@ -313,9 +322,13 @@ class CompatCashBuyingPower:
         comminfo = order.comminfo
         size = order.size
         if comminfo.stocklike:
+            m = _multiplier(order)
             leverage = comminfo.get_leverage()
             if leverage != 1.0:
-                return leveraged_stock_flow(size, price, pos_size, pos_price, leverage, comminfo) - fee
+                flow = leveraged_stock_flow(size, price, pos_size, pos_price, leverage, comminfo)
+                return (flow if m == 1.0 else flow * m) - fee
+            if m != 1.0:
+                return -size * price * m - fee
             return -size * price - fee
         opening = (pos_size == 0) or ((pos_size > 0) == (size > 0))
         if opening:
@@ -374,8 +387,10 @@ class CompatCashBuyingPower:
             opened = size - closed
             comm_closed = _fee(security, order, closed, price, time)
             comm_opened = _fee(security, order, opened, price, time)
-            cash_after_close = cash - closed * price - comm_closed
-            if cash_after_close - opened * price - comm_opened < 0:
+            m = _security_multiplier(security)
+            unit = price if m == 1.0 else price * m
+            cash_after_close = cash - closed * unit - comm_closed
+            if cash_after_close - opened * unit - comm_opened < 0:
                 return FillProposal(closed, price)
         return fill
 
@@ -383,6 +398,9 @@ class CompatCashBuyingPower:
         """Signed size closing the value gap, truncated toward zero by the scheme's
         ``getsize`` (observed: the gap is truncated, not the target size)."""
         comminfo = security.comminfo
+        m = _security_multiplier(security)
+        if m != 1.0:
+            price = price * m                  # the value of one contract
         if target_value > current_value:
             return comminfo.getsize(price, target_value - current_value)
         if target_value < current_value:
@@ -520,6 +538,19 @@ class CorporateActionProvider(Protocol):
     def events(self, time: Timestamp) -> Sequence[CorporateAction]: ...
 
 
+class CombinedActions:
+    """Several providers as one: their events at a time, in the providers' order."""
+
+    def __init__(self, *providers: CorporateActionProvider):
+        self.providers = list(providers)
+
+    def events(self, time) -> Sequence[CorporateAction]:
+        out: list = []
+        for p in self.providers:
+            out.extend(p.events(time))
+        return out
+
+
 class StaticCorporateActions:
     """A provider over a fixed list of actions, each attached to the slice of its time."""
 
@@ -568,6 +599,9 @@ class OracleCorporateActions:
             self._dividend(security, action, broker)
         elif isinstance(action, Delisting):
             self._delist(security, action, broker)
+        elif hasattr(action, "apply_to"):
+            # an action that knows how to apply itself (an option's expiry, spec/06 § 5.4)
+            action.apply_to(broker)
         else:
             raise TypeError(f"unknown corporate action {action!r}")
 
@@ -656,7 +690,8 @@ class ModelSet:
 
 
 __all__ = [
-    "AlwaysShortable", "BatchState", "BuyingPowerCheck", "BuyingPowerModel", "CommInfoFeeModel",
+    "AlwaysShortable", "BatchState", "BuyingPowerCheck", "BuyingPowerModel", "CombinedActions",
+    "CommInfoFeeModel",
     "CompatCashBuyingPower", "CompatSlippage", "CorporateAction", "CorporateActionModel",
     "CorporateActionProvider", "Delisting", "Dividend", "FeeModel", "FeeParameters", "FillModel",
     "FillParameters", "FillProposal", "ImmediateSettlement", "MarginInterestRateModel", "ModelSet",

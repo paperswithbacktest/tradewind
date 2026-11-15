@@ -331,7 +331,9 @@ class Strategy(ParamsBase):
             return True
         # a feed's length never shrinks during a run: once all have listed, they stay so
         if not self._tw_listed:
-            self._tw_listed = all(len(d) > 0 for d in self.datas)
+            # a feed flagged ``_tw_gate = False`` (an option contract, which lists when it
+            # first trades) does not hold the strategy back
+            self._tw_listed = all(len(d) > 0 for d in self.datas if getattr(d, "_tw_gate", True))
             if not self._tw_listed:
                 return False
         for ind in self._tw_indicators:

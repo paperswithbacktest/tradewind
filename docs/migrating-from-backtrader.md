@@ -61,7 +61,7 @@ The behaviours that match are listed one by one in
 
 | feature | status |
 |---|---|
-| `resampledata`, `replaydata` | raises `NotImplementedError`; resample with pandas first |
+| `resampledata`, `replaydata` | raises `NotImplementedError`; `engine.consolidate(data, "5min", ...)` builds a consolidated feed ([Intraday data](intraday.md)) |
 | `optstrategy` | raises; run the parameter grid in a loop or a process pool |
 | `plot` | raises; plot the values you record |
 | observers (`stdstats`) | accepted and ignored; record the value in `next()` or use `TimeReturn` |

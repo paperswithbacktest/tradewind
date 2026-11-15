@@ -23,7 +23,7 @@ Homepage = "https://paperswithbacktest.com"
 Source = "https://github.com/paperswithbacktest/tradewind"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5"]
+dev = ["pytest>=8", "ruff>=0.5", "pyarrow>=14"]     # pyarrow: the minute loader's tests
 ibkr = ["ib_async>=2.0"]
 
 [tool.setuptools.packages.find]
