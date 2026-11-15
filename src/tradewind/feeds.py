@@ -50,6 +50,7 @@ class DataBase(ParamsBase):
         self._tw_env = None
         self._arrays: dict[str, np.ndarray] = {}
         self._dtnum: np.ndarray | None = None
+        self._cursor = Cursor()   # replaced at start by the one the lines share
         self.security = None   # set by the broker: the engine's record of this feed (read-only)
 
     # -- to be provided by subclasses -------------------------------------------------
@@ -109,7 +110,7 @@ class DataBase(ParamsBase):
 
     # -- public surface ----------------------------------------------------------------------
     def __len__(self):
-        return self.lines.datetime._c.i + 1 if self._started else 0
+        return self._cursor.i + 1
 
     def buflen(self):
         return len(self._dtnum) if self._started else 0
