@@ -169,6 +169,10 @@ class Engine(ParamsBase):
             strategies.append(strat)
         self.runstrats = [strategies]
         self.clock = clock
+        # phase 10 steps only the indicators that need it: one computed before the run
+        # follows its clock feed through a shared cursor
+        self._tw_syncs = [ind for strat in strategies for ind in strat._tw_indicators
+                          if not ind._tw_follow_clock()]
         for strat in strategies:
             strat._tw_start_clock(clock.times)
 
@@ -191,6 +195,17 @@ class Engine(ParamsBase):
             if target is not None:
                 target._tw_notify(event.trade)
 
+        quiet = isinstance(broker, BackBroker) and bus.journal is None
+        if quiet:
+            # Notifications on demand: an order or trade event exists to reach a
+            # ``notify_order`` / ``notify_trade``. When no strategy or analyzer of the run
+            # overrides it and nothing else subscribed to the bus, the broker does not
+            # build the events (a snapshot of the order each) -- the orders, positions
+            # and trades themselves move exactly as before.
+            broker._tw_quiet_orders = not bus._handlers.get(OrderEvent) and not _listens(
+                strategies, "notify_order")
+            broker._tw_quiet_trades = not bus._handlers.get(TradeEvent) and not _listens(
+                strategies, "notify_trade")
         bus.subscribe(OrderEvent, deliver_order)
         bus.subscribe(TradeEvent, deliver_trade)
         try:
@@ -199,6 +214,8 @@ class Engine(ParamsBase):
         finally:
             bus.unsubscribe(OrderEvent, deliver_order)
             bus.unsubscribe(TradeEvent, deliver_trade)
+            if quiet:
+                broker._tw_quiet_orders = broker._tw_quiet_trades = False
 
         # Observed on the oracle: notifications are delivered at the start of the next
         # bar only, so what an order placed on the last bar produced is never notified,
@@ -263,9 +280,8 @@ class Engine(ParamsBase):
         # 10 indicators
         if trace is not None:
             trace.append(Phase.INDICATORS)
-        for strat in strategies:
-            for ind in strat._tw_indicators:
-                ind._tw_sync()
+        for ind in self._tw_syncs:
+            ind._tw_sync()
         # 11 timers (session start)
         if trace is not None:
             trace.append(Phase.TIMERS_START)
@@ -370,6 +386,21 @@ class Engine(ParamsBase):
         an = bound(*args, **kwargs)
         an.__class__ = ancls
         return an
+
+
+def _listens(strategies, hook: str) -> bool:
+    """Does a strategy of the run, or one of its analyzers, define ``hook`` (on its class
+    or on the instance)?"""
+    from .analyzer import Analyzer
+    from .strategy import Strategy
+
+    for strat in strategies:
+        if getattr(type(strat), hook) is not getattr(Strategy, hook) or hook in vars(strat):
+            return True
+        for an in strat.analyzers:
+            if getattr(type(an), hook) is not getattr(Analyzer, hook) or hook in vars(an):
+                return True
+    return False
 
 
 #: backtrader's name for the engine, kept so that ``Cerebro()`` code runs unchanged.

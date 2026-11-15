@@ -265,8 +265,24 @@ def leveraged_stock_flow(size, price, pos_size, pos_price, leverage, comminfo) -
     return flow
 
 
+def order_fee(fee_model, security, order, size, price, time) -> float:
+    """``fee_model.get_order_fee(...).amount``; with the oracle default, the scheme's
+    ``getcommission`` called directly (the same call, without the two tuples)."""
+    if type(fee_model) is CommInfoFeeModel:
+        return order.comminfo.getcommission(size, price)
+    return fee_model.get_order_fee(FeeParameters(security, order, size, price, time)).amount
+
+
+def confirm_fee(fee_model, security, order, size, price) -> float:
+    """The commission recorded on the order (``confirm_order_fee`` when the model has one)."""
+    if type(fee_model) is CommInfoFeeModel:
+        return order.comminfo.confirmexec(size, price)
+    confirm = getattr(fee_model, "confirm_order_fee", None) or fee_model.get_order_fee
+    return confirm(FeeParameters(security, order, size, price, 0)).amount
+
+
 def _fee(security, order, size, price, time) -> float:
-    return security.models.fee.get_order_fee(FeeParameters(security, order, size, price, time)).amount
+    return order_fee(security.models.fee, security, order, size, price, time)
 
 
 class CompatCashBuyingPower:

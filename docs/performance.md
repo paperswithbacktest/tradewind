@@ -2,26 +2,68 @@
 
 ## What the engine costs
 
-Measured on an Apple M4 laptop, Python 3.13, synthetic daily bars
-(`tools/bench_engine.py --symbols 2000 --years 3`):
+Measured on an Apple M4 laptop, Python 3.13, synthetic daily bars, best of nine runs
+(`tools/bench_engine.py --symbols 200 --bars 500`; the figure is the wall time of
+`Engine.run`, loading the feeds included, divided by securities × bars):
 
-| run | per security and bar |
-|---|---|
-| empty `next()`: clock, feeds, broker, mark | 0.23 µs |
-| equal-weight rebalance of 2 000 names every month | 1.06 µs |
+| scenario | 0.0.2 | now |
+|---|---|---|
+| `idle`: empty `next()` -- clock, feeds, broker, mark | 0.22 µs | 0.11 µs |
+| `reader`: `len(d)`, `d.close[0]`, `d.close[-1]` of every feed, every bar | 0.46 µs | 0.26 µs |
+| `rebalance`: equal weight on every name each month (`order_target_percent`) | 0.93 µs | 0.53 µs |
+| `notified`: the same with `notify_order` and `notify_trade` defined | 0.91 µs | 0.68 µs |
+| `indicators`: an SMA(20) per feed read every bar, weekly rotation | 1.26 µs | 0.77 µs |
 
-A 2 000-name universe over 20 years of daily bars (10 million security-bars) costs the
-engine 2 to 11 seconds.
+On 1 000 names × 250 bars the same scenarios go from 0.29 / 0.50 / 0.95 / 0.95 / 1.30 µs
+to 0.17 / 0.31 / 0.56 / 0.70 / 0.84 µs. The budget of `spec/05-interfaces.md` § 7.2 is
+3 µs per security-bar on 4 000 names, about 0.6 µs of it for the engine; the figure on
+4 000 names comes from
+
+    python tools/bench_engine.py --symbols 4000 --years 3 --repeat 3 --json bench_4000.json
 
 What a strategy's calls cost (`tools/bench_api.py`, per call):
 
 | call | cost |
 |---|---|
-| `data.close[0]`, `data.close[-k]`, `getposition(d).size`, `broker.getvalue()` | 20 to 75 ns |
-| `len(data)` | ~100 ns |
-| `data.datetime.date(0)` | ~500 ns |
+| `data.close[0]`, `data.close[-k]`, `broker.getvalue()`, `getposition(d).size` | 20 to 90 ns |
+| `len(data)` | ~80 ns |
+| `data.datetime.date(0)` | ~120 ns |
 | `data.close.get(size=60)` | ~500 ns |
 | `order_target_percent` (no trade) | ~900 ns |
+
+### How the engine keeps its share small
+
+* **One cursor per feed.** The seven lines of a feed (datetime, open, high, low, close,
+  volume, open interest) are views on one array per field and share one cursor; moving to
+  the next bar is one increment per feed. A line read is a memoryview index.
+* **Indicators follow their feed.** An indicator computed before the run (every built-in,
+  any `once()`, a line bound in `__init__`, a `next()`-only indicator under `runonce`) shares
+  its feed's cursor: it costs nothing per bar. Only an indicator stepped live
+  (`runonce=False` with a `next()`) is visited on every bar.
+* **Notifications on demand.** An order or trade notification is a snapshot of the order
+  at that moment. When no strategy or analyzer of the run defines `notify_order` (or
+  `notify_trade`), none is built; defining one turns them all back on.
+* **The default models without their wrappers.** With the default fill, fee and settlement
+  models a market order fills at the open through the slippage model and the commission
+  scheme directly; a model of your own, or a subclass of a default one, takes the general
+  path through the interfaces of `spec/05-interfaces.md` § 5.
+* **Orders stay in submission order.** The batch check and the fills of a bar walk the
+  orders one by one in the order they were placed, because each one moves the cash the next
+  one is checked against and a commission scheme may be any Python code; the per-bar
+  reductions over all securities (the mark) are vectorised with a left-to-right sum.
+
+### Checking that a speed change changes nothing
+
+Every speed change must leave every float of every run unchanged.
+`tools/nav_parity.py` runs the oracle probes and the benchmark scenarios on a small
+universe and records every mark, fill, status and commission as a hex float; two
+checkouts are compared with
+
+    TRADEWIND_SRC=/path/to/main/src python tools/nav_parity.py --out /tmp/nav_main.json
+    python tools/nav_parity.py --out /tmp/nav_new.json
+    python tools/nav_parity.py --compare /tmp/nav_main.json /tmp/nav_new.json
+
+`tests/test_hot_paths.py` checks each shortcut against the path it skips, bit for bit.
 
 ## Where the time goes in real strategies
 
@@ -43,7 +85,8 @@ So the levers are in the strategy:
 4. **Avoid building DataFrames in `next()`.** Constructing a `pd.DataFrame` or calling
    `.rolling()` per bar dominates most slow strategies. Keep numpy arrays, or precompute the
    series before the run and look them up by date.
-5. **Cache the date.** Call `self.datetime.date(0)` once per bar and keep it in a variable.
+5. **Cache the date.** Call `self.datetime.date(0)` once per bar and keep it in a variable
+   rather than once per feed.
 6. **Drop the feeds you do not need.** Every feed is stepped on every slice.
 
 ## Comparing with backtrader

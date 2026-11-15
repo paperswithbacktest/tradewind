@@ -114,7 +114,7 @@ class Order:
         """The order as it is now, for a notification: a shallow copy whose ``executed`` is
         frozen too, so a later fill does not show through (the clone semantics)."""
         clone = object.__new__(type(self))
-        clone.__dict__.update(self.__dict__)
+        clone.__dict__ = self.__dict__.copy()
         clone.executed = self.executed._copy()
         return clone
 

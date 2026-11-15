@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .dateutils import date2num, stamps2num
-from .lines import DatetimeLine, LineBuffer, Lines
+from .lines import Cursor, DatetimeLine, LineBuffer, Lines
 from .params import ParamsBase
 
 LINE_ALIASES = ("datetime", "open", "high", "low", "close", "volume", "openinterest")
@@ -50,6 +50,7 @@ class DataBase(ParamsBase):
         self._tw_env = None
         self._arrays: dict[str, np.ndarray] = {}
         self._dtnum: np.ndarray | None = None
+        self._cursor = Cursor()   # replaced at start by the one the lines share
         self.security = None   # set by the broker: the engine's record of this feed (read-only)
 
     # -- to be provided by subclasses -------------------------------------------------
@@ -71,9 +72,11 @@ class DataBase(ParamsBase):
         arrays = {k: v[lo:hi] for k, v in arrays.items()}
         self._dtnum = dtnum
         self._arrays = arrays
-        buffers = [DatetimeLine(dtnum, "datetime", owner=self)]
+        # the seven lines move together: one cursor for all (phase 2 moves it once)
+        self._cursor = cursor = Cursor()
+        buffers = [DatetimeLine(dtnum, "datetime", owner=self, cursor=cursor)]
         for alias in LINE_ALIASES[1:]:
-            buffers.append(LineBuffer(arrays[alias], alias, owner=self))
+            buffers.append(LineBuffer(arrays[alias], alias, owner=self, cursor=cursor))
         self.lines = Lines(LINE_ALIASES, buffers)
         for alias, buf in zip(LINE_ALIASES, buffers):
             setattr(self, alias, buf)
@@ -107,7 +110,7 @@ class DataBase(ParamsBase):
 
     # -- public surface ----------------------------------------------------------------------
     def __len__(self):
-        return len(self.lines.datetime) if self._started else 0
+        return self._cursor.i + 1
 
     def buflen(self):
         return len(self._dtnum) if self._started else 0
@@ -160,7 +163,9 @@ class PandasData(DataBase):
         ("openinterest", -1),
     )
 
-    def _column(self, frame: pd.DataFrame, alias: str):
+    def _column(self, frame: pd.DataFrame, alias: str, names: dict | None = None):
+        """The column of ``alias`` as float64, or None. ``names`` caches the frame's
+        column lookups across the aliases of one load."""
         spec = getattr(self.p, alias)
         if spec is None:
             return None
@@ -168,11 +173,17 @@ class PandasData(DataBase):
             if spec >= 0:
                 return frame.iloc[:, spec].to_numpy(dtype=np.float64)
             # autodetect by name
-            cols = list(frame.columns)
+            if names is None:
+                names = {}
+            cols = names.get("cols")
+            if cols is None:
+                cols = names["cols"] = set(frame.columns)
             if alias in cols:
                 return frame[alias].to_numpy(dtype=np.float64)
             if self.p.nocase:
-                lowered = {str(c).lower(): c for c in cols}
+                lowered = names.get("lowered")
+                if lowered is None:
+                    lowered = names["lowered"] = {str(c).lower(): c for c in frame.columns}
                 if alias in lowered:
                     return frame[lowered[alias]].to_numpy(dtype=np.float64)
             return None
@@ -195,8 +206,9 @@ class PandasData(DataBase):
             dtnum = dtnum[order]
         n = len(dtnum)
         arrays = {}
+        names: dict = {}
         for alias in LINE_ALIASES[1:]:
-            col = self._column(frame, alias)
+            col = self._column(frame, alias, names)
             arrays[alias] = np.full(n, np.nan) if col is None else np.ascontiguousarray(col)
         if np.isnan(arrays["close"]).all() and self.p.close is not None:
             raise ValueError("PandasData: no close column found")

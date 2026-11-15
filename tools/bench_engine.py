@@ -1,16 +1,25 @@
 """Engine cost per security-bar on a wide synthetic universe (spec/05 § 7.2).
 
-    python tools/bench_engine.py --symbols 4000 --years 3 --repeat 3
+    # the budget's case (spec/05 § 7.2): 4 000 names, about 3 years of daily bars
+    python tools/bench_engine.py --symbols 4000 --years 3 --repeat 3 --json /tmp/bench_4000.json
+    # the small case used while optimising (a few seconds)
+    python tools/bench_engine.py --symbols 200 --bars 500
 
-Two strategies, both on the same seeded bars:
+Scenarios, all on the same seeded bars (``--scenarios`` picks some):
 
 * ``idle``: ``next`` does nothing -- the loop, the feeds, the broker pass and the mark;
 * ``rebalance``: equal weight through ``order_target_percent`` on every name at each month's
-  first bar -- the order path (batch acceptance, fills, notifications) on top.
+  first bar -- the order path (batch acceptance, fills) on top;
+* ``notified``: ``rebalance`` with ``notify_order`` and ``notify_trade`` defined, so every
+  notification is built and delivered;
+* ``reader``: ``next`` reads ``len(d)``, ``d.close[0]`` and ``d.close[-1]`` of every feed --
+  what most strategies do on every bar;
+* ``indicators``: an SMA(20) of every feed built in ``__init__``, read on every bar, and a
+  weekly rotation into the names furthest above their average.
 
 The figure is the wall time of ``Engine.run`` (feed start included, DataFrame building
-excluded) divided by symbols × bars, best of ``--repeat``. The spec's budget is about
-0.6 µs of engine time per security-bar.
+excluded) divided by symbols × bars, best of ``--repeat``. The spec's budget is 3 µs per
+security-bar on 4 000 names, about 0.6 µs of it for the engine.
 """
 
 from __future__ import annotations
@@ -18,6 +27,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import sys
 import time
@@ -68,6 +78,57 @@ class Rebalance(tw.Strategy):
                 self.order_target_percent(d, target=w)
 
 
+class Notified(Rebalance):
+    def __init__(self):
+        super().__init__()
+        self.n_orders = 0
+        self.n_trades = 0
+
+    def notify_order(self, order):
+        self.n_orders += 1
+
+    def notify_trade(self, trade):
+        self.n_trades += 1
+
+
+class Reader(tw.Strategy):
+    def next(self):
+        total = 0.0
+        for d in self.datas:
+            if len(d) > 1:
+                total += d.close[0] - d.close[-1]
+        self.total = total
+
+
+class Indicators(tw.Strategy):
+    def __init__(self):
+        self.sma = {d: tw.indicators.SMA(d, period=20) for d in self.datas}
+        self.week = None
+
+    def next(self):
+        week = self.datetime.date(0).isocalendar()[1]
+        scores = []
+        for d in self.datas:
+            m = self.sma[d][0]
+            if not math.isnan(m) and len(d):
+                scores.append((d.close[0] / m, d._name, d))
+        if week == self.week or not scores:
+            return
+        self.week = week
+        scores.sort(reverse=True)
+        top = {id(d) for _, _, d in scores[: max(1, len(scores) // 10)]}
+        w = 0.95 / max(1, len(scores) // 10)
+        for _, _, d in scores:
+            if id(d) in top:
+                self.order_target_percent(d, target=w)
+            elif self.getposition(d).size:
+                self.order_target_percent(d, target=0.0)
+
+
+SCENARIOS = {"idle": Idle, "rebalance": Rebalance, "notified": Notified, "reader": Reader,
+             "indicators": Indicators}
+
+
 def run_once(strategy, fr):
     engine = tw.Engine(stdstats=False)
     for i, f in enumerate(fr):
@@ -85,14 +146,18 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--symbols", type=int, default=4000)
     p.add_argument("--years", type=float, default=3.0)
+    p.add_argument("--bars", type=int, default=None, help="bars per symbol (overrides --years)")
     p.add_argument("--repeat", type=int, default=3)
+    p.add_argument("--scenarios", default=",".join(SCENARIOS), help="comma-separated, of: "
+                   + ", ".join(SCENARIOS))
     p.add_argument("--json", default=None, help="write the figures there")
     args = p.parse_args()
-    n_bars = round(252 * args.years)
+    n_bars = args.bars or round(252 * args.years)
     fr = frames(args.symbols, n_bars)
     cells = args.symbols * n_bars
     out = {"symbols": args.symbols, "bars": n_bars}
-    for name, cls in (("idle", Idle), ("rebalance", Rebalance)):
+    for name in args.scenarios.split(","):
+        cls = SCENARIOS[name]
         times, value = [], None
         for _ in range(args.repeat):
             t, value = run_once(cls, fr)

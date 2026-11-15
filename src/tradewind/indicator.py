@@ -325,21 +325,48 @@ class Indicator(LineArithmetic, ParamsBase):
             # series (a corpus VIX-gated allocation reads VIX = 15.86 on every bar).
             # Reproduced here because the reference NAVs embed it; ``runonce=False``
             # steps the indicator live instead.
-            foreign = []
+            # (by cursor: a feed's lines share one, saved and restored once)
+            foreign = {}
             inputs = {id(b) for b in self._tw_input_lines()}
             for d in getattr(self._tw_env, "datas", []):
                 for buf in getattr(d, "lines", []):
-                    if id(buf) not in inputs:
-                        foreign.append((buf, buf.idx))
+                    if id(buf) not in inputs and id(buf._c) not in foreign:
+                        foreign[id(buf._c)] = (buf._c, buf._c.i)
                         buf.idx = buf.buflen() - 1
             try:
                 self.once(0, n)
             finally:
-                for buf, idx in foreign:
-                    buf.idx = idx
+                for cursor, idx in foreign.values():
+                    cursor.i = idx
             self.lines.home()
         self._tw_computed = True
         self._tw_stepped = -1
+
+    def _tw_follow_clock(self) -> bool:
+        """At the start of a run: hand the per-bar sync over to the clock feed's cursor
+        when the sync would only copy it, and say whether phase 10 can skip this
+        indicator.
+
+        Computed before the run (``once``, a binding, or the runonce pre-pass of a
+        ``next``-only indicator), a root indicator's sync is ``idx = clock.idx`` on every
+        line, every bar: its lines now share the clock's cursor instead, which gives the
+        same index at every point the strategy, an analyzer or a timer can read it. A
+        child's sync does nothing (its cursor stays where the computation left it).
+        """
+        if not self._tw_computed or not self._tw_runonce():
+            return False
+        if self._tw_parent is not None:
+            return True
+        clock = self._tw_clock
+        if not isinstance(clock, LineBuffer):
+            return False
+        n = clock.buflen()
+        buffers = list(self.lines)
+        if any(buf.buflen() != n for buf in buffers):
+            return False
+        for buf in buffers:
+            buf._c = clock._c
+        return True
 
     def _tw_sync(self):
         """Align the cursor with the clock feed's cursor; step a live next-only indicator."""
