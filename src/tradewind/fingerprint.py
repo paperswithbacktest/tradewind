@@ -373,7 +373,8 @@ class FingerprintRecorder:
 
     @staticmethod
     def _strategy_entry(strat, args, kwargs) -> dict:
-        cls = type(strat)
+        # a typed strategy runs inside a host built by the engine: record the user's class
+        cls = getattr(type(strat), "_tw_fingerprint_class", type(strat))
         return {"class": f"{cls.__module__}.{cls.__qualname__}", "code": strategy_code(cls),
                 "params": canonical(strat.p._getkwargs()),
                 "args": canonical(list(args)),

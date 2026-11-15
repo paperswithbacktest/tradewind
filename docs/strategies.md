@@ -14,6 +14,9 @@ class MyStrategy(tw.Strategy):
         ...                     # decide, place orders
 ```
 
+New code can also be written against the [typed API](typed-api.md): `tw.TypedStrategy`,
+parameters in a dataclass, typed events and orders, on the same engine.
+
 ## Parameters
 
 `params` is a tuple of `(name, default)` pairs or a dict. Values given to

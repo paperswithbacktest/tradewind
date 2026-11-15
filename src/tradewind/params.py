@@ -11,6 +11,8 @@ Declarations are inherited and overridable: a subclass' tuple is merged over its
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class _Params:
     def __init__(self, values: dict):
@@ -82,6 +84,7 @@ class MetaParams(type):
 
 class ParamsBase(metaclass=MetaParams):
     params: tuple = ()
+    p: Any                      # the resolved values, set by ``MetaParams`` before ``__init__``
 
     @classmethod
     def _tw_params_declared(cls) -> dict:

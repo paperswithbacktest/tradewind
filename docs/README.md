@@ -23,7 +23,8 @@ backtrader's own results, bar by bar:
 |---|---|
 | Strategies, data feeds, orders (market, close, limit, stop), positions, notifications, timers | done, identical NAVs to backtrader on ~1 000 corpus strategies and on 33 synthetic probes |
 | Indicators used by the corpus (SMA, EMA, Highest, Lowest, ROC, ATR, RSI, MACD, CrossOver, StdDev) and custom indicators | done, bit for bit |
-| Analyzers: `TradeAnalyzer`, `DrawDown`, `SharpeRatio`, `TimeReturn` | done |
+| Analyzers: `TradeAnalyzer`, `DrawDown`, `SharpeRatio`, `TimeReturn`; `Performance` (Sharpe as the catalogue computes it, Sortino, PSR, alpha/beta, drawdown, exposure, turnover, capacity) | done |
+| Typed API (`tw.TypedStrategy`, dataclass parameters, typed events and orders, `py.typed`) on the same engine | done ([Typed API](typed-api.md)) |
 | Pluggable reality models (fees, fills, slippage, buying power, settlement, shorting, margin interest, corporate actions), per security | interfaces done; the default set reproduces backtrader |
 | Exchange calendars (NYSE, Nasdaq, CME, crypto), minute clock, timers in exchange time | done, opt-in; the default clock stays backtrader's |
 | Run fingerprint (data, code, parameters, seed) | done: `engine.fingerprint` |
@@ -49,13 +50,16 @@ faster than on backtrader, data loading included. See [Performance](performance.
 5. [Orders and the broker](orders-and-broker.md): order types and states, cash checks,
    commissions, slippage, leverage, per-security models.
 6. [Indicators](indicators.md): the built-in ones, writing your own, line arithmetic.
-7. [Analyzers](analyzers.md): drawdown, Sharpe ratio, trade statistics, period returns.
+7. [Analyzers](analyzers.md): drawdown, Sharpe ratio, trade statistics, period returns, and
+   the full statistics of a run (`Performance`).
 8. [Migrating from backtrader](migrating-from-backtrader.md): what changes (an import),
    what is not supported, and the behaviours worth knowing.
 9. [Coming from QuantConnect Lean](coming-from-lean.md): a concept-by-concept map.
 10. [Performance](performance.md): what costs what, and how to write fast strategies.
 11. [Intraday data](intraday.md): minute bars, consolidated bars, loading a window, splits.
 12. [Options](options.md): contracts, chains, Greeks and implied volatility, expiry.
+13. [Typed API](typed-api.md): strategies as annotated classes, parameters in a dataclass,
+    typed events and orders, on the same engine.
 
 The [examples](examples/) run as they are, on synthetic data: `cd docs/examples && python
 01_sma_crossover.py`.
