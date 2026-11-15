@@ -29,8 +29,9 @@ class _ClockLine(DatetimeLine):
     __slots__ = ()
 
     def __getitem__(self, ago: int) -> float:
-        n = self.idx + 1
-        i = self.idx + ago
+        idx = self._c.i
+        n = idx + 1
+        i = idx + ago
         if i >= n or i < -n:
             raise IndexError("array index out of range")
         i = i if i >= 0 else n + i
@@ -40,12 +41,13 @@ class _ClockLine(DatetimeLine):
             return float(self._array[i])
 
     def buflen(self) -> int:
-        return self.idx + 1
+        return self._c.i + 1
 
     def get(self, ago: int = 0, size: int = 1) -> list:
-        end = self.idx + ago + 1
+        idx = self._c.i
+        end = idx + ago + 1
         start = end - size
-        if start < 0 or end > self.idx + 1:
+        if start < 0 or end > idx + 1:
             return []
         return self._array[start:end].tolist()
 
@@ -116,12 +118,12 @@ class Strategy(ParamsBase):
 
     def _tw_tick(self, position: int):
         """Slice ``position`` of the clock has started (phase 2, with the feeds)."""
-        self.datetime.idx = position
+        self.datetime._c.i = position
 
     # -- introspection -------------------------------------------------------------------
     def __len__(self):
         # observed on the oracle: the slices of the clock run so far, whatever data0 holds
-        return self.datetime.idx + 1
+        return self.datetime._c.i + 1
 
     def getdatanames(self):
         return [d._name for d in self.datas]

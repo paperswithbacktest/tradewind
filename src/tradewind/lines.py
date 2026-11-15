@@ -137,14 +137,38 @@ class LineArithmetic:
         return abs(self._tw_v())
 
 
-class LineBuffer(LineArithmetic):
-    __slots__ = ("_array", "_mv", "_name", "_owner", "idx")
+class Cursor:
+    """The position of a set of lines that always move together: the seven lines of a feed
+    share one, so phase 2 moves a feed with one increment instead of seven (spec/05 § 7.1),
+    and an indicator computed before the run shares its clock feed's, so it follows the
+    feed without being stepped."""
 
-    def __init__(self, array, name: str = "", owner=None):
+    __slots__ = ("i",)
+
+    def __init__(self, i: int = -1):
+        self.i = i
+
+    def __repr__(self):
+        return f"Cursor({self.i})"
+
+
+class LineBuffer(LineArithmetic):
+    __slots__ = ("_array", "_c", "_mv", "_name", "_owner")
+
+    def __init__(self, array, name: str = "", owner=None, cursor: Cursor | None = None):
         self.array = np.ascontiguousarray(array, dtype=np.float64)
-        self.idx = -1
+        self._c = Cursor() if cursor is None else cursor
         self._name = name
         self._owner = owner  # the feed or indicator this line belongs to
+
+    # -- the cursor (possibly shared with sibling lines) ------------------------
+    @property
+    def idx(self) -> int:
+        return self._c.i
+
+    @idx.setter
+    def idx(self, value: int) -> None:
+        self._c.i = value
 
     # -- the buffer -----------------------------------------------------------
     @property
@@ -165,16 +189,16 @@ class LineBuffer(LineArithmetic):
 
     # -- cursor ---------------------------------------------------------------
     def __len__(self) -> int:
-        return self.idx + 1
+        return self._c.i + 1
 
     def buflen(self) -> int:
         return len(self._array)
 
     def advance(self, n: int = 1) -> None:
-        self.idx += n
+        self._c.i += n
 
     def home(self) -> None:
-        self.idx = -1
+        self._c.i = -1
 
     # -- reads -----------------------------------------------------------------
     def __getitem__(self, ago: int) -> float:
@@ -184,14 +208,14 @@ class LineBuffer(LineArithmetic):
         # ``ago`` reaching before the first bar wraps around to the end of the buffer.
         # Only a position outside the buffer raises.
         try:
-            return self._mv[self.idx + ago]
+            return self._mv[self._c.i + ago]
         except (IndexError, TypeError):
             # out of the buffer, or an ``ago`` that is not a plain integer: numpy's rules
             return self._read(ago)
 
     def _read(self, ago) -> float:
         try:
-            return float(self._array[self.idx + ago])
+            return float(self._array[self._c.i + ago])
         except IndexError:
             raise IndexError(f"line {self._name!r}: ago={ago} at len={len(self)} of {self.buflen()}") from None
 
@@ -200,18 +224,19 @@ class LineBuffer(LineArithmetic):
 
     def get(self, ago: int = 0, size: int = 1) -> list:
         """The ``size`` values ending at ``ago`` (inclusive), oldest first."""
-        end = self.idx + ago + 1
+        idx = self._c.i
+        end = idx + ago + 1
         start = end - size
-        if start < 0 or end > self.idx + 1:
+        if start < 0 or end > idx + 1:
             return []
         return self._array[start:end].tolist()
 
     def __iter__(self):
-        return iter(self._array[: self.idx + 1].tolist())
+        return iter(self._array[: self._c.i + 1].tolist())
 
     # -- writes (indicators) ----------------------------------------------------
     def __setitem__(self, ago: int, value: float) -> None:
-        self._array[self.idx + ago] = value
+        self._array[self._c.i + ago] = value
 
     def __bool__(self) -> bool:
         return True
@@ -310,10 +335,14 @@ class Lines:
     def getlinealiases(self):
         return self._names
 
+    def cursors(self) -> list:
+        """The distinct cursors of these lines (one when they all share it)."""
+        return list({id(buf._c): buf._c for buf in self._buffers}.values())
+
     def advance(self, n: int = 1):
-        for buf in self._buffers:
-            buf.advance(n)
+        for cursor in self.cursors():
+            cursor.i += n
 
     def home(self):
-        for buf in self._buffers:
-            buf.home()
+        for cursor in self.cursors():
+            cursor.i = -1

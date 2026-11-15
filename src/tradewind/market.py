@@ -72,8 +72,9 @@ class MarketState:
             f._arrays = {alias: f.lines[k].array for k, alias in enumerate(FIELDS) if k}
         self.length = np.array([len(f) for f in self.feeds], dtype=np.int64)
         self.has_bar = np.zeros(n, dtype=bool) if has_bar is None else has_bar
-        self._bufs_of = [tuple(f.lines) for f in self.feeds]
-        self._all_bufs = [b for bufs in self._bufs_of for b in bufs]
+        # the distinct cursors of each feed's lines: one per feed when its lines share it
+        self._cursors_of = [tuple(f.lines.cursors()) for f in self.feeds]
+        self._all_cursors = [c for cursors in self._cursors_of for c in cursors]
         self.listed_all = bool(n == 0 or (self.length > 0).all())
 
     # -- phase 2 -----------------------------------------------------------------------
@@ -84,14 +85,14 @@ class MarketState:
         self.has_bar = row
         if s.all_have_bar:
             self.length += 1
-            for b in self._all_bufs:
-                b.idx += 1
+            for c in self._all_cursors:
+                c.i += 1
         else:
             self.length += row
-            bufs_of = self._bufs_of
+            cursors_of = self._cursors_of
             for j in np.flatnonzero(row).tolist():
-                for b in bufs_of[j]:
-                    b.idx += 1
+                for c in cursors_of[j]:
+                    c.i += 1
         if not self.listed_all:
             self.listed_all = bool((self.length > 0).all())
 

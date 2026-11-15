@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .dateutils import date2num, stamps2num
-from .lines import DatetimeLine, LineBuffer, Lines
+from .lines import Cursor, DatetimeLine, LineBuffer, Lines
 from .params import ParamsBase
 
 LINE_ALIASES = ("datetime", "open", "high", "low", "close", "volume", "openinterest")
@@ -71,9 +71,11 @@ class DataBase(ParamsBase):
         arrays = {k: v[lo:hi] for k, v in arrays.items()}
         self._dtnum = dtnum
         self._arrays = arrays
-        buffers = [DatetimeLine(dtnum, "datetime", owner=self)]
+        # the seven lines move together: one cursor for all (phase 2 moves it once)
+        self._cursor = cursor = Cursor()
+        buffers = [DatetimeLine(dtnum, "datetime", owner=self, cursor=cursor)]
         for alias in LINE_ALIASES[1:]:
-            buffers.append(LineBuffer(arrays[alias], alias, owner=self))
+            buffers.append(LineBuffer(arrays[alias], alias, owner=self, cursor=cursor))
         self.lines = Lines(LINE_ALIASES, buffers)
         for alias, buf in zip(LINE_ALIASES, buffers):
             setattr(self, alias, buf)
@@ -107,7 +109,7 @@ class DataBase(ParamsBase):
 
     # -- public surface ----------------------------------------------------------------------
     def __len__(self):
-        return len(self.lines.datetime) if self._started else 0
+        return self.lines.datetime._c.i + 1 if self._started else 0
 
     def buflen(self):
         return len(self._dtnum) if self._started else 0

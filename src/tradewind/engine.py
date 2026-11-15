@@ -169,6 +169,10 @@ class Engine(ParamsBase):
             strategies.append(strat)
         self.runstrats = [strategies]
         self.clock = clock
+        # phase 10 steps only the indicators that need it: one computed before the run
+        # follows its clock feed through a shared cursor
+        self._tw_syncs = [ind for strat in strategies for ind in strat._tw_indicators
+                          if not ind._tw_follow_clock()]
         for strat in strategies:
             strat._tw_start_clock(clock.times)
 
@@ -263,9 +267,8 @@ class Engine(ParamsBase):
         # 10 indicators
         if trace is not None:
             trace.append(Phase.INDICATORS)
-        for strat in strategies:
-            for ind in strat._tw_indicators:
-                ind._tw_sync()
+        for ind in self._tw_syncs:
+            ind._tw_sync()
         # 11 timers (session start)
         if trace is not None:
             trace.append(Phase.TIMERS_START)
