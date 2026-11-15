@@ -71,7 +71,8 @@ position, and nothing is placed when there is no difference.
 `order_target_percent` reads the portfolio value marked at this slice's closes. When a
 rebalance sells some names and buys others, the batch of orders is checked in the order
 you placed them, against a running cash: placing the sells first lets them fund the buys.
-See [Orders and the broker](orders-and-broker.md).
+See [Orders and the broker](orders-and-broker.md) and
+[`examples/02_monthly_rebalance.py`](examples/02_monthly_rebalance.py).
 
 ## Positions and the account
 
@@ -142,3 +143,4 @@ dataset revision you declare with `adddata(data, name, provenance={"revision": .
 source and its parameters, the broker's configuration and the seed. Two runs with the same
 `fingerprint.digest` give the same NAV. Store it next to the results
 (`fingerprint.to_json()`), and `fingerprint.diff(other)` says what changed between two runs.
+See [Reproducibility](reproducibility.md).

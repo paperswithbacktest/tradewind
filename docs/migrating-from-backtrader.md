@@ -34,7 +34,7 @@ Beyond the probes, about 1 000 published strategies have been run on both engine
 identical value paths, to a relative tolerance of 1e-12 and in most cases bit for bit.
 
 The behaviours that match are listed one by one in
-[`spec/02-semantics.md`](../spec/02-semantics.md), with how each was observed.
+[`spec/02-semantics.md`](https://github.com/paperswithbacktest/tradewind/blob/main/spec/02-semantics.md), with how each was observed.
 
 ## What is supported
 

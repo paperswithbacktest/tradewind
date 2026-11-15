@@ -3,7 +3,7 @@
 Minute bars run on the same engine as daily bars: the clock is the union of the feeds'
 timestamps, whatever their spacing. This page covers three things a minute backtest needs:
 bars of several sizes at once, loading a bounded window, and stock splits on prices that are
-not adjusted for them. The design is in [`spec/06`](../spec/06-intraday-and-options.md).
+not adjusted for them. The design is in [`spec/06`](https://github.com/paperswithbacktest/tradewind/blob/main/spec/06-intraday-and-options.md).
 
 ## Timestamps: bars are stamped at their end
 

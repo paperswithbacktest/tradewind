@@ -50,7 +50,7 @@ container, on data you load yourself.
 | Futures chains | not yet | |
 | Backtest statistics (Sharpe, Sortino, PSR, alpha, beta, drawdown, turnover, capacity) | `tw.analyzers.Performance` | Sharpe as the PWB catalogue computes it; capacity by Tradewind's own method ([Analyzers](analyzers.md#performance)) |
 | Alpha / Portfolio construction / Execution / Risk framework | not planned for now | write it in the strategy |
-| Live brokerages | not yet | the interfaces (`Broker`, `DataFeed`) are designed for it |
+| Live brokerages | `tradewind.live`: Interactive Brokers, paper first (preview) | the same strategy class; see [Live trading](live-trading.md) |
 
 ## Order of events in a bar
 
@@ -58,6 +58,11 @@ Lean and Tradewind both process a time slice in a fixed order. Tradewind's sixte
 are listed in [How a backtest runs](concepts.md#the-sixteen-phases-of-a-slice). The main
 difference from Lean's defaults: a market order placed in `next()` fills at the **next**
 bar's open, not at the current bar's close or at the next tick.
+
+## Where Tradewind stands
+
+The dated comparison, area by area (at level, ahead, behind), is on its own page:
+[Tradewind vs Lean](tradewind-vs-lean.md).
 
 ## What to expect
 

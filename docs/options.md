@@ -3,7 +3,7 @@
 Listed options run on the engine as securities of their own: one feed per contract, a
 contract multiplier of 100 on its security, and the engine handling what happens at expiry.
 `tradewind.options` also prices them (Black-Scholes-Merton, Greeks, implied volatility) and
-filters chains. The design is in [`spec/06`](../spec/06-intraday-and-options.md).
+filters chains. The design is in [`spec/06`](https://github.com/paperswithbacktest/tradewind/blob/main/spec/06-intraday-and-options.md).
 
 ## The data: a daily option table
 
