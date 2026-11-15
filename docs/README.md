@@ -25,7 +25,9 @@ backtrader's own results, bar by bar:
 | Indicators used by the corpus (SMA, EMA, Highest, Lowest, ROC, ATR, RSI, MACD, CrossOver, StdDev) and custom indicators | done, bit for bit |
 | Analyzers: `TradeAnalyzer`, `DrawDown`, `SharpeRatio`, `TimeReturn` | done |
 | Pluggable reality models (fees, fills, slippage, buying power, settlement, shorting, margin interest, corporate actions), per security | interfaces done; the default set reproduces backtrader |
-| Calendars, universes, corporate actions, multi-currency, futures | interfaces in place, implementations planned |
+| Exchange calendars (NYSE, Nasdaq, CME, crypto), minute clock, timers in exchange time | done, opt-in; the default clock stays backtrader's |
+| Run fingerprint (data, code, parameters, seed) | done: `engine.fingerprint` |
+| Universes, corporate actions, multi-currency, futures | interfaces in place, implementations planned |
 | Resampling, replay, plotting, `optstrategy`, live trading | not available yet |
 
 Speed: the engine itself costs 0.2 to 1 µs per security and bar on a 2 000-security

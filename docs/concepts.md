@@ -10,6 +10,30 @@ gap in the data) keeps its previous bar, and its length does not grow.
 `len(self)` in a strategy counts the slices run so far; `len(self.data)` counts the bars
 that feed has delivered. They differ as soon as one feed lists late.
 
+A date that a single feed has a bar on is a slice for every feed, as in backtrader: a stray
+row on a holiday in one symbol of a panel adds a bar to the whole run. Clean the panel
+before building the feeds (`tw.calendars.NYSE.trading_days(start, end)` lists the sessions).
+
+### Exchange hours and minute bars
+
+By default the clock knows nothing about exchanges: daily bars carry dates only, and every
+feed's timestamp is a slice. For intraday data, give the run the hours of a place:
+
+```python
+from tradewind.calendars import NYSE   # also NASDAQ, CME (equity index futures), CRYPTO
+
+engine.set_clock(tw.ExchangeClock(NYSE, interval="1min", fill_forward=True))
+engine.set_hours(NYSE)                  # data.security.hours, for is_open() and friends
+```
+
+The calendars know holidays, early closes and time zones (`NYSE.session("2024-11-29")` is
+09:30 to 13:00 New York; `NYSE.is_open(t)`, `NYSE.trading_days(a, b)`,
+`NYSE.bar_times(a, b, "5min")`). The exchange clock never drops or moves a bar; with
+`fill_forward=True` it adds a slice at the end of every minute (or `interval`) of every
+session, so a strategy steps on minutes no feed traded, the way Lean's minute resolution
+does. Minute bars are expected to be stamped at their end (09:31 is the first NYSE bar).
+Under it, timers fire in the exchange's time: see [Timers](strategies.md#timers).
+
 ## The sixteen phases of a slice
 
 Every slice runs the same phases, in the same order. There is one code path: a backtest is

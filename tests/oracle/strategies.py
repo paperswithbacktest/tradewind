@@ -587,6 +587,32 @@ def build(bt):
 
     # -- probes of the 0.1.45 parity pass (spec/02 § "parity 0.1.45") ---------------------------
 
+    class ExtraSession(Recorder):
+        """A weekday only one feed has a bar on (S1 keeps 2021-03-09, S0/S2/S3 lose it), the
+        shape of a stray holiday row in one name of a panel: is it a slice, what do the
+        other feeds' lengths do, and where do market orders placed the bar before fill?"""
+
+        @staticmethod
+        def oracle_frames(fr):
+            import pandas as pd
+
+            day = pd.Timestamp("2021-03-09")
+            return {k: (f if k == "S1" else f.drop(index=day, errors="ignore")) for k, f in fr.items()}
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            d = self.datetime.date(0).isoformat()
+            if "2021-03-05" <= d <= "2021-03-12":
+                self.extra["rows"].append((d, len(self), [len(x) for x in self.datas],
+                                           round(self.datas[1].close[0], 8)))
+            if d == "2021-03-08":
+                self.buy(self.datas[0], size=10)
+                self.buy(self.datas[1], size=10)
+
     class StrategyClock(Recorder):
         """``self.datetime`` and ``len(self)`` of a strategy whose data0 lists 30 bars late
         (feeds S3 first): the clock's own line, not data0's; an SMA on an early feed adds no
@@ -1128,6 +1154,7 @@ def build(bt):
         "child_indicators": ChildIndicators,
         "inert_indicator": InertIndicator,
         "true_range_inverted": TrueRangeInverted,
+        "extra_session": ExtraSession,
         "strategy_clock": StrategyClock,
         "line_binding": LineBinding,
         "indicator_bits": IndicatorBits,

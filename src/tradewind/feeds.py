@@ -52,6 +52,7 @@ class DataBase(ParamsBase):
         self._dtnum: np.ndarray | None = None
         self._cursor = Cursor()   # replaced at start by the one the lines share
         self.security = None   # set by the broker: the engine's record of this feed (read-only)
+        self.provenance = None  # where the data comes from (fingerprint), e.g. {"revision": ...}
 
     # -- to be provided by subclasses -------------------------------------------------
     def _load_arrays(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:

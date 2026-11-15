@@ -11,7 +11,9 @@ runs. It is never imported by the engine, never a dependency, never redistribute
   "corrected" default of `02-semantics.md` that ships regenerates `oracle/v<n+1>/` with a
   per-strategy delta file.
 * **Stored**: slug, data snapshot hashes, strategy file hash, parameters, daily NAV, final
-  value, order log (date, symbol, size, price, status) for the subset below.
+  value, order log (date, symbol, size, price, status) for the subset below. On the
+  Tradewind side the first four are `engine.fingerprint` (spec/05 § 12): its digest says
+  whether two runs read the same inputs.
 
 ## Tolerances
 

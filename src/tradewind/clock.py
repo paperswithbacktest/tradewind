@@ -119,8 +119,12 @@ class UnionClock:
 
     def __init__(self, dtnums: Sequence[np.ndarray],
                  actions: CorporateActionProvider | None = None,
-                 universe: UniverseProvider | None = None):
-        times = np.unique(np.concatenate(list(dtnums))) if len(dtnums) else np.empty(0)
+                 universe: UniverseProvider | None = None,
+                 extra_times: np.ndarray | None = None):
+        arrays = list(dtnums)
+        if extra_times is not None and len(extra_times):
+            arrays.append(np.asarray(extra_times, dtype=np.float64))
+        times = np.unique(np.concatenate(arrays)) if arrays else np.empty(0)
         self.times = times
         self.times_ns = num2ns(times)
         n_t, n_s = len(times), len(dtnums)
@@ -150,3 +154,107 @@ class UnionClock:
             actions = tuple(actions_provider.events(now)) if actions_provider is not None else ()
             universe = universe_provider.change(now) if universe_provider is not None else None
             yield TimeSlice(now, t, has_bar[t], actions, universe, float(times[t]), bool(all_have[t]))
+
+
+def ns2num(ns) -> np.ndarray:
+    """int64 ns UTC -> float days, the formula feeds use (``dateutils.stamps2num``), so a
+    time built here and the same instant read from a feed are the same float."""
+    return 719163.0 + np.asarray(ns, dtype=np.int64).astype(np.float64) / (86400.0 * 1e9)
+
+
+class ExchangeClock(UnionClock):
+    """A clock in the hours of one place (spec/05 § 6.1, chantier 4).
+
+    ``ExchangeClock(NYSE)`` keeps the union of the feeds' timestamps -- bars are never
+    dropped or moved -- and adds what the place's calendar knows:
+
+    * ``interval`` with ``fill_forward=True``: one slice at the end of every bar of that
+      length in every session between the first and the last feed timestamp (Lean's
+      fill-forward), so minute strategies and timers run on minutes no feed traded;
+    * a session table (``sessions``) and, per slice, the session it belongs to
+      (``session_at``), which timers use to fire in the place's time (``Timer``:
+      ``SESSION_START`` / ``SESSION_END`` plus ``offset``, a ``datetime.time`` in the
+      place's zone or in ``tzdata``, ``repeat``).
+
+    Bars are expected stamped at their end (Lean's convention): a minute bar at 09:31 New
+    York is the first of the NYSE session. Feeds whose stamps are all midnight UTC are taken
+    as daily bars: each belongs to the session of its date (the last session before it when
+    the date does not trade).
+
+    The engine builds it with ``bind`` (``Engine.set_clock``); the default stays
+    ``UnionClock`` with ``AlwaysOpen`` hours.
+    """
+
+    def __init__(self, hours, interval=None, fill_forward: bool = False):
+        self.hours = hours
+        self.interval = interval
+        self.fill_forward = bool(fill_forward)
+        if self.fill_forward and interval is None:
+            raise ValueError("fill_forward needs an interval ('1min', '5min', ...)")
+        self._bound = False
+
+    def describe(self) -> dict:
+        return {"clock": type(self).__name__, "hours": getattr(self.hours, "name", repr(self.hours)),
+                "interval": None if self.interval is None else str(self.interval),
+                "fill_forward": self.fill_forward}
+
+    def bind(self, dtnums: Sequence[np.ndarray], actions: CorporateActionProvider | None = None,
+             universe: UniverseProvider | None = None) -> ExchangeClock:
+        """Build the slices for these feeds (called by ``Engine.run``)."""
+        from .calendars import _interval_ns
+
+        stamps = [np.asarray(d, dtype=np.float64) for d in dtnums if len(d)]
+        extra = None
+        self.daily = (not self.fill_forward and bool(stamps)
+                      and all(np.all(d == np.floor(d)) for d in stamps))
+        if stamps:
+            lo = min(float(d[0]) for d in stamps)
+            hi = max(float(d[-1]) for d in stamps)
+            lo_ns, hi_ns = int(num2ns(lo)), int(num2ns(hi))
+            day0 = np.datetime64(lo_ns, "ns").astype("datetime64[D]") - np.timedelta64(7, "D")
+            day1 = np.datetime64(hi_ns, "ns").astype("datetime64[D]") + np.timedelta64(7, "D")
+            self.sessions = self.hours.sessions(day0, day1)
+            if self.fill_forward:
+                grid = self.hours.bar_times(day0, day1, self.interval)
+                grid = grid[(grid >= lo_ns) & (grid <= hi_ns)]
+                extra = ns2num(grid)
+        else:
+            from .calendars import SessionTable
+
+            empty = np.empty(0, dtype=np.int64)
+            self.sessions = SessionTable(np.empty(0, dtype="datetime64[D]"), empty, empty)
+        if self.interval is not None:
+            _interval_ns(self.interval)   # validate early
+        UnionClock.__init__(self, dtnums, actions=actions, universe=universe, extra_times=extra)
+        table = self.sessions
+        if self.daily:
+            days = self.times_ns.astype("datetime64[ns]").astype("datetime64[D]")
+            index = np.searchsorted(table.days, days, side="right") - 1
+        else:
+            index = np.searchsorted(table.opens, self.times_ns, side="right") - 1
+        self.session_index = index.astype(np.int64)
+        ok = index >= 0
+        closes = np.where(ok, table.closes[np.clip(index, 0, None)] if len(table) else 0, 0)
+        self.in_session = ok & (self.daily | (self.times_ns <= closes))
+        self._bound = True
+        return self
+
+    def session_at(self, position: int) -> int:
+        """The index in ``sessions`` of the session slice ``position`` belongs to (the last
+        one opened at or before it; -1 before the first)."""
+        return int(self.session_index[position])
+
+    def local_time(self, position: int):
+        """The slice's time on the place's wall clock (a naive datetime); for daily bars,
+        the bar's date at midnight, as the default clock gives it."""
+        ns = int(self.times_ns[position])
+        if self.daily:
+            from .dateutils import num2date
+
+            return num2date(float(self.times[position]))
+        return self.hours.local(ns)
+
+    def __iter__(self) -> Iterator[TimeSlice]:
+        if not self._bound:
+            raise RuntimeError("ExchangeClock.bind(dtnums) must run before iterating")
+        return UnionClock.__iter__(self)

@@ -17,3 +17,7 @@ Copyright QuantConnect Corporation, Apache License 2.0):
   ISettlementModel, IShortableProvider, IMarginInterestRateModel, ISecurityPortfolioModel,
   SecurityChanges and SecurityExchangeHours, and the phase order of its
   AlgorithmManager time loop. The Python interfaces are Tradewind's own.
+* src/tradewind/calendars.py and clock.ExchangeClock follow the shape of Lean's
+  MarketHoursDatabase / SecurityExchangeHours (per exchange: time zone, weekly sessions,
+  holidays, early closes) and its fill-forward of minute slices. The holiday rules and
+  the code are Tradewind's own, written from the exchanges' published rules.
