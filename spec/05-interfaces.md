@@ -850,3 +850,98 @@ idle 0.152-0.157 vs 0.153-0.160 µs, rebalance 0.582-0.590 vs 0.591-0.599 µs; 2
 dividends on the pay date; a pattern-day-trader rule; Lean's per-security cash buying power
 for foreign securities (a foreign purchase under the compat buying-power model compares a
 quote-currency cost with account-currency cash: use `MarginAccount` or `CashAccount`).
+
+## 14. As built, chantier 4: universes and corporate actions (2026-11-15)
+
+**Universe (§ 6.2).** `universe.py`: `MembershipUniverse(table, date=, symbol=, rank=, top=,
+tolerance=, lag=)` -- dated snapshots, one row per member and date (the layout of PWB's
+`Stocks-Daily-LiquidUniverse`; a date's members hold until the next date, `tolerance`
+empties a stale snapshot, `lag` delays every date) -- and `IntervalUniverse(table, symbol=,
+start=, end=)` -- one window per row (listing and delisting dates). Both implement
+`UniverseProvider.change(time)` and gain `bind(securities)` (the engine calls it when the
+run starts: symbols are matched to the feeds by name, the others listed in `unresolved`),
+`managed` (the SecurityIds the table names), `members` and `is_member(data)`.
+`Engine.set_universe(provider, on_removal="keep" | "liquidate", gate=False)`:
+
+* phase 1 marks each security `in_universe` (a new `Security` flag; a removed security is
+  **not** delisted, it may come back) and publishes a `UniverseEvent`;
+* phase 12: a strategy defining `notify_universe(change)` (opt-in, Lean's
+  `OnSecuritiesChanged`) gets the `UniverseChange` of the `UniverseEvent` (SecurityIds;
+  `universe.feeds(strategy, ids)` maps them to feeds) -- the same delivery as the typed API
+  of #20, whose host turns it into `on_universe_change(SecurityChanges)`;
+* `on_removal="liquidate"`: after the strategy step of the slice that removed it, a market
+  order closes the position of each removed security still out and not delisted, unless an
+  order on it was placed in that slice -- it joins the bar's batch and fills at the next
+  open (no look-ahead: a membership dated *d* never trades before *d*'s next bar);
+* `gate=False`: the managed feeds do not hold `next` in `prenext` (their `_tw_gate` is
+  lowered for the run and restored after); feeds the table never names keep the observed
+  rule.
+
+The engine still cannot add feeds during a run: a feed per symbol ever in the universe,
+added before `run()`. Pruning inactive feeds from the per-slice work (the speed lever of
+§ 6.2) is not done.
+
+**Corporate actions (§ 5.8).** `models.py`: `Delisting` gains `liquidate` (None: the model's
+policy) and `haircut`; `OracleCorporateActions(delisting=, dividends="ex_date" | "pay_date")`.
+A split also rescales the open trade; a liquidating delisting ends the open orders on the
+security (accepted: cancelled; awaiting acceptance: expired), books the realised P&L with the
+contract multiplier and closes the trade through `broker._tw_close_trade` (`notify_trade`
+and `TradeAnalyzer` see it). `dividends="pay_date"`: the entitlement fixed on the ex-date is
+a receivable (`broker.receivables()`), added to the phase-8 mark, credited through the
+settlement model at phase 3 of the first slice at or after the pay time. Both paths are
+guarded (`if self._tw_receivables`), as is everything else here: nothing runs without a
+provider.
+
+**Normalization** (Lean `DataNormalizationMode`): `Engine.adddata(..., normalization=)` /
+`set_normalization`, read as `security.normalization`, one of `models.NORMALIZATIONS`:
+`"raw"` (splits scale the position, dividends pay), `"split_adjusted"` (dividends only),
+`"adjusted"` (neither); `None`, undeclared, applies every action (the behaviour of #19's
+`split_actions`). Delistings and symbol changes apply in every mode. Recorded in the
+fingerprint's feed entry when declared.
+
+**Provider from symbol tables.** `corporate.py`: `split_table`, `dividend_table`,
+`delisting_table`, `symbol_change_table` (PWB's layouts, idempotent) and
+`SymbolCorporateActions(splits=, dividends=, delistings=, symbol_changes=, tz=, liquidate=True,
+haircut=0.0, grace="7D", delist_ended=False)`, bound at run start like the universe. A split
+or a dividend lands on the feed's first bar on or after its ex-date (never on a slice where
+the feed has no bar: the position would be rescaled against a stale price), dropped before
+the feed's second bar or after its last; trading days are UTC dates for daily feeds
+(stamped at midnight) and days in `tz` for end-stamped intraday bars. A delisting lands on
+the first slice on or after its date and after the feed's last bar; a feed still trading
+more than `grace` after the date is taken for a reused ticker and set aside (`conflicts`).
+The dividend per share is the cash amount on raw prices, the split-adjusted amount (or
+cash ÷ later split ratios) otherwise. `load_hub_table` reads a Parquet dataset on the Hub
+with the year or month shards, the columns, the symbols and the window pushed down
+(`huggingface_hub`, `pyarrow`: not dependencies); `pwb_corporate_actions` and
+`pwb_liquid_universe` wrap it. The fingerprint's broker entry gains `corporate_actions` and
+`universe` (class, parameters, SHA-256 of the tables) when they are set.
+
+**Unchanged by default.** `tools/nav_parity.py` against `main` (#16-#19): 50 runs, 7 800
+marks, 5 007 orders, identical bit for bit; the tests of `main` pass under pandas 2.3 and
+3.1; speed on 1 000 names × 756 bars unchanged (idle 0.097 vs 0.099 µs, rebalance 0.524
+vs 0.539 µs per security-bar, noise). The live path builds its own clock and does not bind
+providers: a universe or a corporate-action provider is a backtest feature for now.
+
+**Checked on PWB's data** (data host, 2026-11-15, bounded reads): the split, dividend and
+listing tables of AAPL, NVDA, YHOO, AET, TWTR for 2017-2024 in 2.3 s and 284 MB (AAPL 4:1 on
+2020-08-31, NVDA 10:1 on 2024-06-10, AAPL's $0.82 ex 2020-08-07 paid 2020-08-13, YHOO
+delisted 2017-06-26); the 2017 top-100 liquid universe (25 100 member rows, 142 symbols)
+with `Stocks-Daily-Price` (35 157 rows) and its corporate actions under `"adjusted"`: read
+in 7 s, run in 0.13 s, 345 MB; YHOO leaves on 2017-06-19, is delisted on 2017-06-26 at its
+2017-06-16 close; AABA enters on 2017-07-17; one dividend dropped (ORCL ex 2017-01-03, the
+first bar of the window).
+
+**Limits of the data** (`docs/universe-and-corporate-actions.md`): no ticker-change table
+in PWB (prices are filed under the current symbol); `Stocks-Daily-Price` mixes back-adjusted
+and raw series, so a run on it declares `"adjusted"` and gets delistings only; ListingStatus
+lags recent takeovers; the liquid universe is a liquidity screen from 2003-10, with names
+crossing the cut often.
+
+### Questions for Édouard
+
+1. **Default policy at removal.** `"keep"` (proposed: the strategy decides, as Lean leaves
+   holdings of removed securities alone) or `"liquidate"`?
+2. **Delisting price.** The last close (proposed), or a default haircut (−30 % for
+   performance delistings, Shumway 1997) in the realistic profile?
+3. **Dividends.** Ex-date cash stays the default (decision Q2); the pay-date receivable is
+   opt-in. Should `ModelSet.realistic()` take `pay_date`?

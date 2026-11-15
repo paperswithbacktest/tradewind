@@ -527,11 +527,23 @@ class Dividend:
 class Delisting:
     security: SecurityId
     time: Timestamp
-    last_price: float | None = None
+    last_price: float | None = None     # None: the security's last close
+    liquidate: bool | None = None       # None: the model's policy ("carry" by default)
+    haircut: float = 0.0                # fraction of the price lost at the delisting (0.3: -30 %)
     rank = 3
 
 
 CorporateAction = Split | Dividend | SymbolChange | Delisting
+
+#: How a feed's prices treat corporate actions (Lean ``DataNormalizationMode``), declared per
+#: feed with ``Engine.adddata(..., normalization=...)``. It decides which actions move the
+#: holdings: on ``"raw"`` prices a split scales the position and a dividend pays cash; on
+#: ``"split_adjusted"`` prices the split is already in the series (only the dividend pays);
+#: on ``"adjusted"`` prices (splits and dividends back-adjusted, a total-return series) both
+#: are in the series and neither moves the holdings. ``None`` (undeclared) applies every
+#: action, as a feed carrying events always did. Delistings and symbol changes apply in every
+#: mode.
+NORMALIZATIONS = ("raw", "split_adjusted", "adjusted")
 
 
 @runtime_checkable
@@ -580,24 +592,37 @@ class OracleCorporateActions:
     * dividend: cash per share × quantity credited on the ex-date through the security's
       settlement model;
     * delisting: ``"carry"`` (the oracle: the position stays, marked at its last close) or
-      ``"liquidate"`` (sold at ``last_price`` or the last close, without fee).
+      ``"liquidate"`` (sold at ``last_price`` or the last close, less the action's
+      ``haircut``, without fee; open orders on it end; the trade closes); an action's own
+      ``liquidate`` overrides the policy.
+
+    ``dividends="pay_date"`` credits the cash on the dividend's ``pay_time`` instead of the
+    ex-date: the entitlement is fixed on the ex-date and carried as a receivable, counted in
+    the portfolio value, until it is paid (a dividend without ``pay_time`` pays on the
+    ex-date). The feed's declared normalization (``NORMALIZATIONS``) decides whether a split
+    or a dividend moves the holdings at all.
     """
 
-    __slots__ = ("delisting",)
+    __slots__ = ("delisting", "dividends")
 
-    def __init__(self, delisting: str = "carry"):
+    def __init__(self, delisting: str = "carry", dividends: str = "ex_date"):
         if delisting not in ("carry", "liquidate"):
             raise ValueError("delisting policy is 'carry' or 'liquidate'")
+        if dividends not in ("ex_date", "pay_date"):
+            raise ValueError("dividends are paid on the 'ex_date' or the 'pay_date'")
         self.delisting = delisting
+        self.dividends = dividends
 
     def apply(self, action, broker) -> None:
         security = broker.securities[action.security]
         if isinstance(action, SymbolChange):
             security.symbol = action.new
         elif isinstance(action, Split):
-            self._split(security, action.ratio, broker)
+            if security.normalization in (None, "raw"):
+                self._split(security, action.ratio, broker)
         elif isinstance(action, Dividend):
-            self._dividend(security, action, broker)
+            if security.normalization != "adjusted":
+                self._dividend(security, action, broker)
         elif isinstance(action, Delisting):
             self._delist(security, action, broker)
         elif hasattr(action, "apply_to"):
@@ -621,29 +646,53 @@ class OracleCorporateActions:
                 order.price = order.price / ratio
             if order.pricelimit is not None:
                 order.pricelimit = order.plimit = order.pricelimit / ratio
+        # the open trade counts the same holding in new shares: size x r, price / r
+        trade = broker.trades.get(security.feed)
+        if trade is not None and trade.isopen:
+            trade.size = trade.size * ratio
+            trade.price = trade.price / ratio
 
-    @staticmethod
-    def _dividend(security, action, broker) -> None:
+    def _dividend(self, security, action, broker) -> None:
         pos = broker.getposition(security.feed)
         if not pos.size:
             return
         amount = pos.size * action.amount * security.properties.contract_multiplier
-        security.models.settlement.apply_funds(security, CashAmount(amount, security.properties.quote_currency),
-                                               action.time, broker.cashbook)
+        currency = security.properties.quote_currency
         broker.portfolio.total_dividends[security.id] += amount
+        if self.dividends == "pay_date" and action.pay_time is not None and action.pay_time > action.time:
+            broker._tw_receive(int(action.pay_time), CashAmount(amount, currency), security)
+            return
+        security.models.settlement.apply_funds(security, CashAmount(amount, currency), action.time,
+                                               broker.cashbook)
 
     def _delist(self, security, action, broker) -> None:
         security._delisted = True
-        if self.delisting == "carry":
+        liquidate = action.liquidate if action.liquidate is not None else self.delisting == "liquidate"
+        if not liquidate:
             return
-        pos = broker.getposition(security.feed)
-        if not pos.size:
+        feed = security.feed
+        # orders left on the security end: an accepted one is cancelled, one still waiting
+        # for its batch acceptance expires (there is no market left to fill it)
+        for order in list(broker.pending):
+            if order.data is feed:
+                broker.cancel(order)
+        for order in list(broker.submitted):
+            if order.data is feed:
+                broker.submitted.remove(order)
+                order.expire()
+                broker.notify(order)
+        pos = broker.getposition(feed)
+        q = pos.size
+        if not q:
             return
         price = action.last_price if action.last_price is not None else security.price
-        broker.cashbook.add(security.properties.quote_currency,
-                            pos.size * price * security.properties.contract_multiplier)
-        broker.portfolio.realized_pnl[security.id] += (price - pos.price) * pos.size
-        pos.set(0.0, 0.0)
+        price = price * (1.0 - action.haircut)
+        m = security.properties.contract_multiplier
+        pnl = (price - pos.price) * q * m
+        broker.cashbook.add(security.properties.quote_currency, q * price * m)
+        broker.portfolio.realized_pnl[security.id] += pnl
+        pos.set(0, 0.0)
+        broker._tw_close_trade(feed, -q, price, pnl)
 
 
 # -- the bundle -----------------------------------------------------------------------------
@@ -697,6 +746,7 @@ class ModelSet:
 
 
 __all__ = [
+    "NORMALIZATIONS",
     "AlwaysShortable", "BatchState", "BuyingPowerCheck", "BuyingPowerModel", "CombinedActions",
     "CommInfoFeeModel",
     "CompatCashBuyingPower", "CompatSlippage", "CorporateAction", "CorporateActionModel",

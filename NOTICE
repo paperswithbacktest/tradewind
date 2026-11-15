@@ -49,3 +49,8 @@ only by tradewind.live.ibkr when it connects.
   CashBuyingPowerModel; DelayedSettlementModel; MarginCallModel; a CashBook whose balances
   are converted at rates from forex securities. The rules (Reg T margins, settlement
   periods) are the regulators' published ones; the code is Tradewind's own.
+* src/tradewind/universe.py, src/tradewind/corporate.py and the corporate-action model of
+  src/tradewind/models.py follow the concepts of Lean's SecurityChanges and
+  OnSecuritiesChanged (securities added to and removed from a universe), its Split,
+  Dividend, Delisting and SymbolChangedEvent data events, and its DataNormalizationMode
+  (raw, split-adjusted and adjusted prices). The code is Tradewind's own.

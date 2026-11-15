@@ -5,7 +5,17 @@ of the repository: the engine is written from the public API contract and from
 black-box tests, and no third-party engine source is ever consulted.
 """
 
-from . import analyzers, calendars, consolidators, indicators, intraday, metrics, options
+from . import (
+    analyzers,
+    calendars,
+    consolidators,
+    corporate,
+    indicators,
+    intraday,
+    metrics,
+    options,
+    universe,
+)
 from .analyzer import Analyzer, TimeReturn
 from .broker import BackBroker, BrokerBase, SimulatedBroker
 from .calendars import ExchangeCalendar
@@ -94,6 +104,7 @@ __all__ = [
     "analyzers",
     "calendars",
     "consolidators",
+    "corporate",
     "date2num",
     "feeds",
     "ind",
@@ -103,4 +114,5 @@ __all__ = [
     "num2date",
     "num2dt",
     "options",
+    "universe",
 ]
