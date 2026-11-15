@@ -9,7 +9,7 @@ container, on data you load yourself.
 
 | Lean | Tradewind | notes |
 |---|---|---|
-| `QCAlgorithm` | `tw.Strategy` | |
+| `QCAlgorithm` | `tw.Strategy`, or `tw.TypedStrategy` for typed code | the [Typed API](typed-api.md) has its own Lean table |
 | `Initialize()` | `__init__()` and `start()` | data is added outside the strategy, on the `Engine` |
 | `OnData(slice)` | `next()` | one call per slice of the clock; read bars through the feeds, not a `Slice` object |
 | `OnWarmupFinished`, `SetWarmUp` | `nextstart()`; warm-up is implicit | `next()` waits for every indicator's minimum period |
@@ -37,7 +37,7 @@ container, on data you load yourself.
 | `IMarginInterestRateModel` | `MarginInterestRateModel` | default: none |
 | `security.SetFeeModel(...)` | `engine.broker.set_models(data, fee=...)` | any of the eight, per security |
 | `CashBook` | `broker.cashbook` | single currency for now |
-| Universe selection, `OnSecuritiesChanged` | `UniverseProvider` (interface only) | planned |
+| Universe selection | `UniverseProvider` (interface only) | planned |
 | `MarketHoursDatabase`, time zones | `tw.calendars` (NYSE, NASDAQ, CME, CRYPTO), `ExchangeClock` | opt-in; the default clock is the union of the feeds' dates |
 | Splits, dividends, delistings | `CorporateActionProvider`; `tw.intraday.split_actions` for splits on unadjusted minute prices | the engine applies them at phase 3, before fills |
 | `TradeBarConsolidator`, `Consolidate(symbol, timedelta(minutes=5), handler)` | `engine.consolidate(data, "5min", hours="NYSE")` (or `tz=..., session=...`); `tw.consolidators.TimeBarConsolidator` bar by bar | a consolidated feed, stamped at its bin end; see [Intraday data](intraday.md) |
@@ -45,6 +45,8 @@ container, on data you load yourself.
 | `OptionChain`, `contract.Greeks`, `ImpliedVolatility` | `OptionChain`, `with_greeks()`, `tw.options.bsm_greeks` / `implied_volatility` | European Black-Scholes-Merton |
 | Option exercise and assignment | `OptionExpiry`, at phase 3 after the expiry date | in the money by 0.01: exercised (long) or assigned (short); physical or cash |
 | Futures chains | not yet | |
+| Backtest statistics (Sharpe, Sortino, PSR, alpha, beta, drawdown, turnover, capacity) | `tw.analyzers.Performance` | Sharpe as the PWB catalogue computes it; capacity by Tradewind's own method ([Analyzers](analyzers.md#performance)) |
+| `OnSecuritiesChanged` | `on_universe_change` (typed API), `notify_universe(change)` (opt-in) | |
 | Alpha / Portfolio construction / Execution / Risk framework | not planned for now | write it in the strategy |
 | Live brokerages | not yet | the interfaces (`Broker`, `DataFeed`) are designed for it |
 

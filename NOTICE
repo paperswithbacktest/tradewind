@@ -35,3 +35,11 @@ only by tradewind.live.ibkr when it connects.
   OptionFilterUniverse (Strikes, Expiration, CallsOnly, PutsOnly, FrontMonth), its
   Black-Scholes price model and the exercise of options at expiry. The code and the
   formulas (from their textbook definitions) are Tradewind's own.
+* spec/08-typed-api-and-analyzers.md, src/tradewind/typed.py and src/tradewind/performance.py
+  follow the shape of Lean's QCAlgorithm (Initialize, OnData, OnOrderEvent,
+  OnSecuritiesChanged, OnEndOfAlgorithm, SetHoldings, Liquidate, IsWarmingUp, Schedule.On)
+  and the list of statistics of its backtest report (Sharpe and Sortino ratios,
+  probabilistic Sharpe ratio, alpha, beta, drawdown, portfolio turnover, estimated strategy
+  capacity). The Python classes, the formulas (the Papers With Backtest catalogue's, and
+  Bailey and López de Prado's for the probabilistic Sharpe ratio) and the capacity method
+  are Tradewind's own.

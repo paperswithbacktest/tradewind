@@ -5,7 +5,7 @@ of the repository: the engine is written from the public API contract and from
 black-box tests, and no third-party engine source is ever consulted.
 """
 
-from . import analyzers, calendars, consolidators, indicators, intraday, options
+from . import analyzers, calendars, consolidators, indicators, intraday, metrics, options
 from .analyzer import Analyzer, TimeReturn
 from .broker import BackBroker, BrokerBase, SimulatedBroker
 from .calendars import ExchangeCalendar
@@ -24,6 +24,21 @@ from .position import Position
 from .strategy import Strategy
 from .timer import Timer
 from .trade import Trade
+from .typed import (
+    BarEvent,
+    BarSeries,
+    Fill,
+    Holding,
+    NoParams,
+    OrderStatus,
+    OrderTicket,
+    OrderUpdate,
+    Portfolio,
+    SecurityChanges,
+    Series,
+    TimerEvent,
+    TypedStrategy,
+)
 
 ind = indicators  # backtrader's short alias
 
@@ -33,6 +48,8 @@ __all__ = [
     "AlwaysOpen",
     "Analyzer",
     "BackBroker",
+    "BarEvent",
+    "BarSeries",
     "BrokerBase",
     "BuyOrder",
     "Cerebro",
@@ -42,6 +59,8 @@ __all__ = [
     "Engine",
     "ExchangeCalendar",
     "ExchangeClock",
+    "Fill",
+    "Holding",
     "If",
     "Indicator",
     "LineBuffer",
@@ -50,17 +69,26 @@ __all__ = [
     "Lines",
     "LinesOperation",
     "ModelSet",
+    "NoParams",
     "Order",
+    "OrderStatus",
+    "OrderTicket",
+    "OrderUpdate",
     "PandasData",
+    "Portfolio",
     "Position",
     "RunFingerprint",
+    "SecurityChanges",
     "SellOrder",
+    "Series",
     "SimulatedBroker",
     "Strategy",
     "TimeFrame",
     "TimeReturn",
     "Timer",
+    "TimerEvent",
     "Trade",
+    "TypedStrategy",
     "UnionClock",
     "__version__",
     "analyzers",
@@ -71,6 +99,7 @@ __all__ = [
     "ind",
     "indicators",
     "intraday",
+    "metrics",
     "num2date",
     "num2dt",
     "options",

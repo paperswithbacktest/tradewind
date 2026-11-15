@@ -343,18 +343,28 @@ class Engine(ParamsBase):
                 if hook is not None:
                     hook(event.action)
 
+        def deliver_universe(event):
+            # opt-in (spec/05 § 10, Q6): ``notify_universe(change)`` on the strategies that
+            # define it; the compatible contract has no such method
+            for strat in strategies:
+                hook = getattr(strat, "notify_universe", None)
+                if hook is not None:
+                    hook(event.change)
+
         bus.subscribe(OrderEvent, deliver_order)
         bus.subscribe(TradeEvent, deliver_trade)
         bus.subscribe(CorporateActionEvent, deliver_action)
-        self._tw_bus_handlers = (deliver_order, deliver_trade, quiet, deliver_action)
+        bus.subscribe(UniverseEvent, deliver_universe)
+        self._tw_bus_handlers = (deliver_order, deliver_trade, quiet, deliver_action, deliver_universe)
         return clock, market, strategies
 
     def _tw_release_bus(self):
-        deliver_order, deliver_trade, quiet, deliver_action = self._tw_bus_handlers
+        deliver_order, deliver_trade, quiet, deliver_action, deliver_universe = self._tw_bus_handlers
         broker = self._broker
         broker.bus.unsubscribe(OrderEvent, deliver_order)
         broker.bus.unsubscribe(TradeEvent, deliver_trade)
         broker.bus.unsubscribe(CorporateActionEvent, deliver_action)
+        broker.bus.unsubscribe(UniverseEvent, deliver_universe)
         if quiet:
             broker._tw_quiet_orders = broker._tw_quiet_trades = False
 
@@ -486,6 +496,11 @@ class Engine(ParamsBase):
             (owner if owner is not None else strat)._tw_notify(item)
 
     def _build_strategy(self, cls, args, skwargs):
+        from .typed import is_typed_strategy
+
+        if is_typed_strategy(cls):
+            # a typed strategy runs inside a compatible host strategy: same engine, same path
+            cls = cls._tw_host_class()
         env = self
         datas = list(self.datas)
         broker = self._broker

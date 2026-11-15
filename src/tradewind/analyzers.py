@@ -17,7 +17,8 @@ import sys
 from .analyzer import Analyzer, TimeReturn
 from .feeds import TimeFrame
 
-__all__ = ["Analyzer", "AutoOrderedDict", "DrawDown", "SharpeRatio", "TimeReturn", "TradeAnalyzer"]
+__all__ = ["Analyzer", "AutoOrderedDict", "DrawDown", "Performance", "PerformanceReport", "SharpeRatio",
+           "TimeReturn", "TradeAnalyzer"]
 
 
 class AutoOrderedDict(collections.OrderedDict):
@@ -291,3 +292,7 @@ class SharpeRatio(Analyzer):
         # observed on the oracle: a plain OrderedDict here (``["sharperatio"]``, no
         # attribute access), where TradeAnalyzer and DrawDown return attribute dicts
         self.rets = collections.OrderedDict(sharperatio=ratio)
+
+
+# Tradewind's own (spec/08): imported last, it builds on ``AutoOrderedDict`` above
+from .performance import Performance, PerformanceReport
