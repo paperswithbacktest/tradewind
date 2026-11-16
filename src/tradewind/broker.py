@@ -20,6 +20,7 @@ Notifications are events on the broker's ``EventBus``, delivered at phase 12.
 from __future__ import annotations
 
 import collections
+import math
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
@@ -127,12 +128,14 @@ def _mark_terms(comminfo, pos, price):
     Shorts count ``size * close`` too (101 of 106 marks on a corpus long/short book,
     against 89 for entry value then P&L). The positions are taken in the order they were
     first touched (fewer last-bit differences on the corpus than the feeds' order).
-    A scheme with its own ``getvalue`` gives one term."""
+    A scheme with its own ``getvalue`` gives one term. At a close of zero or below, the
+    leveraged long counts ``size * close`` like any other (probe ``levered_negative_close``;
+    corpus ``the_best_defensive_strategies…`` on 2020-04-20, crude oil at -37.63)."""
     if not _plain_comminfo(comminfo):
         return (comminfo.getvalue(pos, price), 0.0)
     size, entry = pos.size, pos.price
     lev = comminfo.get_leverage()
-    if size < 0 or lev == 1.0:
+    if size < 0 or lev == 1.0 or not price > 0.0:
         return (size * price, 0.0)
     return (size * entry / lev, comminfo.profitandloss(size, entry, price))
 
@@ -420,13 +423,24 @@ class BackBroker(BrokerBase):
     def set_coo(self, coo):
         self._coo = bool(coo)
 
+    # Observed on the oracle (probes ``slippage_*``): the flags passed here replace the
+    # broker's, ``slip_open`` included -- called with the amount alone, a market order
+    # filled at the open slips (corpus ``the_profitability_of_technical_analysis…``,
+    # ``price_overreactions_in_the_cryptocurrency_market``)
     def set_slippage_perc(self, perc, slip_open=True, slip_limit=True, slip_match=True, slip_out=False):
         slip = self._compat_slippage()
         slip.perc, slip.fixed = float(perc), 0.0
+        self._compat_slip_flags(slip, slip_open, slip_limit, slip_match, slip_out)
 
     def set_slippage_fixed(self, fixed, slip_open=True, slip_limit=True, slip_match=True, slip_out=False):
         slip = self._compat_slippage()
         slip.fixed, slip.perc = float(fixed), 0.0
+        self._compat_slip_flags(slip, slip_open, slip_limit, slip_match, slip_out)
+
+    @staticmethod
+    def _compat_slip_flags(slip, slip_open, slip_limit, slip_match, slip_out):
+        slip.slip_open, slip.slip_limit = bool(slip_open), bool(slip_limit)
+        slip.slip_match, slip.slip_out = bool(slip_match), bool(slip_out)
 
     def _compat_slippage(self):
         slip = self.models.slippage
@@ -550,7 +564,7 @@ class BackBroker(BrokerBase):
         avg = pf.average_price[ids]
         # the entry value then the open P&L of each position (``_mark_terms``), the same
         # float operations element by element
-        levered = (q > 0) & (lev != 1.0)
+        levered = (q > 0) & (lev != 1.0) & (price > 0.0)   # at a close <= 0: size x close
         entry = np.where(levered, q * avg / lev, q * price)
         pnl = np.where(levered, q * (price - avg) * mult, 0.0)
         if scalar_idx:
@@ -935,11 +949,14 @@ class BackBroker(BrokerBase):
                     and not fill_model.coc):
                 # the oracle default on a plain market order: never expires, fills whole at
                 # this bar's open moved by the slippage model -- what ``fill`` computes,
-                # without building the bar and the parameters
-                proposal = FillProposal(order.size, slipped(models.slippage, security, order, data.open[0], True))
-                if self._execute(security, order, proposal, self._dtnum):
-                    remaining.append(order)
-                continue
+                # without building the bar and the parameters (a slipped open takes the
+                # general path, which holds it inside the bar)
+                o = data.open[0]
+                price = slipped(models.slippage, security, order, o, True)
+                if price == o or math.isnan(price):
+                    if self._execute(security, order, FillProposal(order.size, price), self._dtnum):
+                        remaining.append(order)
+                    continue
             bar = Bar(self._dtnum, data.open[0], data.high[0], data.low[0], data.close[0], data.volume[0])
             if fill_model.expired(order, bar):
                 order.expire()

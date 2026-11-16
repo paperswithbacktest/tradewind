@@ -113,6 +113,41 @@ def slipped(slippage: SlippageModel, security, order, price: float, at_open: boo
     return price + adj if order.isbuy() else price - adj
 
 
+def slipped_in_bar(slippage: SlippageModel, security, order, price: float, at_open: bool,
+                   bar: Bar) -> float | None:
+    """``slipped``, then held inside the bar and the order's limit as the compat broker's
+    flags say; None: no match at this bar (the order waits).
+
+    Observed on the oracle (probes ``slippage_*``): unless ``slip_out``, a slipped price
+    beyond the bar's high or low, or beyond a limit order's own price, is brought back to
+    it when ``slip_match`` (or, for a limit order, ``slip_limit``) is set, and otherwise
+    the order is not matched at this bar; with ``slip_out`` the slipped price stands, even
+    past a limit. A price the model did not move is left alone."""
+    p = slipped(slippage, security, order, price, at_open)
+    if p == price or not isinstance(slippage, CompatSlippage) or slippage.slip_out:
+        return p
+    is_limit = order.exectype == _LIMIT
+    give = slippage.slip_match or (is_limit and slippage.slip_limit)
+    if is_limit:
+        lim = order.price
+        if (p > lim) if order.isbuy() else (p < lim):
+            if not give:
+                return None
+            p = lim
+    if p > bar.high:
+        if not give:
+            return None
+        p = bar.high
+    elif p < bar.low and not is_limit:
+        # (a limit order is held below the high only: a sell limit slipped under the
+        # bar's low fills there, at or above its limit -- probes ``slippage_perc``,
+        # ``slippage_fixed``, ``slippage_strict``)
+        if not give:
+            return None
+        p = bar.low
+    return p
+
+
 # -- 5.3 fills ------------------------------------------------------------------------------
 
 
@@ -171,27 +206,30 @@ class NextBarFillModel:
         o, h, lo, c = bar.open, bar.high, bar.low, bar.close
         et = order.exectype
         if et == _MARKET:
-            return slipped(slippage, security, order, o, True)
+            return slipped_in_bar(slippage, security, order, o, True, bar)
         if et == _CLOSE:
             return c
         if et == _LIMIT:
+            # a limit reached through the bar fills at its price, never slipped; one the
+            # open already satisfies fills at the open, slipped like a market order
+            # (probes ``slippage_*``)
             lim = order.price
             if order.isbuy():
                 if o <= lim:
-                    return o
+                    return slipped_in_bar(slippage, security, order, o, True, bar)
                 return lim if lo <= lim else None
             if o >= lim:
-                return o
+                return slipped_in_bar(slippage, security, order, o, True, bar)
             return lim if h >= lim else None
         if et == _STOP:
             stp = order.price
             if order.isbuy():
                 if o >= stp:
-                    return slipped(slippage, security, order, o, True)
-                return slipped(slippage, security, order, stp, False) if h >= stp else None
+                    return slipped_in_bar(slippage, security, order, o, True, bar)
+                return slipped_in_bar(slippage, security, order, stp, False, bar) if h >= stp else None
             if o <= stp:
-                return slipped(slippage, security, order, o, True)
-            return slipped(slippage, security, order, stp, False) if lo <= stp else None
+                return slipped_in_bar(slippage, security, order, o, True, bar)
+            return slipped_in_bar(slippage, security, order, stp, False, bar) if lo <= stp else None
         if et == _STOPLIMIT:
             stp, lim = order.price, order.pricelimit
             if not order.triggered:
