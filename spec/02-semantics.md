@@ -129,6 +129,37 @@ Nine names the same report shows **guarded** (`set_cashinterest`, `setslippage_p
 `get_latest_weights`, `get_market_cap`) are absent from the oracle too (checked with
 `hasattr` on live oracle objects): the guarded branch runs on both engines, nothing to add.
 
+### Parity 0.1.51 (2026-11-16)
+
+Grand remeasure on pwb-toolbox 0.1.51 (both environments aligned on 2026-11-15): 11
+divergences and 2 errors of Tradewind `d1731cd` among 850 strategies. Order logs of both
+engines through `tools/run_corpus_strategy.py --fills`, corpus strategy copies instrumented
+in the strategy itself, per-bar marks dumped from both engines; probes in
+`tests/oracle/strategies.py` (`slippage_perc`, `slippage_no_open`, `slippage_out`,
+`slippage_no_limit`, `slippage_no_match`, `slippage_strict`, `slippage_fixed`,
+`slippage_fixed_out`, `order_identity`, `indicator_owner`, `self_bound_lines`,
+`levered_negative_close`); the public documentation of the slippage parameters
+(`slip_open`, `slip_match`, `slip_limit`, `slip_out`):
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| `set_slippage_perc(p)` / `set_slippage_fixed(f)` **set the four flags too**, with their own defaults (`slip_open` true): called with the amount alone, a market order filled at the open slips. The broker's default before any call keeps `slip_open` false | kept | probes `slippage_*`; corpus `the_profitability_of_technical_analysis…`, `price_overreactions_in_the_cryptocurrency_market` (Tradewind kept the flags of its default and never slipped the open) |
+| A slipped price is **held inside the bar**: beyond the high (or under the low) it becomes the high (low) when `slip_match`, and otherwise the order is **not matched at this bar** and waits; `slip_out` lets it stand. Market orders, stops (at the open or at the stop price) alike | kept | probes `slippage_perc`, `slippage_no_match`, `slippage_out`, `slippage_fixed(_out)` |
+| A limit order reached **through the bar** fills at its price, never slipped (even with `slip_out`); one the **open** satisfies fills at the open slipped like a market order, then brought back to its limit and to the bar's **high only** (a sell limit slipped under the low fills there) when `slip_match` or `slip_limit`, else it waits; with `slip_out` the slipped open stands even past the limit | kept, flagged | probes `slippage_perc`, `slippage_strict`, `slippage_no_limit`, `slippage_fixed`. **The missing low-side bound of a limit order** is an asymmetry of the oracle, reproduced because the reference NAVs embed it |
+| The order a notification carries is a copy, yet **equal** to the one `buy`/`sell` returned: orders compare by reference, so `order in placed` and `placed.remove(order)` inside `notify_order` work. The oracle raises `AttributeError` comparing an order with a non-order and refuses to hash one; Tradewind answers unequal and hashes the reference | kept | probe `order_identity`; corpus `option_implied_currency_risk_premia` (its pending list never emptied on Tradewind: one rebalance, no other order for 36 years) |
+| An indicator's **`_owner`** is the object whose `__init__` built it: the strategy, or the parent indicator for a child | kept | probe `indicator_owner`; corpus `when_to_own_stocks_and_when_to_own_gold` (`AttributeError` on Tradewind) |
+| An indicator may bind a line to an **expression of its own bound lines** (`self.lines.mid = (self.lines.up + self.lines.lo) / 2`): the expression is computed once the lines it reads are bound | kept | probe `self_bound_lines`; corpus `analysis_of_trend_following_systems` (`RecursionError` on Tradewind) |
+| A long under a **leveraged** stock-like scheme counts `size × close` in the marked value, not margin then P&L, when the **close is zero or below** | kept | probe `levered_negative_close`; corpus `the_best_defensive_strategies…` (3x scheme, crude oil at -37.63 on 2020-04-20: one mark 0.8 M apart) |
+
+Seen and **not** reproduced: the last-bit residual of the marked value (spec/02, `cash + t`)
+still differs on about one mark in twenty when a book holds shorts
+(`is_downside_risk_priced_in_cryptocurrency_market`: 166 of 3 180 marks one or two units in
+the last place; no order of the terms and none of the term forms tried fits them all). A
+strategy can amplify it: `analysis_of_the_effect_of_covid…` compares `0.15 / 15` of a value
+one ulp apart with a 1 % threshold and trades 12 more names on 2018-06-29. Two strategies of
+the pass draw from `random` / `np.random` without a seed and are not reproducible on the
+oracle itself (`a_hamiltonian_phase_space_approach…`, `allocation_to_industry_portfolios…`).
+
 ## Clock and bars
 
 | behaviour | kept / corrected | note |

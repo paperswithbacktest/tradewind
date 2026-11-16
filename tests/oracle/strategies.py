@@ -7,6 +7,9 @@ the two runs can be compared line by line. They exercise the Tier 1 and Tier 2 i
 """
 
 
+import math
+
+
 def build(bt):
     class Recorder(bt.Strategy):
         def __init__(self):
@@ -1445,7 +1448,224 @@ def build(bt):
     class BracketBatchUnchecked(BracketBatch):
         params = (("checksubmit", False),)
 
+    class SlippagePerc(Recorder):
+        """``broker.set_slippage_perc`` / ``set_slippage_fixed`` called with only the amount
+        (corpus ``the_profitability_of_technical_analysis…``,
+        ``price_overreactions_in_the_cryptocurrency_market``), then with each flag turned:
+        market orders at the open (buys and sells, a large slip that leaves the bar's range),
+        limit, stop and close orders. The fill prices say which flag moves what."""
+
+        params = (("slip", ("perc", 0.01, {})),)
+
+        def __init__(self):
+            super().__init__()
+            kind, amount, flags = self.p.slip
+            if kind == "perc":
+                self.broker.set_slippage_perc(amount, **flags)
+            else:
+                self.broker.set_slippage_fixed(amount, **flags)
+            self.tw_step = 0
+
+        def next(self):
+            super().next()
+            self.tw_step += 1  # ``next`` starts once S3 has listed
+            n = self.tw_step
+            d0, d1, d2 = self.datas[:3]
+            c0, c1 = d0.close[0], d1.close[0]
+            if n in (2, 9, 16, 30):
+                self.buy(data=d0, size=40)
+                self.sell(data=d1, size=30)
+            if n in (5, 12, 23):
+                self.sell(data=d0, size=40)
+                self.buy(data=d1, size=30)
+            if n == 34:
+                self.buy(data=d2, size=20, exectype=bt.Order.Limit, price=d2.close[0] * 0.995)
+                self.sell(data=d2, size=10, exectype=bt.Order.Limit, price=d2.close[0] * 1.005)
+                self.buy(data=d0, size=15, exectype=bt.Order.Limit, price=c0 * 1.03)   # marketable
+            if n == 40:
+                self.buy(data=d1, size=12, exectype=bt.Order.Stop, price=c1 * 1.004)
+                self.sell(data=d0, size=12, exectype=bt.Order.Stop, price=c0 * 0.996)
+                self.sell(data=d2, size=8, exectype=bt.Order.Stop, price=d2.close[0] * 1.05)  # gapped
+            if n == 50:
+                self.buy(data=d2, size=9, exectype=bt.Order.Close)
+                self.sell(data=d1, size=9, exectype=bt.Order.Close)
+            if n == 60:
+                for d in self.datas:
+                    self.close(data=d)
+            if n in (64, 72):
+                # limits and stops a few bars away: filled through the bar, not at the open
+                for k, d in enumerate(self.datas[:3]):
+                    c = d.close[0]
+                    self.buy(data=d, size=5 + k, exectype=bt.Order.Limit, price=c * (0.992 - 0.002 * k))
+                    self.sell(data=d, size=5 + k, exectype=bt.Order.Limit, price=c * (1.008 + 0.002 * k))
+                    self.buy(data=d, size=3 + k, exectype=bt.Order.Stop, price=c * (1.004 + 0.002 * k))
+                    self.sell(data=d, size=3 + k, exectype=bt.Order.Stop, price=c * (0.996 - 0.002 * k))
+            if n == 82:
+                for d in self.datas:
+                    self.close(data=d)
+
+    class SlippageNoOpen(SlippagePerc):
+        params = (("slip", ("perc", 0.01, {"slip_open": False})),)
+
+    class SlippageOut(SlippagePerc):
+        params = (("slip", ("perc", 0.01, {"slip_out": True})),)
+
+    class SlippageNoLimit(SlippagePerc):
+        params = (("slip", ("perc", 0.01, {"slip_limit": False})),)
+
+    class SlippageNoMatch(SlippagePerc):
+        params = (("slip", ("perc", 0.01, {"slip_match": False})),)
+
+    class SlippageStrict(SlippagePerc):
+        params = (("slip", ("perc", 0.01, {"slip_match": False, "slip_limit": False})),)
+
+    class SlippageFixed(SlippagePerc):
+        params = (("slip", ("fixed", 0.9, {})),)
+
+    class SlippageFixedOut(SlippagePerc):
+        params = (("slip", ("fixed", 0.9, {"slip_out": True, "slip_open": True})),)
+
+    class OrderIdentity(Recorder):
+        """The order a notification carries against the one ``buy`` returned (corpus
+        ``option_implied_currency_risk_premia`` keeps its placed orders in a list and
+        removes them in ``notify_order``): identity, equality, membership."""
+
+        def __init__(self):
+            super().__init__()
+            self.placed = []
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            if not getattr(self, "tw_done", False):
+                self.tw_done = True
+                self.placed.append(self.buy(data=self.datas[0], size=5))
+                self.placed.append(self.sell(data=self.datas[1], size=3))
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            for p in self.placed:
+                self.extra["rows"].append((order.ref - p.ref, order.getstatusname(), order is p, order == p,
+                                           order != p, order in self.placed, self.placed.index(order) if order in self.placed else None))
+            if order.status == order.Completed and order in self.placed:
+                self.placed.remove(order)
+                self.extra["rows"].append(("removed", len(self.placed)))
+
+    class OwnerLine(bt.Indicator):
+        lines = ("x",)
+
+        def __init__(self):
+            self.lines.x = self.data
+            o = self._owner
+            OWNER_SEEN.append(("child", type(o).__name__ == "OwnerHolder"))
+
+    class OwnerHolder(bt.Indicator):
+        lines = ("y",)
+
+        def __init__(self):
+            o = self._owner
+            OWNER_SEEN.append(("indicator", o is BUILDING[-1], o.getdatabyname("S1") is o.datas[1]))
+            self.kid = OwnerLine(self.data)
+            self.lines.y = self.kid.x
+
+    OWNER_SEEN = []
+    BUILDING = []
+
+    class IndicatorOwner(Recorder):
+        """``self._owner`` inside an indicator's ``__init__`` (corpus
+        ``when_to_own_stocks_and_when_to_own_gold`` reaches the strategy's feeds by name
+        through it): the strategy for an indicator it builds, the parent for a child."""
+
+        def __init__(self):
+            super().__init__()
+            BUILDING.append(self)
+            del OWNER_SEEN[:]
+            self.h = OwnerHolder(self.datas[0])
+            self.sma = bt.indicators.SMA(self.datas[1], period=3)
+            self.extra = {"rows": list(OWNER_SEEN) + [("sma", self.sma._owner is self)]}
+
+        def next(self):
+            super().next()
+            self.extra["rows"].append((len(self), round(self.h.y[0], 8)))
+
+    class SelfBound(bt.Indicator):
+        lines = ("upper", "lower", "middle", "spread")
+        params = (("period", 6),)
+
+        def __init__(self):
+            self.addminperiod(self.p.period)
+            self.lines.upper = bt.indicators.Highest(self.data.high, period=self.p.period)
+            self.lines.lower = bt.indicators.Lowest(self.data.low, period=self.p.period)
+            self.lines.middle = (self.lines.upper + self.lines.lower) / 2.0
+            self.lines.spread = self.l.upper - self.lines.middle
+
+    class SelfBoundLines(Recorder):
+        """An indicator binding a line to an expression of its own bound lines (corpus
+        ``analysis_of_trend_following_systems``' Donchian channel, ``RecursionError`` on
+        Tradewind 0.0.2), read from the strategy and through a line built on it."""
+
+        def __init__(self):
+            super().__init__()
+            self.dc = SelfBound(self.datas[0])
+            self.after = (self.dc.middle + self.dc.upper) / 2.0
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            r = lambda x: None if math.isnan(x) else round(x, 9)
+            self.extra["rows"].append((len(self), r(self.dc.upper[0]), r(self.dc.lower[0]), r(self.dc.middle[0]),
+                                       r(self.dc.spread[0]), r(self.after[0]), r(self.dc.middle[-1])))
+            if len(self) % 9 == 0:
+                d = self.datas[0]
+                if d.high[0] >= self.dc.upper[-1]:
+                    self.buy(data=d, size=10)
+                elif self.getposition(d).size:
+                    self.close(data=d)
+
+    class LeveredNegativeClose(Recorder):
+        """A long under a leveraged stock-like scheme marked at a close of zero and below
+        (corpus ``the_best_defensive_strategies…``: crude oil at -37.63 on 2020-04-20, a
+        3x scheme set in place): the marked value against ``size * close``."""
+
+        @staticmethod
+        def oracle_frames(fr):
+            out = dict(fr)
+            f = fr["S0"].copy()
+            k = f.index
+            for i, c in ((40, 5.0), (41, 0.0), (42, -1.0), (43, -37.63), (44, 1e-9), (45, 20.0)):
+                f.loc[k[i], "close"] = c
+                f.loc[k[i], "low"] = min(c, f.loc[k[i], "low"])
+            out["S0"] = f
+            return out
+
+        def __init__(self):
+            super().__init__()
+            self.broker.setcommission(commission=0.0, leverage=3.0)
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            n = len(self)
+            if n == 32:
+                self.buy(data=self.datas[0], size=100)
+                self.sell(data=self.datas[1], size=50)
+                self.buy(data=self.datas[2], size=40)
+            self.extra["rows"].append((n, self.datas[0].close[0], repr(self.broker.getvalue()),
+                                       repr(self.broker.get_value(datas=[self.datas[0]]))))
+
     return {
+        "levered_negative_close": LeveredNegativeClose,
+        "slippage_perc": SlippagePerc,
+        "slippage_no_open": SlippageNoOpen,
+        "slippage_out": SlippageOut,
+        "slippage_no_limit": SlippageNoLimit,
+        "slippage_no_match": SlippageNoMatch,
+        "slippage_strict": SlippageStrict,
+        "slippage_fixed": SlippageFixed,
+        "slippage_fixed_out": SlippageFixedOut,
+        "order_identity": OrderIdentity,
+        "indicator_owner": IndicatorOwner,
+        "self_bound_lines": SelfBoundLines,
         "short_fill_deficit": ShortFillDeficit,
         "short_fill_deficit_checked": ShortFillDeficitChecked,
         "strategy_minperiod": StrategyMinperiod,

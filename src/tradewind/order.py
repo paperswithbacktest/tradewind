@@ -115,6 +115,26 @@ class Order:
         name = getattr(self.data, "_name", "?")
         return f"Order(ref={self.ref}, {side}, {name}, size={self.size}, {self.getordername()}, {self.getstatusname()})"
 
+    # Observed on the oracle (probe ``order_identity``): the order a notification carries
+    # is not the object ``buy``/``sell`` returned, yet the two compare equal -- orders are
+    # equal when their references are, so ``order in self.pending`` and
+    # ``self.pending.remove(order)`` inside ``notify_order`` find the placed order (corpus
+    # ``option_implied_currency_risk_premia``). The oracle raises ``AttributeError`` when
+    # the other side is not an order and refuses to hash one; here a non-order is simply
+    # unequal and the hash follows the reference.
+    def __eq__(self, other):
+        if not isinstance(other, Order):
+            return NotImplemented
+        return self.ref == other.ref
+
+    def __ne__(self, other):
+        if not isinstance(other, Order):
+            return NotImplemented
+        return self.ref != other.ref
+
+    def __hash__(self):
+        return hash(self.ref)
+
     def _snapshot(self):
         """The order as it is now, for a notification: a shallow copy whose ``executed`` is
         frozen too, so a later fill does not show through (the clone semantics)."""

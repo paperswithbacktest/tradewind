@@ -171,6 +171,21 @@ class Indicator(LineArithmetic, ParamsBase):
             self._tw_strategy = strat
             strat._tw_minperiod = max(strat._tw_minperiod, self._tw_minperiod)
 
+    @property
+    def _owner(self):
+        """The object whose ``__init__`` built this indicator: the parent indicator for a
+        child, else the strategy. Observed on the oracle (probe ``indicator_owner``): a
+        corpus indicator reads ``self._owner`` in its own ``__init__`` to reach the
+        strategy's feeds by name (``when_to_own_stocks_and_when_to_own_gold``)."""
+        set_ = self.__dict__.get("_tw_owner_set")
+        if set_ is not None:
+            return set_[0]
+        return self._tw_parent if self._tw_parent is not None else self._tw_strategy
+
+    @_owner.setter
+    def _owner(self, value):
+        self.__dict__["_tw_owner_set"] = (value,)
+
     def _tw_bind_line(self, i: int, source):
         """``self.lines.<name> = source`` in ``__init__`` (see ``_IndicatorLines``)."""
         self._tw_bindings.append((i, source))
@@ -294,17 +309,47 @@ class Indicator(LineArithmetic, ParamsBase):
         env = self._tw_env
         return bool(getattr(getattr(env, "p", None), "runonce", True)) if env is not None else True
 
+    def _tw_reads(self, target, seen=None) -> bool:
+        """Does this indicator read a line of ``target``, directly or through the
+        indicators it is built on?"""
+        seen = set() if seen is None else seen
+        if id(self) in seen:
+            return False
+        seen.add(id(self))
+        for inp in self.datas:
+            owner = inp._owner if isinstance(inp, LineBuffer) else inp
+            if owner is target:
+                return True
+            if isinstance(owner, Indicator) and owner._tw_reads(target, seen):
+                return True
+        return False
+
     def _tw_compute(self):
-        if self._tw_computed:
+        if self._tw_computed or self.__dict__.get("_tw_computing"):
+            # (re-entered: a line built from this indicator's own bound lines asks for it
+            # while it is filling them; the lines bound so far are already there)
             return
+        self._tw_computing = True
+        try:
+            self._tw_compute_now()
+        finally:
+            self._tw_computing = False
+
+    def _tw_compute_now(self):
         for inp in self.datas:
             owner = inp._owner if isinstance(inp, LineBuffer) else inp
             if isinstance(owner, Indicator):
                 owner._tw_compute()
         # observed on the oracle: a child is complete before its parent computes (a
-        # ``once`` reading ``self.child.lines.x.array`` sees every value)
+        # ``once`` reading ``self.child.lines.x.array`` sees every value) -- except a line
+        # built from the parent's own bound lines (``self.lines.mid = (self.lines.up +
+        # self.lines.lo) / 2``), which waits for those bindings (probe ``self_bound_lines``)
+        own = []
         for child in self._tw_children:
-            child._tw_compute()
+            if child._tw_reads(self):
+                own.append(child)
+            else:
+                child._tw_compute()
         n = self._tw_clock.buflen()
         for i, source in self._tw_bindings:
             owner = source._owner if isinstance(source, LineBuffer) else source
@@ -314,6 +359,8 @@ class Indicator(LineArithmetic, ParamsBase):
             if len(values) != n:
                 raise NotImplementedError("binding a line of another clock (a feed of another length)")
             self.lines[i].array[:] = values
+        for child in own:
+            child._tw_compute()
         if self._tw_vectorised:
             self.once(0, n)
             self.lines.home()
