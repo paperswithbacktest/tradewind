@@ -121,7 +121,9 @@ nav:
   - Intraday and options:
       - Intraday data: intraday.md
       - Options: options.md
-  - Live trading (IB): live-trading.md
+  - Live trading:
+      - One strategy on IB: live-trading.md
+      - Meta-portfolio, daily (paper): live-paper.md
   - Analyzers: analyzers.md
   - Plots and tear sheets: plots.md
   - Performance: performance.md

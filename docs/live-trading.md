@@ -5,6 +5,9 @@
     interface may still change. The design document is
     [`spec/07-live-ibkr.md`](https://github.com/paperswithbacktest/tradewind/blob/main/spec/07-live-ibkr.md).
 
+Several strategies in one account, once a day: see
+[the daily paper run of a meta-portfolio](live-paper.md).
+
 The same strategy class that backtests runs live, without a line changed: `LiveEngine` is
 the backtest engine (the same sixteen phases of a slice) driven by a live clock, with a
 broker that sends orders to an account instead of simulating them.

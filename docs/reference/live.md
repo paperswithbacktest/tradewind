@@ -1,6 +1,7 @@
 # Live trading
 
-Guide: [Live trading (IB)](../live-trading.md). Preview: the interface may change.
+Guides: [Live trading (IB)](../live-trading.md), [the daily paper run](../live-paper.md). Preview: the
+interface may change.
 
 ::: tradewind.live
     options:
@@ -25,3 +26,23 @@ Guide: [Live trading (IB)](../live-trading.md). Preview: the interface may chang
 ::: tradewind.live.ibkr
 
 ::: tradewind.live.fake
+
+## The daily run of a meta-portfolio
+
+::: tradewind.live.daily
+    options:
+      members: false
+
+::: tradewind.live.daily.runner
+
+::: tradewind.live.daily.aggregate
+
+::: tradewind.live.daily.books
+
+::: tradewind.live.daily.providers
+
+::: tradewind.live.daily.brokers
+
+::: tradewind.live.daily.tracking
+
+::: tradewind.live.daily.meta
