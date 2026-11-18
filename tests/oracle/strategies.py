@@ -282,6 +282,65 @@ def build(bt):
                 except IndexError:
                     self.sell(data=d0, size=4)
 
+    class LineGet(Recorder):
+        """``line.get(ago, size)`` at the edges of the buffer: a window ending a bar ahead, one
+        cut by the end of the buffer, one reaching before the first bar. Every reading is kept
+        and the sum of the first one steers a trade, so both the values and the NAV compare."""
+
+        CASES = ((0, 1), (0, 3), (-1, 2), (1, 1), (1, 3), (2, 2), (1, 6), (-4, 3), (0, 200),
+                 (3, 8), (-2, 7), (0, 0), (-130, 1))
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"gets": []}
+
+        def next(self):
+            super().next()
+            n = len(self)
+            c = self.datas[0].close
+            if n in (1, 2, 3, 4, 60, 118, 119, 120):
+                row = [n]
+                for ago, size in self.CASES:
+                    row.append([round(float(v), 8) for v in c.get(ago=ago, size=size)])
+                self.extra["gets"].append(row)
+            if n == 60:
+                window = c.get(ago=1, size=3)
+                if len(window) == 3 and window[-1] > c[0]:
+                    self.buy(data=self.datas[0], size=7)
+                else:
+                    self.sell(data=self.datas[0], size=7)
+
+    class FeedEquality(Recorder):
+        """A feed compared with another feed, a line, a number or ``None`` while the strategy
+        runs: ``in``, ``index``, ``==``, ``!=``, ``<`` and ``+`` are kept per bar, and a feed
+        found ``in`` a list of the others (equal closes) is bought, so the NAV compares too."""
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"cmp": []}
+
+        def next(self):
+            super().next()
+            a, b, c, d = self.datas
+            others = [b, c, d]
+            row = [len(self), a in others, a == b, a != b, b.close == a, a == None, a == "x",
+                   a == float(a.close[0]), a < b, round(a + 1.0, 8), round(b - a, 8)]
+            try:
+                row.append(others.index(a))
+            except ValueError:
+                row.append(None)
+            self.extra["cmp"].append(row)
+            if row[1] and not self.getposition(a).size:
+                self.buy(data=a, size=3)
+
+        @staticmethod
+        def oracle_frames(fr):
+            out = dict(fr)
+            twin = fr["S1"].copy()
+            twin.loc[twin.index[::7], "close"] = fr["S0"]["close"].iloc[::7].values   # equal closes
+            out["S1"] = twin
+            return out
+
     class ReverseShortfall(Recorder):
         """A short, then buys sized to 99.9 % of the cash at the close that both close the
         short and open a long: when the next open gaps up, what fills?"""
@@ -1693,6 +1752,8 @@ def build(bt):
         "batch_funding": BatchFunding,
         "deficit_carry": DeficitCarry,
         "line_edges": LineEdges,
+        "line_get": LineGet,
+        "feed_equality": FeedEquality,
         "reverse_shortfall": ReverseShortfall,
         "cheat_on_close": CheatOnClose,
         "add_cash_timing": AddCashTiming,

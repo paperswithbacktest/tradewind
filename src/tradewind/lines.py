@@ -48,6 +48,18 @@ def _lazy(fn, *operands):
     return operate(fn, *operands)
 
 
+def _number(x) -> float:
+    """``float(x)``, or a feed's current close (a feed has no ``__float__`` on the oracle
+    either, yet ``line == feed`` compares with its close: probe ``feed_operators``)."""
+    try:
+        return float(x)
+    except TypeError:
+        as_number = getattr(type(x), "_tw_as_number", None)
+        if as_number is None:
+            raise
+        return as_number(x)
+
+
 class LineArithmetic:
     """Operators of a line-like object (a line, an indicator): a line in the build stage,
     a number on the current value (``_tw_v()``) otherwise."""
@@ -60,12 +72,12 @@ class LineArithmetic:
     def _tw_bin(self, other, fn):
         if _BUILDING[0]:
             return _lazy(fn, self, other)
-        return fn(self._tw_v(), float(other))
+        return fn(self._tw_v(), _number(other))
 
     def _tw_rbin(self, other, fn):
         if _BUILDING[0]:
             return _lazy(fn, other, self)
-        return fn(float(other), self._tw_v())
+        return fn(_number(other), self._tw_v())
 
     def __lt__(self, other):
         return self._tw_bin(other, operator.lt)
@@ -223,13 +235,15 @@ class LineBuffer(LineArithmetic):
         return self[ago]
 
     def get(self, ago: int = 0, size: int = 1) -> list:
-        """The ``size`` values ending at ``ago`` (inclusive), oldest first."""
-        idx = self._c.i
-        end = idx + ago + 1
-        start = end - size
-        if start < 0 or end > idx + 1:
-            return []
-        return self._array[start:end].tolist()
+        """The ``size`` values ending at ``ago`` (inclusive), oldest first.
+
+        A plain slice of the preloaded buffer, like ``__getitem__``: a positive ``ago`` reads
+        bars that have not arrived (cut at the end of the buffer), and a window reaching before
+        the first bar follows Python's slicing rules (empty, or wrapped to the end of the buffer
+        when it ends before the first bar too). Observed on the oracle (probe ``line_get``).
+        """
+        stop = self._c.i + ago + 1
+        return self._array[stop - size:stop].tolist()
 
     def __iter__(self):
         return iter(self._array[: self._c.i + 1].tolist())
@@ -247,12 +261,12 @@ class LineBuffer(LineArithmetic):
     def __eq__(self, other):
         if _BUILDING[0]:
             return _lazy(operator.eq, self, other)
-        return self._tw_v() == float(other)
+        return self._tw_v() == _number(other)
 
     def __ne__(self, other):
         if _BUILDING[0]:
             return _lazy(operator.ne, self, other)
-        return self._tw_v() != float(other)
+        return self._tw_v() != _number(other)
 
     def __hash__(self):
         return id(self)

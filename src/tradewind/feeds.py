@@ -9,13 +9,14 @@ parameter is a column name, a column position, ``-1`` to find it by its own name
 
 from __future__ import annotations
 
+import numbers
 from typing import ClassVar
 
 import numpy as np
 import pandas as pd
 
 from .dateutils import date2num, stamps2num
-from .lines import Cursor, DatetimeLine, LineBuffer, Lines
+from .lines import Cursor, DatetimeLine, LineArithmetic, LineBuffer, Lines, in_build_stage
 from .params import ParamsBase
 
 LINE_ALIASES = ("datetime", "open", "high", "low", "close", "volume", "openinterest")
@@ -150,6 +151,80 @@ class DataBase(ParamsBase):
 
     def __repr__(self):
         return f"{type(self).__name__}(name={self._name!r}, bars={self.buflen()})"
+
+    # -- a feed as a number: its close ---------------------------------------------------------
+    # Observed on the oracle (probes ``feed_equality``, ``feed_operators``): while the strategy
+    # runs, a feed compared or combined with a number, a line or another feed stands for the
+    # current value of its close, so two distinct feeds closing at the same price are equal
+    # (``d in longs``, ``list.index(d)``, ``list.remove(d)`` follow); against anything else
+    # (``None``, a string, an order, a strategy) it is equal only to itself. It still hashes
+    # by identity, so dicts and sets keyed by feeds are unchanged. Before the run (a
+    # strategy's ``__init__``) a feed compares by identity here; the oracle builds a line
+    # there instead, whose truth value raises.
+    def _tw_operand(self, other):
+        if in_build_stage() or not self._started:
+            return NotImplemented
+        if isinstance(other, DataBase):
+            if not other._started:
+                return NotImplemented
+            return other.close
+        if isinstance(other, (numbers.Real, np.number, LineArithmetic)):
+            return other
+        return NotImplemented
+
+    def _tw_as_number(self) -> float:
+        """The current close: what a line operator reads when its other operand is a feed."""
+        return self.close[0]
+
+    def _tw_cmp(self, other, op):
+        value = self._tw_operand(other)
+        if value is NotImplemented:
+            return NotImplemented
+        return getattr(self.close, op)(value)
+
+    def __eq__(self, other):
+        return self._tw_cmp(other, "__eq__")
+
+    def __ne__(self, other):
+        return self._tw_cmp(other, "__ne__")
+
+    __hash__ = object.__hash__
+
+    def __lt__(self, other):
+        return self._tw_cmp(other, "__lt__")
+
+    def __le__(self, other):
+        return self._tw_cmp(other, "__le__")
+
+    def __gt__(self, other):
+        return self._tw_cmp(other, "__gt__")
+
+    def __ge__(self, other):
+        return self._tw_cmp(other, "__ge__")
+
+    def __add__(self, other):
+        return self._tw_cmp(other, "__add__")
+
+    def __radd__(self, other):
+        return self._tw_cmp(other, "__radd__")
+
+    def __sub__(self, other):
+        return self._tw_cmp(other, "__sub__")
+
+    def __rsub__(self, other):
+        return self._tw_cmp(other, "__rsub__")
+
+    def __mul__(self, other):
+        return self._tw_cmp(other, "__mul__")
+
+    def __rmul__(self, other):
+        return self._tw_cmp(other, "__rmul__")
+
+    def __truediv__(self, other):
+        return self._tw_cmp(other, "__truediv__")
+
+    def __rtruediv__(self, other):
+        return self._tw_cmp(other, "__rtruediv__")
 
 
 class PandasData(DataBase):
