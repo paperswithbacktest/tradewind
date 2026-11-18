@@ -14,6 +14,8 @@ from . import (
     intraday,
     metrics,
     options,
+    plots,
+    tearsheets,
     universe,
 )
 from .analyzer import Analyzer, TimeReturn
@@ -115,5 +117,7 @@ __all__ = [
     "num2date",
     "num2dt",
     "options",
+    "plots",
+    "tearsheets",
     "universe",
 ]
