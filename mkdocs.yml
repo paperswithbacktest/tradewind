@@ -20,6 +20,7 @@ strict: true
 # docs/README.md is the home page (GitHub shows it too)
 exclude_docs: |
   requirements.txt
+  examples/pwb/*_metrics.md
   __pycache__/
 
 validation:
@@ -122,6 +123,7 @@ nav:
       - Options: options.md
   - Live trading (IB): live-trading.md
   - Analyzers: analyzers.md
+  - Plots and tear sheets: plots.md
   - Performance: performance.md
   - Migrating from backtrader: migrating-from-backtrader.md
   - Coming from Lean:
@@ -130,6 +132,7 @@ nav:
   - Reproducibility (fingerprint): reproducibility.md
   - Examples:
       - Runnable examples: examples.md
+      - Examples on real data: real-data-examples.md
       - Examples from the catalogue: catalogue-examples.md
   - API reference:
       - reference/index.md

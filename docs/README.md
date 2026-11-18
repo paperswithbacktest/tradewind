@@ -35,11 +35,21 @@ backtrader's own results, bar by bar:
 | Point-in-time universes (members entering and leaving), splits, dividends, delistings and ticker changes from symbol tables, raw or adjusted prices | done, opt-in ([Universes and corporate actions](universe-and-corporate-actions.md)) |
 | Futures | interfaces in place, implementations planned |
 | Live trading on Interactive Brokers (paper first): `tradewind.live`, `pip install 'tradewind[ibkr]'` | preview ([Live trading](live-trading.md)) |
-| backtrader's resampling and replay, plotting, `optstrategy` | not available yet |
+| Plots (equity against a benchmark, drawdown, monthly returns, exposure and turnover) and a bridge to pyfolio and alphalens tear sheets | done, opt-in: `tradewind[plot]`, `tradewind[tearsheets]` ([Plots and tear sheets](plots.md)) |
+| backtrader's resampling and replay, its own `cerebro.plot()`, `optstrategy` | not available yet |
 
 Speed: the engine itself costs 0.2 to 1 µs per security and bar on a 2 000-security
 universe (`tools/bench_engine.py`); on the corpus the median strategy runs about 2.3 times
 faster than on backtrader, data loading included. See [Performance](performance.md).
+
+## What a run looks like
+
+![Sector momentum on real data: portfolio value against SPY, drawdown, exposure and turnover, monthly returns](images/momentum_sectors.png)
+
+--8<-- "pwb/momentum_sectors_metrics.md"
+
+`strategy.analyzers.performance.plot()` draws it ([Plots and tear sheets](plots.md)); the
+code is on [Examples on real data](real-data-examples.md).
 
 ## Contents
 
@@ -76,7 +86,11 @@ faster than on backtrader, data loading included. See [Performance](performance.
     it does not.
 19. [Tradewind vs Lean](tradewind-vs-lean.md): where Tradewind is at level, ahead and
     behind, dated.
-20. [API reference](reference/index.md): generated from the docstrings.
+20. [Plots and tear sheets](plots.md): equity, drawdown, monthly returns, exposure;
+    pyfolio and alphalens tear sheets.
+21. [Examples on real data](real-data-examples.md): three ETF strategies on Papers With
+    Backtest data, with their figures.
+22. [API reference](reference/index.md): generated from the docstrings.
 
 The [runnable examples](examples.md) run as they are, on synthetic data: `cd docs/examples &&
 python 01_sma_crossover.py`. [Examples from the catalogue](catalogue-examples.md) points to
