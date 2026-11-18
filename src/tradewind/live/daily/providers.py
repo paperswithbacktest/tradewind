@@ -36,7 +36,9 @@ def since_for(as_of: str | None, last_n: int) -> str:
     """A start for the recorder that covers ``last_n`` sessions before ``as_of`` (calendar
     days, with room for holidays)."""
     end = _dt.date.fromisoformat(as_of) if as_of else _dt.date.today()
-    return (end - _dt.timedelta(days=int(last_n * 7 / 5) + 10)).isoformat()
+    # without a date the data may end before today (a dataset not yet updated): a month more
+    slack = 10 if as_of else 40
+    return (end - _dt.timedelta(days=int(last_n * 7 / 5) + slack)).isoformat()
 
 
 def _cut(history: dict[str, SleeveBook], as_of: str | None, last_n: int) -> dict[str, SleeveBook]:

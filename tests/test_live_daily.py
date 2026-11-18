@@ -375,3 +375,23 @@ def test_ibkr_account_sends_market_on_open_orders():
     assert out[0]["id"] == "twd-20261215-0001"
     _contract, order = stub.placed[0]
     assert (order.action, order.totalQuantity, order.orderType, order.tif) == ("SELL", 4.0, "MKT", "OPG")
+
+
+# -- catalogue strategies through pwb-toolbox (opt-in: needs that environment and its data) ---------------
+@pytest.mark.skipif(not os.environ.get("TW_PWB_PYTHON"), reason="set TW_PWB_PYTHON (a Python with pwb-toolbox) "
+                    "and PAPERS_DIR to run catalogue strategies")
+def test_catalogue_strategies_replay_through_pwb_toolbox(tmp_path):
+    from tradewind.live.daily import PwbProvider
+
+    meta = MetaPortfolio([
+        Sleeve("a_general_model_of_dynamic_asset_allocation_with_incomplete_information_and_learning", 0.094),
+        Sleeve("protective_asset_allocation_paa_a_simple_momentum_based_alternative_for_term_deposits", 0.075)],
+        leverage=4.0, max_gross=4.0, lot=0.0, papers_dir=os.environ.get("PAPERS_DIR", "~/dev/pwb/papers"),
+        python=os.environ["TW_PWB_PYTHON"])
+    replay = ReplayProvider(PwbProvider(meta, str(tmp_path / "books"), log=lambda *a: None), None, 21)
+    account = SimAccount(str(tmp_path / "sim.json"), cash=110_000.0)
+    runner = DailyRunner(meta, replay, account, str(tmp_path / "run"), log=lambda *a: None)
+    runner.replay(replay.dates()[-20:])
+    journal = pd.read_csv(tmp_path / "run" / "tracking.csv")
+    assert len(journal) == 20
+    assert np.abs(journal["gap_cum"]).max() < 1e-6 * journal["nav_real"].max()
