@@ -496,8 +496,9 @@ class BackBroker(BrokerBase):
                 if self._foreign:
                     value = value * self.fx_rates([data.security.id])[0]
             return value
+        wanted = {id(d) for d in datas}    # by identity: a feed compares equal by its close
         for data, pos in self.positions.items():
-            if data not in datas:
+            if id(data) not in wanted:
                 continue
             if not pos.size:
                 continue

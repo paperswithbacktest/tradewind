@@ -160,6 +160,31 @@ one ulp apart with a 1 % threshold and trades 12 more names on 2018-06-29. Two s
 the pass draw from `random` / `np.random` without a seed and are not reproducible on the
 oracle itself (`a_hamiltonian_phase_space_approach…`, `allocation_to_industry_portfolios…`).
 
+### Parity redo 0.1.51 (2026-11-18)
+
+Parity redo of Tradewind `d77d526` against pwb-toolbox 0.1.51 (papers tree `51945b9`, seed
+0): four strategies divergent. Order logs of both engines through
+`tools/run_corpus_strategy.py --fills`, corpus strategy copies instrumented in the strategy
+itself (cash, value, positions and closes printed as hex floats), probes `line_get` and
+`feed_equality` in `tests/oracle/strategies.py`:
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| `line.get(ago, size)` is a **plain slice of the preloaded buffer** ending at `ago`: a positive `ago` reads bars that have not arrived (the window is cut at the end of the buffer), and a window reaching before the first bar follows Python's slicing rules (empty, or wrapped to the end of the buffer when it ends before the first bar too) | kept, flagged | probe `line_get`; corpus `merton_s_portfolio_problem_revisited…` reads `close.get(ago=1, size=253)` -- the window ending at **tomorrow's** close -- and never traded on Tradewind (`get` returned `[]`). **Look-ahead by construction**, like the positive index of the same line |
+| While the strategy runs, a **feed compared or combined with a number, a line or another feed stands for its current close**: two distinct feeds closing at the same price are equal, so `d in longs`, `list.index(d)` and `list.remove(d)` find the other one; against anything else (`None`, a string, an order, a strategy) a feed is equal only to itself; it still hashes by identity. `get_value(datas=[...])` still takes its positions by identity | kept, flagged | probes `feed_equality`, scratch probes on the oracle; corpus `chronological_return_ordering…`: `for d in self.datas: target = w_long if d in longs ...` bought `IRF` on 2003-11-03 because its close equalled a long's. Before the run (a strategy's `__init__`) the oracle builds a line from `d == other`, whose truth value raises; Tradewind compares by identity there |
+
+Seen and **not** reproduced: the last-bit residual of the marked value (above) decides two
+divergences of this pass, each amplified by the strategy. `optimal_portfolio_choice_with_wash_sale_constraints`
+(long only) rebuilds a target from its current weight, `int(value * w / price)`, which flips
+by one share when the value moves by an ulp (2008-10-08 rebalance, ITW one share);
+`are_informed_traders_sensitive_to_regulatory_environments` tests `target_dollars == 0.0`
+on a sum of cohort budgets that cancels exactly or not depending on the value's last bit
+(F, 2004-02-11). On the first book, cash, sizes, entry prices and closes are identical on
+both engines on 335 dumped bars and the value differs on 236; the oracle's value is matched
+by `cash + t`, `t` summing **each long's entry value then its open P&L** in first-touched
+order, on 307 of the 335 bars (99 for the current `size * close` terms) -- a lead, not
+adopted: it changes the mark of every long book and needs the full corpus parity.
+
 ## Clock and bars
 
 | behaviour | kept / corrected | note |
