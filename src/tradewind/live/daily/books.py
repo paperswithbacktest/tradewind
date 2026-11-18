@@ -14,6 +14,7 @@ without being edited; the run that ends last is the one kept.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime as _dt
 import math
 from dataclasses import dataclass, field
@@ -45,9 +46,7 @@ class SleeveBook:
     conditional: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"date": self.date, "nav": self.nav, "positions": self.positions, "target": self.target,
-                "open": self.open, "close": self.close, "costs": self.costs, "cash": self.cash,
-                "half_spread": self.half_spread, "conditional": self.conditional}
+        return dataclasses.asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> SleeveBook:
