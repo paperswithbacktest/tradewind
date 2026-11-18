@@ -54,3 +54,17 @@ only by tradewind.live.ibkr when it connects.
   OnSecuritiesChanged (securities added to and removed from a universe), its Split,
   Dividend, Delisting and SymbolChangedEvent data events, and its DataNormalizationMode
   (raw, split-adjusted and adjusted prices). The code is Tradewind's own.
+
+Optional dependencies, not distributed with Tradewind:
+
+* matplotlib (Matplotlib License, BSD-style, https://matplotlib.org), installed by the `plot`
+  and `tearsheets` extras and imported only by tradewind.plots and tradewind.tearsheets when a
+  figure is drawn. The plots of src/tradewind/plots.py (equity curve, drawdown, monthly
+  returns, exposure and turnover) are Tradewind's own code.
+* pyfolio-reloaded, alphalens-reloaded and empyrical-reloaded (Apache License 2.0; originally
+  Copyright Quantopian, Inc., maintained by Stefan Jansen at
+  https://github.com/stefan-jansen/pyfolio-reloaded,
+  https://github.com/stefan-jansen/alphalens-reloaded and
+  https://github.com/stefan-jansen/empyrical-reloaded), installed by the `tearsheets` extra
+  and imported only by tradewind.tearsheets. Tradewind contains none of their code: that
+  module reshapes a run into the inputs their documented functions take and calls them.

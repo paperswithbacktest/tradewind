@@ -24,6 +24,7 @@ import numpy.typing as npt
 from . import metrics
 from .analyzer import Analyzer
 from .analyzers import AutoOrderedDict
+from .dateutils import num2date
 
 __all__ = ["Performance", "PerformanceReport"]
 
@@ -63,6 +64,13 @@ class PerformanceReport:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _pandas() -> Any:
+    """pandas, typed as Any (it ships no type information)."""
+    import importlib
+
+    return importlib.import_module("pandas")
 
 
 #: the parameters of ``Performance`` and their defaults (documented on the class)
@@ -106,6 +114,9 @@ class Performance(Analyzer):
         self.long: list[float] = []
         self.short: list[float] = []
         self.traded: list[float] = []
+        self.cash: list[float] = []
+        self.holdings: list[dict[str, float]] = []
+        self.fills_log: list[tuple[Any, str, float, float, float]] = []
         self._traded_now = 0.0
         self._fills: list[tuple[float, float, float]] = []
         self._n_fills = 0
@@ -165,6 +176,13 @@ class Performance(Analyzer):
         if bench is not None:
             self.benchmark_values.append(float(bench.close[0]) if len(bench) else math.nan)
         exposure = self._exposure(broker)
+        self.cash.append(float(broker.getcash()))
+        if exposure.any():
+            securities = broker.securities
+            self.holdings.append({securities[i].symbol: float(exposure[i])
+                                  for i in np.flatnonzero(exposure)})
+        else:
+            self.holdings.append({})
         if value and exposure.any():
             long_ = float(exposure[exposure > 0].sum())
             short = float(-exposure[exposure < 0].sum())
@@ -202,7 +220,12 @@ class Performance(Analyzer):
         strategy: Any = self.strategy
         nav = float(strategy.broker.getvalue())
         dollar_volume = self._dollar_volume(data, mult)
+        now = strategy.datetime.datetime(0)
+        symbol = security.symbol
         for bit in bits[seen:]:
+            when = num2date(bit.dt) if isinstance(bit.dt, (int, float)) and bit.dt else now
+            self.fills_log.append((when, symbol, float(bit.size), float(bit.price),
+                                   float(bit.comm or 0.0)))
             traded = abs(float(bit.size) * float(bit.price)) * mult
             self._traded_now += traded
             self._n_fills += 1
@@ -217,6 +240,80 @@ class Performance(Analyzer):
         dv = np.abs(close * volume) * mult
         dv = dv[np.isfinite(dv)]
         return float(dv.mean()) if len(dv) else 0.0
+
+    # -- the run as pandas objects, and its plots ------------------------------------------
+    def _index(self) -> Any:
+        pd = _pandas()
+        return pd.DatetimeIndex(self.times, name="date")
+
+    @property
+    def nav(self) -> Any:
+        """The portfolio value at every slice, a ``pandas.Series`` indexed by time."""
+        pd = _pandas()
+        return pd.Series(self.values, index=self._index(), name="nav", dtype="float64")
+
+    @property
+    def returns(self) -> Any:
+        """The simple return of every slice after the first, a ``pandas.Series``."""
+        return self.nav.pct_change().iloc[1:].rename("returns")
+
+    @property
+    def benchmark_nav(self) -> Any:
+        """The benchmark's closes at every slice (``benchmark`` parameter), or None."""
+        pd = _pandas()
+        if self._bench is None:
+            return None
+        return pd.Series(self.benchmark_values, index=self._index(), name="benchmark",
+                         dtype="float64")
+
+    @property
+    def exposures(self) -> Any:
+        """A ``pandas.DataFrame`` with one row per slice: ``gross``, ``net``, ``long``,
+        ``short`` (fractions of the portfolio value) and ``traded`` (the value traded in
+        the slice as a fraction of the portfolio value)."""
+        pd = _pandas()
+        return pd.DataFrame({"gross": self.gross, "net": self.net, "long": self.long,
+                             "short": self.short, "traded": self.traded},
+                            index=self._index(), dtype="float64")
+
+    @property
+    def positions(self) -> Any:
+        """The signed market value of every position at every slice, in the account
+        currency, one column per symbol (0.0 when not held), plus a ``cash`` column."""
+        pd = _pandas()
+        frame = pd.DataFrame.from_records(self.holdings, index=self._index())
+        frame = frame.reindex(columns=sorted(frame.columns)).fillna(0.0).astype("float64")
+        frame["cash"] = pd.Series(self.cash, index=frame.index, dtype="float64")
+        return frame
+
+    @property
+    def transactions(self) -> Any:
+        """Every fill, a ``pandas.DataFrame`` indexed by the time it executed at, with
+        ``symbol``, ``amount`` (signed quantity), ``price`` and ``commission``."""
+        pd = _pandas()
+        frame = pd.DataFrame(self.fills_log,
+                             columns=["date", "symbol", "amount", "price", "commission"])
+        frame["date"] = pd.to_datetime(frame["date"])
+        return frame.set_index("date")
+
+    def plot(self, **kwargs: Any) -> Any:
+        """The four-panel figure of ``tradewind.plots.plot`` (needs matplotlib)."""
+        from . import plots
+
+        return plots.plot(self, **kwargs)
+
+    def to_pyfolio(self, tz: str | None = "UTC") -> Any:
+        """``(returns, positions, transactions)`` for pyfolio (``tradewind.tearsheets``)."""
+        from . import tearsheets
+
+        return tearsheets.to_pyfolio(self, tz=tz)
+
+    def tearsheet(self, kind: str = "simple", **kwargs: Any) -> Any:
+        """pyfolio's ``simple`` or ``full`` tear sheet of the run; needs the extra
+        ``tradewind[tearsheets]``. Returns the matplotlib figures."""
+        from . import tearsheets
+
+        return tearsheets.tearsheet(self, kind=kind, **kwargs)
 
     # -- the statistics --------------------------------------------------------------------
     def stop(self) -> None:

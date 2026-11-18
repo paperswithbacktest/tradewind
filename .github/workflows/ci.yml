@@ -37,6 +37,18 @@ jobs:
       - run: mypy
       - run: pytest -q
 
+  tearsheets:
+    # the optional bridge to pyfolio and alphalens (the `tearsheets` extra, Python 3.11+):
+    # tests/test_tearsheets.py skips everywhere else
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[tearsheets]" "pytest>=8"
+      - run: pytest -q tests/test_tearsheets.py tests/test_plots.py
+
   oracle:
     # backtrader lives only here, in a throwaway environment, as the equivalence oracle.
     runs-on: ubuntu-latest

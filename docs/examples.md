@@ -5,7 +5,8 @@ repository, `pip install -e .`, then `cd docs/examples && python 01_sma_crossove
 test suite runs each numbered example on every pull request (`tests/test_docs.py`): the
 code shown here is the code the tests run, included from the files at build time.
 
-For strategies on real data, see [Examples from the catalogue](catalogue-examples.md).
+For strategies on real data, see [Examples on real data](real-data-examples.md) (with their
+figures) and [Examples from the catalogue](catalogue-examples.md).
 
 ## A first strategy
 

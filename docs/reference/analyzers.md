@@ -9,3 +9,11 @@ Guide: [Analyzers](../analyzers.md).
 ::: tradewind.performance
 
 ::: tradewind.metrics
+
+## Plots and tear sheets
+
+Guide: [Plots and tear sheets](../plots.md).
+
+::: tradewind.plots
+
+::: tradewind.tearsheets
