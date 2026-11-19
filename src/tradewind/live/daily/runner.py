@@ -89,9 +89,13 @@ class DailyRunner:
     def _pick(self, history: dict[str, dict[str, SleeveBook]], as_of: str | None):
         warnings = []
         lasts = {slug: max(h) for slug, h in history.items() if h}
-        missing = [s.slug for s in self.meta.sleeves if s.slug not in lasts]
+        missing = [s.slug for s in self.meta.sleeves if s.slug not in history]
         if missing:
             raise RuntimeError(f"no book for {missing}: nothing is proposed while a sleeve is missing")
+        empty = [s.slug for s in self.meta.sleeves if s.slug not in lasts]
+        if empty:                                   # the strategies ran, the data end before
+            raise StaleData(f"no close up to {as_of or 'the last session'} for {empty}: the data end earlier "
+                            "(monthly datasets: --fresh-prices)")
         day = as_of or max(lasts.values())
         if as_of is None:
             behind = (_dt.date.fromisoformat(self.today()) - _dt.date.fromisoformat(day)).days

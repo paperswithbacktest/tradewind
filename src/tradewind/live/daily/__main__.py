@@ -13,6 +13,9 @@
     python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --propose \
         --fresh-prices alphavantage
 
+    # the whole day in one command, safe to repeat, for a scheduler (report, alerts, exit code)
+    python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --broker sim --send
+
 Nothing is sent without ``--send``. ``--broker ibkr`` attaches to a TWS / IB Gateway session
 already logged in to a **paper** account (port 7497 or 4002; anything else is refused).
 """
@@ -66,6 +69,21 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def make_provider(args, meta: MetaPortfolio, directory: str) -> PwbProvider:
+    """The catalogue strategies' provider the command line asks for."""
+    fresh = None if args.fresh_prices is None else ("" if args.fresh_prices == "none" else args.fresh_prices)
+    return PwbProvider(meta, os.path.join(directory, "books"), fresh_prices=fresh)
+
+
+def make_account(args, directory: str, send: bool):
+    """The account the command line asks for (an IBKR paper account opens read-only unless
+    ``send``)."""
+    if args.broker == "ibkr":
+        return IBPaperAccount(args.host, args.port, args.client_id, account=args.account, send=send)
+    return SimAccount(os.path.join(directory, "sim_account.json"), cash=args.sim_cash,
+                      use_book_spreads=args.sim_costs == "harness", commission=args.sim_commission)
+
+
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     overrides = {k: getattr(args, k) for k in ("capital", "leverage", "max_gross", "rebalance", "lot",
@@ -73,20 +91,15 @@ def main(argv=None) -> int:
     meta = MetaPortfolio.load(args.meta, **overrides)
     directory = os.path.expanduser(args.dir)
     os.makedirs(directory, exist_ok=True)
-    fresh = None if args.fresh_prices is None else ("" if args.fresh_prices == "none" else args.fresh_prices)
     try:
-        provider = PwbProvider(meta, os.path.join(directory, "books"), fresh_prices=fresh)
+        provider = make_provider(args, meta, directory)
     except (RuntimeError, ValueError) as exc:
         print(exc, file=sys.stderr)
         return 2
-    if args.broker == "ibkr":
-        if args.replay:
-            print("--replay runs on the simulated account only", file=sys.stderr)
-            return 2
-        account = IBPaperAccount(args.host, args.port, args.client_id, account=args.account, send=args.send)
-    else:
-        account = SimAccount(os.path.join(directory, "sim_account.json"), cash=args.sim_cash,
-                             use_book_spreads=args.sim_costs == "harness", commission=args.sim_commission)
+    if args.broker == "ibkr" and args.replay:
+        print("--replay runs on the simulated account only", file=sys.stderr)
+        return 2
+    account = make_account(args, directory, args.send)
     try:
         if args.replay:
             replay = ReplayProvider(provider, args.as_of, args.replay + 1)

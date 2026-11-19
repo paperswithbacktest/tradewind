@@ -1,0 +1,14 @@
+# The daily paper run on a server with systemd (an example, user unit):
+#   cp tradewind-daily.service tradewind-daily.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now tradewind-daily.timer
+# (and loginctl enable-linger $USER so that it runs without a session open)
+[Unit]
+Description=Tradewind daily paper run (one NYSE session, report and alerts)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/pwb-paper/tradewind-daily.sh
+# 3 stale prices, 4 alerts, 5 failed, 6 broker: the unit shows them as failed, journalctl has the log
+SuccessExitStatus=0
+TimeoutStartSec=6h
