@@ -28,9 +28,13 @@ runs. It is never imported by the engine, never a dependency, never redistribute
 * **CI (every push)**: 40 strategies, chosen to cover every Tier 1 and Tier 2 idiom at least
   twice, each running under 10 s on the public sample data shipped with the repo.
 * **Nightly**: the 4 202, on the data host, from the Hub snapshot.
-* **Speed benchmark** (CI, informational; nightly, gating): 5 symbols × 20 years and
-  4 000 symbols × 20 years, µs per symbol-bar, against the backtrader reference measured
-  in pwb-toolbox 0.1.41 (35 µs).
+* **Speed benchmark**: 5 symbols × 20 years and 4 000 symbols × 20 years, µs per
+  security-bar, Tradewind against backtrader **on the same machine**, the same seeded bars
+  and the same strategy classes (`tools/bench_reference.sh small|wide`, backtrader in the
+  oracle's environment only); each scenario's final value must be equal on both engines. The
+  small case runs in CI on every push (times informational); the wide case (about an hour per
+  scenario on backtrader) runs on an idle machine, results committed under `bench/` and
+  published in `docs/performance.md`.
 
 ## Second oracle
 

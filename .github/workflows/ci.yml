@@ -62,6 +62,13 @@ jobs:
       - run: python -m venv /tmp/oracle-env && /tmp/oracle-env/bin/pip install -q backtrader numpy pandas
       - run: /tmp/oracle-env/bin/python tools/run_oracle.py --engine backtrader --out /tmp/oracle_bt.json
       - run: python tools/oracle_diff.py /tmp/oracle_bt.json /tmp/oracle_tw.json
+      - name: reference benchmark, small case (5 symbols x 20 years; times informational, final values must match)
+        run: |
+          OUT=/tmp/bench TW_PY=python BT_PY=/tmp/oracle-env/bin/python tools/bench_reference.sh small
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-small
+          path: /tmp/bench
 
   similarity:
     # Clean-room rule 4 as a gate: backtrader is installed (sha256-pinned) in a throwaway
