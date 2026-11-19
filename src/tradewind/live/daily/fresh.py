@@ -50,7 +50,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
@@ -462,10 +462,7 @@ class FreshPrices:
             "stale": dict(sorted(self.stale.items())),
             "not_covered": dict(sorted(self.not_covered.items())),
             "inactive": len(self.inactive),
-            "splices": {s.symbol: {"status": s.status, "before": s.last_before, "after": s.last_after,
-                                   "bars": s.bars, "anchor": s.anchor, "factor": s.factor,
-                                   "spread": s.spread, "last_bar_gap": s.last_bar_gap}
-                        for s in self.splices.values()},
+            "splices": {name: asdict(done) for name, done in self.splices.items()},
         }
 
 
