@@ -7,7 +7,9 @@ ready engine for a given last date): tests, and any strategy written for Tradewi
 pwb-toolbox on the Tradewind engine, one subprocess per strategy so that memory comes back
 after each and a strategy that exits hard does not take the run down; the environment that
 has pwb-toolbox is ``python`` (``pwb_worker.py`` is what it executes). Books are cached per
-day in ``cache_dir``: a second run of the same day (propose, then send) reuses them.
+day in ``cache_dir``: a second run of the same day (propose, then send) reuses them. With
+``fresh_prices="alphavantage"`` each strategy's price loads are completed up to the last
+close first (``fresh.py``); a symbol still stale stops the run (``StaleData``).
 
 ``ReplayProvider`` runs each strategy once up to ``until`` and serves every earlier day from
 that run: a strategy is causal, so its book at a past close is the same whether the run
@@ -30,6 +32,9 @@ from collections.abc import Callable
 
 from .books import SleeveBook, record_books
 from .meta import MetaPortfolio
+from .runner import StaleData
+
+FRESH_SOURCES = ("alphavantage",)
 
 
 def since_for(as_of: str | None, last_n: int) -> str:
@@ -71,8 +76,20 @@ class PwbProvider:
     """Catalogue strategies through pwb-toolbox, one subprocess each (see the module doc)."""
 
     def __init__(self, meta: MetaPortfolio, cache_dir: str, *, python: str | None = None,
-                 papers_dir: str | None = None, timeout: float = 4 * 3600, log=print):
+                 papers_dir: str | None = None, timeout: float = 4 * 3600, log=print,
+                 fresh_prices: str | None = None, fresh_cache: str | None = None):
         self.meta = meta
+        self.fresh_prices = (fresh_prices if fresh_prices is not None else meta.fresh_prices) or None
+        if self.fresh_prices and self.fresh_prices not in FRESH_SOURCES:
+            raise ValueError(f"fresh_prices must be one of {FRESH_SOURCES}, not {self.fresh_prices!r}")
+        if self.fresh_prices:
+            from .fresh import KEY_ENV
+
+            if not os.environ.get(KEY_ENV):
+                raise RuntimeError(f"fresh prices from AlphaVantage need the key in {KEY_ENV}")
+        self.fresh_cache = fresh_cache or os.path.join(os.path.dirname(os.path.abspath(cache_dir)), "prices")
+        self.fresh: dict[str, dict] = {}
+        self.warnings: list[str] = []
         self.cache_dir = cache_dir
         self.python = os.path.expanduser(python or meta.python or sys.executable)
         self.papers_dir = os.path.expanduser(papers_dir or meta.papers_dir)
@@ -94,6 +111,8 @@ class PwbProvider:
                "--since", since, "--last-n", str(last_n), "--papers", self.papers_dir]
         if until:
             cmd += ["--until", until]
+        if self.fresh_prices:
+            cmd += ["--fresh-prices", self.fresh_cache]
         t0 = time.perf_counter()
         proc = subprocess.run(cmd, env=self._env(), capture_output=True, text=True, timeout=self.timeout,
                               check=False)
@@ -103,15 +122,32 @@ class PwbProvider:
             raise RuntimeError(f"{slug}: the strategy run wrote no book (exit {proc.returncode}):\n{tail}")
         with open(out, encoding="utf-8") as fh:
             payload = json.load(fh)
+        if payload.get("fresh"):
+            self.fresh[slug] = payload["fresh"]
         if payload.get("error"):
             os.remove(out)                          # not cached: the next run tries again
+            if payload.get("stale"):
+                stale = payload["stale"]
+                raise StaleData(f"{slug}: {len(stale)} symbol(s) still stale after the fresh-price top-up "
+                                "(nothing is proposed):\n" + "\n".join(f"  {s}: {why}" for s, why in stale.items()))
             raise RuntimeError(f"{slug}: {payload['error']}")
         return payload
+
+    def _note_fresh(self, slug: str, fresh: dict) -> None:
+        msg = (f"[prices] {slug}: {fresh['filled']} symbol(s) completed to {fresh['last']} "
+               f"({fresh['requests']} AlphaVantage request(s)), largest gap of the chain factor "
+               f"{(fresh['max_spread'] or 0.0):.3%}")
+        self.log(msg)
+        if fresh.get("partial_last_bars"):
+            self.warnings.append(f"{slug}: the dataset's last bar differed from AlphaVantage's by more than "
+                                 "0.5% (a partial bar, replaced): " + ", ".join(fresh["partial_last_bars"][:20]))
 
     def books(self, as_of: str | None = None, last_n: int = 2, *, until: str | None = None
               ) -> dict[str, dict[str, SleeveBook]]:
         until = until or as_of
         tag = until or f"latest-{_dt.date.today().isoformat()}"
+        if self.fresh_prices:
+            tag += "-fresh"                         # books on the monthly data are not these
         folder = os.path.join(self.cache_dir, tag)
         os.makedirs(folder, exist_ok=True)
         out: dict[str, dict[str, SleeveBook]] = {}
@@ -125,12 +161,16 @@ class PwbProvider:
                 if payload.get("error"):
                     payload = None
             cached = payload is not None
+            if cached and self.fresh_prices and payload.get("fresh"):
+                self.fresh[sleeve.slug] = payload["fresh"]
             if payload is None:
                 if not os.path.exists(path):
                     raise FileNotFoundError(f"{sleeve.slug}: no strategy file at {path}")
                 self.log(f"[signal] {sleeve.slug} ...")
                 payload = self.run_one(sleeve.slug, path, target, since=since_for(until, last_n),
                                        last_n=last_n + 5, until=until)
+            if self.fresh_prices and payload.get("fresh"):
+                self._note_fresh(sleeve.slug, payload["fresh"])
             history = {b["date"]: SleeveBook.from_dict(b) for b in payload["books"]}
             out[sleeve.slug] = _cut(history, as_of, last_n)
             last = max(history) if history else "none"
@@ -166,4 +206,4 @@ class ReplayProvider:
         return {slug: _cut(h, as_of, last_n) for slug, h in self.history.items()}
 
 
-__all__ = ["EngineProvider", "PwbProvider", "ReplayProvider", "since_for"]
+__all__ = ["FRESH_SOURCES", "EngineProvider", "PwbProvider", "ReplayProvider", "since_for"]

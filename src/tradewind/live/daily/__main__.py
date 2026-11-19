@@ -8,6 +8,11 @@
     python -m tradewind.live.daily --meta meta.yaml --dir /tmp/sim --broker sim --send
     python -m tradewind.live.daily --meta meta.yaml --dir /tmp/replay --broker sim --replay 20
 
+    # the PWB price datasets are monthly: complete them up to the last close (AlphaVantage,
+    # key in ALPHAVANTAGE_API_KEY)
+    python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --propose \
+        --fresh-prices alphavantage
+
 Nothing is sent without ``--send``. ``--broker ibkr`` attaches to a TWS / IB Gateway session
 already logged in to a **paper** account (port 7497 or 4002; anything else is refused).
 """
@@ -37,6 +42,8 @@ def parser() -> argparse.ArgumentParser:
                       help="simulated account only: run the last N closes, orders sent on the simulation")
     p.add_argument("--as-of", default=None, help="the close to trade from (default: the data's last close)")
     p.add_argument("--allow-stale", action="store_true", help="trade a sleeve whose last close is older")
+    p.add_argument("--fresh-prices", choices=["alphavantage", "none"], default=None,
+                   help="complete the monthly price datasets up to the last close (key in ALPHAVANTAGE_API_KEY)")
     g = p.add_argument_group("meta-portfolio overrides")
     g.add_argument("--capital", type=float)
     g.add_argument("--leverage", type=float)
@@ -66,7 +73,12 @@ def main(argv=None) -> int:
     meta = MetaPortfolio.load(args.meta, **overrides)
     directory = os.path.expanduser(args.dir)
     os.makedirs(directory, exist_ok=True)
-    provider = PwbProvider(meta, os.path.join(directory, "books"))
+    fresh = None if args.fresh_prices is None else ("" if args.fresh_prices == "none" else args.fresh_prices)
+    try:
+        provider = PwbProvider(meta, os.path.join(directory, "books"), fresh_prices=fresh)
+    except (RuntimeError, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
     if args.broker == "ibkr":
         if args.replay:
             print("--replay runs on the simulated account only", file=sys.stderr)

@@ -5,7 +5,8 @@ to the last close and gives its target book (``providers``, ``books``); the book
 at the meta-portfolio's weights and leverage, capped, rounded to lots and compared with the
 account (``aggregate``); the orders are proposed, and placed only on request
 (``runner``) on a simulated account or an IBKR **paper** account (``brokers``); the day is
-tracked against the backtest (``tracking``). Guide: ``docs/live-paper.md``.
+tracked against the backtest (``tracking``). The monthly price datasets can be completed up
+to the last close from AlphaVantage (``fresh``). Guide: ``docs/live-paper.md``.
 
 Nothing here is imported by the backtest engine, and nothing needs more than numpy and
 pandas until an IBKR account (``ib_async``), a plot (matplotlib), a YAML file (PyYAML) or a

@@ -41,6 +41,8 @@ interface may change.
 
 ::: tradewind.live.daily.providers
 
+::: tradewind.live.daily.fresh
+
 ::: tradewind.live.daily.brokers
 
 ::: tradewind.live.daily.tracking

@@ -119,6 +119,7 @@ class DailyRunner:
         meta = self.meta
         history = self.provider.books(as_of, last_n=3)
         day, books, warnings = self._pick(history, as_of)
+        warnings = list(getattr(self.provider, "warnings", [])) + warnings
         state = self._load()
         earlier = sorted(d for d in state["days"] if d < day)
         prev = state["days"][earlier[-1]] if earlier else None
