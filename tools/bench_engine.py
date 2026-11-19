@@ -176,8 +176,7 @@ def machine():
     except AttributeError:
         version = "?"
     return {"cpu": cpu, "cores": os.cpu_count(), "os": platform.platform(), "python": platform.python_version(),
-            "numpy": np.__version__, "pandas": pd.__version__, "engine_version": str(version),
-            "engine_file": getattr(tw, "__file__", None)}
+            "numpy": np.__version__, "pandas": pd.__version__, "engine_version": str(version)}
 
 
 def main():

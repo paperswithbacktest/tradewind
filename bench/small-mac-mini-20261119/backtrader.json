@@ -10,8 +10,7 @@
   "python": "3.13.12",
   "numpy": "2.2.4",
   "pandas": "2.3.1",
-  "engine_version": "1.9.78.125",
-  "engine_file": "/Users/edarchimbaud/.claude/projects/-Users-edarchimbaud-dev-pwb/handover-scripts/venv147/lib/python3.13/site-packages/backtrader/__init__.py"
+  "engine_version": "1.9.78.125"
  },
  "idle": {
   "seconds": 0.8264244999736547,
