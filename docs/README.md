@@ -35,6 +35,7 @@ backtrader's own results, bar by bar:
 | Point-in-time universes (members entering and leaving), splits, dividends, delistings and ticker changes from symbol tables, raw or adjusted prices | done, opt-in ([Universes and corporate actions](universe-and-corporate-actions.md)) |
 | Futures | interfaces in place, implementations planned |
 | Live trading on Interactive Brokers (paper first): `tradewind.live`, `pip install 'tradewind[ibkr]'` | preview ([Live trading](live-trading.md)) |
+| Daily paper run of a meta-portfolio: signals after the close, a capped and rounded book, proposed orders, live against backtest: `python -m tradewind.live.daily` | preview, paper accounts only ([the daily paper run](live-paper.md)) |
 | Plots (equity against a benchmark, drawdown, monthly returns, exposure and turnover) and a bridge to pyfolio and alphalens tear sheets | done, opt-in: `tradewind[plot]`, `tradewind[tearsheets]` ([Plots and tear sheets](plots.md)) |
 | backtrader's resampling and replay, its own `cerebro.plot()`, `optstrategy` | not available yet |
 
@@ -82,6 +83,8 @@ code is on [Examples on real data](real-data-examples.md).
     hours, timers in the exchange's time.
 17. [Live trading (IB)](live-trading.md): the same strategy on an Interactive Brokers paper
     account, journal and replay, guards.
+    [The daily paper run](live-paper.md): several strategies in one paper account, orders
+    proposed every evening, the account tracked against its backtest.
 18. [Reproducibility](reproducibility.md): the run fingerprint, what it guarantees and what
     it does not.
 19. [Tradewind vs Lean](tradewind-vs-lean.md): where Tradewind is at level, ahead and
