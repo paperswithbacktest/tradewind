@@ -1,0 +1,11 @@
+# The daily paper run on a server (an example: crontab -e and paste, after editing the path).
+# CRON_TZ (cronie, the cron of most Linux distributions) reads the schedule in New York time:
+# 17:15, after the 16:00 close and the run's 30-minute margin, daylight saving included.
+# Holidays: the run reads the NYSE calendar, finds the last session done and does nothing.
+CRON_TZ=America/New_York
+15 17 * * 1-5  $HOME/pwb-paper/tradewind-daily.sh
+
+# A cron without CRON_TZ, on a UTC clock: run twice, 21:45 and 22:45 UTC (17:45 / 16:45 New
+# York in summer, 16:45 / 17:45 in winter). The first run after the close does the session,
+# the other one finds it done; a run before the close works on the previous session (done).
+# 45 21,22 * * 1-5  $HOME/pwb-paper/tradewind-daily.sh

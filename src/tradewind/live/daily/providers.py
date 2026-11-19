@@ -51,6 +51,14 @@ def _cut(history: dict[str, SleeveBook], as_of: str | None, last_n: int) -> dict
     return {d: history[d] for d in days}
 
 
+def _behind(payload: dict, until: str | None) -> bool:
+    """A run up to ``until`` whose books end before it (the data end earlier)."""
+    if not until:
+        return False
+    dates = [b["date"] for b in payload.get("books", [])]
+    return not dates or max(dates) < until
+
+
 class EngineProvider:
     """``builders``: ``{slug: f(until) -> engine}``, ``until`` an ISO date or None; the
     engine is run inside ``record_books`` and its books kept."""
@@ -96,7 +104,8 @@ class PwbProvider:
         self.timeout = timeout
         self.log = log
         self.seconds: dict[str, float] = {}
-        self.errors: dict[str, str] = {}
+        self.errors: dict[str, str] = {}            # the sleeves of the last books() that failed
+        self.stale: dict[str, dict[str, str]] = {}  # their live symbols still behind, when stale
 
     def _env(self) -> dict:
         env = dict(os.environ)
@@ -128,6 +137,7 @@ class PwbProvider:
             os.remove(out)                          # not cached: the next run tries again
             if payload.get("stale"):
                 stale = payload["stale"]
+                self.stale[slug] = dict(stale)
                 raise StaleData(f"{slug}: {len(stale)} symbol(s) still stale after the fresh-price top-up "
                                 "(nothing is proposed):\n" + "\n".join(f"  {s}: {why}" for s, why in stale.items()))
             raise RuntimeError(f"{slug}: {payload['error']}")
@@ -151,32 +161,52 @@ class PwbProvider:
         folder = os.path.join(self.cache_dir, tag)
         os.makedirs(folder, exist_ok=True)
         out: dict[str, dict[str, SleeveBook]] = {}
+        self.errors, self.stale = {}, {}
+        failures: list[BaseException] = []
         for sleeve in self.meta.sleeves:
-            path = sleeve.strategy_path(self.papers_dir)
-            target = os.path.join(folder, sleeve.slug + ".json")
-            payload = None
-            if os.path.exists(target):
-                with open(target, encoding="utf-8") as fh:
-                    payload = json.load(fh)
-                if payload.get("error"):
-                    payload = None
-            cached = payload is not None
-            if cached and self.fresh_prices and payload.get("fresh"):
-                self.fresh[sleeve.slug] = payload["fresh"]
-            if payload is None:
-                if not os.path.exists(path):
-                    raise FileNotFoundError(f"{sleeve.slug}: no strategy file at {path}")
-                self.log(f"[signal] {sleeve.slug} ...")
-                payload = self.run_one(sleeve.slug, path, target, since=since_for(until, last_n),
-                                       last_n=last_n + 5, until=until)
-            if self.fresh_prices and payload.get("fresh"):
-                self._note_fresh(sleeve.slug, payload["fresh"])
-            history = {b["date"]: SleeveBook.from_dict(b) for b in payload["books"]}
-            out[sleeve.slug] = _cut(history, as_of, last_n)
-            last = max(history) if history else "none"
-            self.log(f"[signal] {sleeve.slug}: last close {last}"
-                     + (" (cached)" if cached else f" in {self.seconds.get(sleeve.slug, 0):.0f} s"))
+            try:
+                out[sleeve.slug] = self._one(sleeve, folder, as_of, last_n, until)
+            except (StaleData, RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
+                # the next sleeves still run: one run lists every sleeve in error, and their
+                # books are cached for the rerun
+                self.errors[sleeve.slug] = str(exc).splitlines()[0][:500]
+                failures.append(exc)
+                self.log(f"[signal] {sleeve.slug}: ERROR {self.errors[sleeve.slug]}")
+        if failures:
+            text = "\n".join(str(e) for e in failures)
+            if all(isinstance(e, StaleData) for e in failures):
+                raise StaleData(text)
+            raise RuntimeError(f"{len(failures)} sleeve(s) in error (nothing is proposed):\n{text}")
         return out
+
+    def _one(self, sleeve, folder: str, as_of: str | None, last_n: int, until: str | None
+             ) -> dict[str, SleeveBook]:
+        path = sleeve.strategy_path(self.papers_dir)
+        target = os.path.join(folder, sleeve.slug + ".json")
+        payload = None
+        if os.path.exists(target):
+            with open(target, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            if payload.get("error") or _behind(payload, until):
+                payload = None                      # the data may have caught up since: run again
+        cached = payload is not None
+        if cached and self.fresh_prices and payload.get("fresh"):
+            self.fresh[sleeve.slug] = payload["fresh"]
+        if payload is None:
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"{sleeve.slug}: no strategy file at {path}")
+            self.log(f"[signal] {sleeve.slug} ...")
+            payload = self.run_one(sleeve.slug, path, target, since=since_for(until, last_n),
+                                   last_n=last_n + 5, until=until)
+            if _behind(payload, until):
+                os.remove(target)                   # not cached: the next run tries again
+        if self.fresh_prices and payload.get("fresh"):
+            self._note_fresh(sleeve.slug, payload["fresh"])
+        history = {b["date"]: SleeveBook.from_dict(b) for b in payload["books"]}
+        last = max(history) if history else "none"
+        self.log(f"[signal] {sleeve.slug}: last close {last}"
+                 + (" (cached)" if cached else f" in {self.seconds.get(sleeve.slug, 0):.0f} s"))
+        return _cut(history, as_of, last_n)
 
 
 class ReplayProvider:

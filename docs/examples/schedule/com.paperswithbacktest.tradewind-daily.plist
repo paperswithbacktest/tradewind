@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The daily paper run on a Mac (an example, not installed by Tradewind). launchd reads the
+  Mac's clock: Paris time here. 22:45 Paris is 16:45 New York, or 17:45 during the weeks when
+  only one of the two has changed its clocks (March, October-November): after the 16:00 close
+  and its 30-minute margin all year, and the run reads the session off the NYSE calendar in
+  New York time anyway. Holidays: the run finds the last session done and does nothing.
+  A Mac asleep at 22:45 runs the job when it wakes; orders still go before the next open, and
+  after it they are proposed only (alert missed_open). To wake it: pmset repeat (see the docs).
+
+  Install (by hand): edit the path below, then
+    cp com.paperswithbacktest.tradewind-daily.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.paperswithbacktest.tradewind-daily.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.paperswithbacktest.tradewind-daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/YOU/pwb-paper/tradewind-daily.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>45</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>45</integer></dict>
+  </array>
+  <key>StandardOutPath</key>
+  <string>/tmp/tradewind-daily.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/tradewind-daily.err</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

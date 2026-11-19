@@ -148,6 +148,114 @@ others (`books/latest-DATE-fresh/`).
 The proposal lists orders that IB will refuse (an unknown ticker, a short with no borrow),
 and the send reports them as `rejected`. Tracking then shows them as rounding.
 
+## The scheduled day
+
+`python -m tradewind.live.daily.session` is the day in one command, for a scheduler. It takes
+the same options as `python -m tradewind.live.daily` (`--meta`, `--dir`, `--broker`,
+`--fresh-prices`, `--send`...) and adds the calendar, the run-once rule, the report of the day
+and the alerts:
+
+```bash
+python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --broker sim \
+    --fresh-prices alphavantage            # add --send to place the orders
+```
+
+1. **The session** is the last NYSE session whose close is 30 minutes behind
+   (`--close-margin`), read in New York time from Tradewind's NYSE calendar (holidays, the
+   13:00 early closes, daylight saving). Before the close the run works on the previous
+   session; on a holiday or a weekend it finds the last session done and does nothing.
+2. **Once per session.** `daily.lock` keeps two runs apart (the second exits with 7), and
+   `sessions/SESSION.json` records how far the day went. A session already proposed is not
+   run again (`--force` proposes it again); a second run with `--send` sends a proposed
+   session; a session sent, or whose send started, is never sent again. Any run after that
+   prints the stored summary and returns the stored exit code.
+3. Fresh prices, signals and the proposal, then the send (with `--send`), as
+   [above](#the-daily-command), on the session's close: every sleeve must have it.
+   Market-on-open orders are sent only before 09:28 New York of the next session; later, the
+   day is proposed only and the alert `missed_open` is raised.
+4. **Reconciliation:** the account's positions against the previous session's positions plus
+   the orders sent then (`fills_mismatch`), and the orders still working at the broker
+   before the day's orders (`orders_working`).
+5. **The report of the day**, `reports/SESSION.md` and `reports/SESSION.json` (and
+   `reports/latest.*`): a one-line summary, the portfolio's value and the day's change, the
+   orders proposed, sent and filled at the day's open, the gap to the backtest and its terms,
+   each sleeve's close, units and state (error, stale symbols), the stale symbols, the
+   reconciliation, the warnings and the alerts.
+
+```text
+2026-12-15 DONE | NAV 110,214 (+0.19%) | gap to backtest -38 (-0.03%) | orders 14 proposed, 14 sent, 12 filled | alerts: none
+```
+
+### Alerts and exit codes
+
+| alert | raised when |
+|---|---|
+| `stale_prices` | a sleeve has no book at the session's close (data behind, symbols still stale after the fresh-price top-up); the report lists the symbols and the sleeves |
+| `run_failed` | a strategy or the run failed; every sleeve is still run, and those in error are listed |
+| `broker_unreachable` | the account cannot be opened or read (TWS / IB Gateway closed or logged out) |
+| `tracking_gap` | the cumulative gap to the backtest is above `--alert-gap` of the NAV (1 %), or the day's gap above `--alert-gap-day` (0.5 %) |
+| `daily_loss` | the day's loss is beyond `--alert-loss` of the previous NAV (3 %) |
+| `orders_rejected` | the broker refused or cancelled orders sent |
+| `missed_open`, `kill_switch` | `--send` asked but nothing sent: past the open's cut-off, or `KILL` present |
+| `send_interrupted` | a send started and did not finish: check the broker's orders by hand |
+| `fills_mismatch`, `orders_working` | the reconciliation above |
+
+| exit code | |
+|---|---|
+| 0 | done, no alert (or nothing to do) |
+| 2 | usage: options, meta-portfolio file |
+| 3 | stale prices: nothing proposed; run it again later |
+| 4 | done, with alerts |
+| 5 | the run failed |
+| 6 | the broker is unreachable |
+| 7 | another run holds the lock |
+
+**Notification.** `--notify-cmd "COMMAND"` (or `TRADEWIND_NOTIFY_CMD`) runs a command of yours
+when the day has an alert (`--notify always`: every day). It gets the summary on its
+standard input, and `TW_DAILY_SESSION`, `TW_DAILY_STATUS`, `TW_DAILY_EXIT_CODE`,
+`TW_DAILY_SUMMARY`, `TW_DAILY_REPORT_MD` and `TW_DAILY_REPORT_JSON` in its environment. It is
+given a minute; its exit code goes into the JSON report. Tradewind sends nothing itself:
+the command is where a mail, a chat message or a phone notification is plugged in.
+
+### Scheduling
+
+Examples in [`docs/examples/schedule/`](examples/schedule/tradewind-daily.sh) (nothing is
+installed by Tradewind):
+
+| file | for |
+|---|---|
+| [`tradewind-daily.sh`](examples/schedule/tradewind-daily.sh) | the wrapper the schedulers call: the paths, the options, the secrets read from `~/.config/tradewind/daily.env`, a log per day in `DIR/logs/`. Proposals only unless `TRADEWIND_SEND=1` |
+| [`com.paperswithbacktest.tradewind-daily.plist`](examples/schedule/com.paperswithbacktest.tradewind-daily.plist) | launchd on a Mac: weekdays at 22:45 Paris time |
+| [`tradewind-daily.cron`](examples/schedule/tradewind-daily.cron) | cron on a server: `CRON_TZ=America/New_York`, weekdays at 17:15 New York |
+| [`tradewind-daily.service`](examples/schedule/tradewind-daily.service), [`.timer`](examples/schedule/tradewind-daily.timer) | systemd: `OnCalendar=Mon..Fri 17:15 America/New_York`, `Persistent=true` |
+
+**Daylight saving.** The US and Europe change their clocks on different Sundays: New York is
+6 hours behind Paris, and 5 during two to three weeks in March and in October-November. A
+schedule in Paris time at 22:45 is 16:45 or 17:45 in New York, after the close all year (the
+tests check every weekday of a year). On a server, schedule in New York time (`CRON_TZ`,
+systemd's time zone in `OnCalendar`); with a cron that only knows UTC, run twice (21:45 and
+22:45 UTC): the run decides from the NYSE calendar, and the second run finds the session done.
+
+**Holidays** need nothing in the schedule: the run reads the NYSE calendar, and a holiday's
+run finds the last session done. A run missed (the Mac asleep, the server down) happens at the
+next wake or boot (launchd, `Persistent=true`): it does the session it missed, and sends only
+if the next open has not passed.
+
+**Install on the Mac** (by hand, after editing the paths):
+
+```bash
+cp docs/examples/schedule/tradewind-daily.sh ~/pwb-paper/ && chmod +x ~/pwb-paper/tradewind-daily.sh
+mkdir -p ~/.config/tradewind && echo 'ALPHAVANTAGE_API_KEY=...' > ~/.config/tradewind/daily.env
+chmod 600 ~/.config/tradewind/daily.env
+cp docs/examples/schedule/com.paperswithbacktest.tradewind-daily.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.paperswithbacktest.tradewind-daily.plist
+sudo pmset repeat wakeorpoweron MTWRF 22:40:00     # optional: wake the Mac for the run
+```
+
+For an IBKR paper account, TWS or IB Gateway must be running and logged in at the time of the
+run (`BROKER=ibkr` in the wrapper); IB Gateway with its daily auto-restart is the usual choice
+on a machine without a screen.
+
 ## Files
 
 | file | what |
@@ -159,6 +267,8 @@ and the send reports them as `rejected`. Tracking then shows them as rounding.
 | `state.json` | the units, the books and the account at each close: the next day's starting point |
 | `books/DATE/SLUG.json` | each strategy's books, as its run gave them |
 | `sim_account.json` | the simulated account (`--broker sim`) |
+| `reports/SESSION.md`, `reports/SESSION.json` | the report of the day (`session`) |
+| `sessions/SESSION.json`, `daily.lock` | how far each session went, and the lock of the run in progress |
 
 ## Live against backtest
 

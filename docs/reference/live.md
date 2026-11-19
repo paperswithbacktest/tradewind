@@ -35,6 +35,8 @@ interface may change.
 
 ::: tradewind.live.daily.runner
 
+::: tradewind.live.daily.session
+
 ::: tradewind.live.daily.aggregate
 
 ::: tradewind.live.daily.books
