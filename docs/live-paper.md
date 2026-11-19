@@ -66,16 +66,60 @@ sleeves:
 ## The daily command
 
 ```bash
-# after the US close (22:00 Paris), once the PWB datasets hold the day's close
-python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --propose
+# after the US close (22:00 Paris); the monthly datasets completed to the close (below)
+export ALPHAVANTAGE_API_KEY=...
+python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --propose --fresh-prices alphavantage
 # read ~/pwb-paper/orders/DATE.md, then
-python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --send
+python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --send --fresh-prices alphavantage
 ```
 
 The second command reuses the books computed by the first (`books/DATE/`). The strategies
 are not run again, and the day is not tracked twice. If a strategy's last close is older
 than the others', the run stops: the data are behind. Run it again later. `--allow-stale`
 trades anyway, with a warning. `--as-of DATE` trades from a given close.
+
+## Fresh prices
+
+The PWB daily price datasets are refreshed **once a month**, and the run refuses data more
+than 4 days older than the last session. `--fresh-prices alphavantage` (or
+`fresh_prices: alphavantage` in the meta-portfolio file) completes them up to the last
+close before the strategies compute their signals. Each strategy's price loads
+(`load_dataset` and so `get_pricing`) get the AlphaVantage bars that come after the dataset's
+last day, only for the symbols that strategy loads.
+
+| | |
+|---|---|
+| key | `ALPHAVANTAGE_API_KEY` in the environment (the name data-api uses). It is never written to a file or printed. Without it the run stops before any strategy runs. |
+| rate | `ALPHAVANTAGE_RPM` requests a minute, 75 by default (the smallest premium plan). A throttling answer waits a minute and retries; a network error is retried four times. |
+| sources | stocks and ETFs: `TIME_SERIES_DAILY_ADJUSTED`, `outputsize=compact` (100 sessions; `ALPHAVANTAGE_EQUITY_FUNCTION=TIME_SERIES_DAILY` for raw closes). Currency pairs: `FX_DAILY`. Crypto: `DIGITAL_CURRENCY_DAILY`. |
+| not covered | indices, commodities, bonds. A live series of these datasets that is behind stops the run, listed as not covered. |
+| cache | `DIR/prices/SESSION/FUNCTION/SYMBOL.json`: each answer is read once a session, shared by the strategies, the `--send` run and a rerun after an error. |
+
+**The junction.** The anchor is the last day both sources have before the dataset's last
+bar. That bar is skipped because the monthly source sometimes downloads it during the
+session, as a partial bar. The chain factor `k` is the dataset's adjusted close divided
+by AlphaVantage's on the anchor. The dataset's history up to the anchor is divided by `k`,
+so its returns do not change. The bars after the anchor are AlphaVantage's own, so the last
+close is the price the account trades at. A dividend or a split between the two cut-offs
+then reads like an event the adjusted series has taken in. It is not "un-adjusted" at the
+junction, and orders are not sized in pre-split shares.
+
+**The check.** `k` must agree within 0.5 % on the anchor and the four common days before
+it. Otherwise the two sources do not quote the same series (a reused ticker, a split one
+of them missed), and the symbol is refused. A dataset last bar more than 0.5 % away from
+AlphaVantage's is replaced and listed in the proposal's warnings.
+
+**When the run stops.** A symbol is *live* when its last bar is within 45 days of the
+session. Older ones are delisted names and are left as they are. The market's last close is
+SPY's last AlphaVantage bar, so a holiday is not counted as a missing day. A live symbol
+still ending before that close after the top-up is *stale*: unknown to AlphaVantage,
+refused, not covered, or not read. Then the strategy stops, its books are not cached, and
+the run exits with code 3, proposes nothing, and lists the symbols. Run it again: the
+answers already read come from the cache.
+
+Bars dated after the last session whose close (16:30 New York) has passed are never taken.
+A run at 22:00 Paris uses the day's close. The books of a fresh run are cached apart from the
+others (`books/latest-DATE-fresh/`).
 
 ## Procedure for the paper account
 
@@ -158,6 +202,9 @@ strategies built by a function), `ReplayProvider`, `SimAccount` / `IBPaperAccoun
 
 - Each strategy runs its full history every day. A small book takes seconds; a 2 000-name
   universe takes several minutes and a few GB. The strategies run one after the other.
+- Fresh prices cost one request per live symbol a session. A strategy that loads a
+  2 000-name universe makes up to ~2 000 requests, about 27 minutes at 75 a minute, the
+  first time in a session. The next strategies and the `--send` run read the cache.
 - US stocks and ETFs only. A strategy that trades a series that is not an instrument
   (spot commodities, reconstructed bond prices, indices) needs a tradable variant first.
   Until then, exclude it or its symbols.

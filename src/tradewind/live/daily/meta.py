@@ -12,6 +12,7 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     papers_dir: ~/dev/pwb/papers
     python: /path/to/venv/bin/python      # the environment that has pwb-toolbox
     exclude_symbols: [VIX]     # never traded (an index, a spot commodity series...)
+    fresh_prices: alphavantage # complete the monthly price datasets up to the last close
     sleeves:
       - {slug: protective_asset_allocation_paa_..., weight: 0.075}
       - {slug: decomposing_the_price_earnings_ratio, weight: 0.109,
@@ -53,6 +54,7 @@ class MetaPortfolio:
     papers_dir: str = "~/dev/pwb/papers"
     python: str = ""
     exclude_symbols: list[str] = field(default_factory=list)
+    fresh_prices: str = ""              # "alphavantage": the price loads completed to the last close
 
     def __post_init__(self):
         if self.rebalance not in REBALANCE:

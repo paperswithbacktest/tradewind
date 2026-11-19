@@ -1,7 +1,7 @@
 """Run one catalogue strategy in signal mode and write its books (executed by ``PwbProvider``).
 
     python -m tradewind.live.daily.pwb_worker STRATEGY.py OUT.json --since D [--until D]
-        [--last-n N] [--papers DIR] [--slug SLUG]
+        [--last-n N] [--papers DIR] [--slug SLUG] [--fresh-prices CACHE [--session D]]
 
 In the environment that has pwb-toolbox: the strategy runs through the papers harness
 (``backtester.py`` of ``--papers``), on Tradewind -- pwb-toolbox is bound to it with
@@ -10,6 +10,10 @@ strategies import is an alias of ``tradewind`` in this process only. ``--until``
 prices that ``pwb_toolbox.datasets.get_pricing`` returns at that date (a replay of past
 days; other datasets are not cut). The process ends with ``os._exit`` once the file is
 written: some strategies register exit hooks that would otherwise run.
+
+``--fresh-prices CACHE`` completes every price load with AlphaVantage's bars up to the last
+close (``fresh.py``); a symbol still stale stops the strategy and the file carries the list
+(``stale``) instead of books.
 """
 
 from __future__ import annotations
@@ -62,11 +66,15 @@ def main(argv=None) -> None:
     p.add_argument("--last-n", type=int, default=10)
     p.add_argument("--papers", default=os.environ.get("PAPERS_DIR", "."))
     p.add_argument("--slug", default="")
+    p.add_argument("--fresh-prices", default=None, metavar="CACHE",
+                   help="complete the price loads with AlphaVantage (cache directory)")
+    p.add_argument("--session", default=None, help="the close the prices are completed to")
     args = p.parse_args(argv)
 
     os.environ["PWB_BACKTEST_ENGINE"] = "tradewind"
     os.environ.setdefault("TQDM_DISABLE", "1")
     t0 = time.time()
+    fresh = None
     payload: dict = {"slug": args.slug, "strategy": args.strategy, "since": args.since, "until": args.until}
     try:
         tradewind = install_alias()
@@ -75,6 +83,14 @@ def main(argv=None) -> None:
         matplotlib.use("Agg")
         if args.until:
             cut_pricing(args.until)
+        if args.fresh_prices:
+            import pwb_toolbox.datasets as pwb_ds
+
+            from tradewind.live.daily.fresh import FreshPrices, install
+
+            fresh = FreshPrices.from_env(args.fresh_prices, args.session or args.until,
+                                         log=lambda *a: print(*a, file=sys.stderr))
+            install(fresh, pwb_ds)
         from tradewind.live.daily.books import record_books
 
         papers = os.path.abspath(os.path.expanduser(args.papers))
@@ -97,7 +113,13 @@ def main(argv=None) -> None:
                        harness_lines=[ln for ln in log.getvalue().splitlines()
                                       if ln.lstrip().startswith(("Exposure:", "Underfunded", "Out of universe:"))][:10])
     except BaseException as exc:  # noqa: BLE001 - the caller reads the error from the file
-        payload.update(books=[], error=f"{type(exc).__name__}: {str(exc)[:1000]}")
+        payload.update(books=[], error=f"{type(exc).__name__}: {str(exc)[:4000]}")
+    if fresh is not None:
+        # a strategy that caught the error and went on with stale prices gives no book either
+        payload["fresh"] = fresh.summary()
+        if fresh.stale:
+            payload.update(books=[], stale=dict(sorted(fresh.stale.items())),
+                           error=payload.get("error") or f"StalePrices: {fresh.message()[:4000]}")
     payload["seconds"] = round(time.time() - t0, 1)
     tmp = args.out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
