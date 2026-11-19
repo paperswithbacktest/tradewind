@@ -11,7 +11,8 @@
 #
 # Environment (defaults are the data host's paths):
 #   TW_SRC      Tradewind sources under test (src/ of a checkout of main)
-#   PAPERS      a clone of the papers repository holding both trees
+#   PAPERS      a git clone of the papers repository holding both trees; a partial clone is
+#               enough (git clone --filter=blob:none --no-checkout, then fetch both commits)
 #   PY_0151     python of an environment built from tools/oracle/env/requirements-0151.txt
 #   PY_0152     python of an environment built from tools/oracle/env/requirements-0152.txt
 #   JOBS        parallel strategies (4)
@@ -20,7 +21,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TW_SRC="${TW_SRC:-$HOME/tradewind/src}"
-PAPERS="${PAPERS:-$HOME/remeasure/papers-m147}"
+PAPERS="${PAPERS:-$HOME/oracle/papers}"
 PY_0151="${PY_0151:-$HOME/remeasure/venv0151/bin/python}"
 PY_0152="${PY_0152:-$HOME/remeasure/venv0152/bin/python}"
 JOBS="${JOBS:-4}"
