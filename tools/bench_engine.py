@@ -10,6 +10,9 @@ Scenarios, all on the same seeded bars (``--scenarios`` picks some):
 * ``idle``: ``next`` does nothing -- the loop, the feeds, the broker pass and the mark;
 * ``rebalance``: equal weight through ``order_target_percent`` on every name at each month's
   first bar -- the order path (batch acceptance, fills) on top;
+* ``daily``: ``order_target_percent`` on every name at every bar, the weights rotating so
+  that every name trades every bar -- the broker's worst case (phases 5 and 6 on a batch of
+  one order per name);
 * ``notified``: ``rebalance`` with ``notify_order`` and ``notify_trade`` defined, so every
   notification is built and delivered;
 * ``reader``: ``next`` reads ``len(d)``, ``d.close[0]`` and ``d.close[-1]`` of every feed --
@@ -89,6 +92,17 @@ class Rebalance(tw.Strategy):
                 self.order_target_percent(d, target=w)
 
 
+class Daily(tw.Strategy):
+    def __init__(self):
+        self.k = 0
+
+    def next(self):
+        self.k += 1
+        w = 0.95 / len(self.datas)
+        for i, d in enumerate(self.datas):
+            self.order_target_percent(d, target=w * (0.5 + 0.5 * ((i + self.k) % 3)))
+
+
 class Notified(Rebalance):
     def __init__(self):
         super().__init__()
@@ -136,7 +150,7 @@ class Indicators(tw.Strategy):
                 self.order_target_percent(d, target=0.0)
 
 
-SCENARIOS = {"idle": Idle, "rebalance": Rebalance, "notified": Notified, "reader": Reader,
+SCENARIOS = {"idle": Idle, "rebalance": Rebalance, "daily": Daily, "notified": Notified, "reader": Reader,
              "indicators": Indicators}
 
 

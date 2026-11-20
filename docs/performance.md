@@ -14,6 +14,9 @@ Measured on an Apple M4 laptop, Python 3.13, synthetic daily bars, best of nine 
 | `notified`: the same with `notify_order` and `notify_trade` defined | 0.91 µs | 0.68 µs |
 | `indicators`: an SMA(20) per feed read every bar, weekly rotation | 1.26 µs | 0.77 µs |
 
+`daily` (`order_target_percent` on every name at every bar, the weights rotating so every
+name trades) is the broker's stress case, outside the budget's scenarios.
+
 On 1 000 names × 250 bars the same scenarios go from 0.29 / 0.50 / 0.95 / 0.95 / 1.30 µs
 to 0.17 / 0.31 / 0.56 / 0.70 / 0.84 µs. The budget of `spec/05-interfaces.md` § 7.2 is
 3 µs per security-bar on 4 000 names, about 0.6 µs of it for the engine; the figure on
@@ -47,10 +50,27 @@ What a strategy's calls cost (`tools/bench_api.py`, per call):
   models a market order fills at the open through the slippage model and the commission
   scheme directly; a model of your own, or a subclass of a default one, takes the general
   path through the interfaces of `spec/05-interfaces.md` § 5.
-* **Orders stay in submission order.** The batch check and the fills of a bar walk the
-  orders one by one in the order they were placed, because each one moves the cash the next
-  one is checked against and a commission scheme may be any Python code; the per-bar
-  reductions over all securities (the mark) are vectorised with a left-to-right sum.
+* **The broker works on the whole batch.** When a bar's batch holds at least 32 orders and
+  every one of them is a plain market order under the default models (`ModelSet.oracle()`,
+  no slippage at the open, a stock-like scheme without leverage, the account currency), the
+  batch check and the fills run on arrays: prices gathered from the market state, fees and
+  cash flows computed for the whole batch, the running cash summed left to right with
+  `np.add.accumulate` -- the same float operations, in the same order, as one order at a
+  time, so every result is identical bit for bit. A commission scheme with its own
+  `_getcommission` (pwb-toolbox's `SpreadImpactCommission`) is still called once per
+  order. Any other batch, or a bar with two orders on one security, goes one order at a
+  time; an order whose cash re-check fails at the fill is handled one by one from the exact
+  cash, then the batch resumes.
+* **Orders stay in submission order.** The order is deterministic and it is the oracle's:
+  the batch check walks the orders in the order they were placed, the fills in the order
+  they were accepted, because each one moves the cash the next one is checked against. A
+  sort by symbol (Lean's) would change which order a short cash refuses, so it is not used.
+
+On 4 000 names with every name trading every bar (`daily`, the broker's worst case),
+the batch path halves the acceptance phase (1.36 to 0.67 µs per order) and cuts the fill
+phase by a quarter (4.3 to 3.4 µs per order); the rest of that scenario's 7.3 µs per
+security-bar is the strategy's own `order_target_percent` calls (building the orders) and
+the per-order bookkeeping of the fills (positions, executions, trades).
 
 ### Checking that a speed change changes nothing
 
