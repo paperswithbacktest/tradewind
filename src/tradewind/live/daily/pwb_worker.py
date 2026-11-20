@@ -1,7 +1,8 @@
 """Run one catalogue strategy in signal mode and write its books (executed by ``PwbProvider``).
 
     python -m tradewind.live.daily.pwb_worker STRATEGY.py OUT.json --since D [--until D]
-        [--last-n N] [--papers DIR] [--slug SLUG] [--fresh-prices CACHE [--session D]]
+        [--last-n N] [--papers DIR] [--slug SLUG] [--fresh-prices CACHE [--session D]
+        [--fresh-config JSON]]
 
 In the environment that has pwb-toolbox: the strategy runs through the papers harness
 (``backtester.py`` of ``--papers``), on Tradewind -- pwb-toolbox is bound to it with
@@ -12,8 +13,11 @@ days; other datasets are not cut). The process ends with ``os._exit`` once the f
 written: some strategies register exit hooks that would otherwise run.
 
 ``--fresh-prices CACHE`` completes every price load with AlphaVantage's bars up to the last
-close (``fresh.py``); a symbol still stale stops the strategy and the file carries the list
-(``stale``) instead of books.
+close (``fresh.py``). ``--fresh-config`` (JSON: ``strict``, ``tolerance``, ``proxies``,
+``approximate``, from ``MetaPortfolio.fresh_config``) says how. A symbol still stale is listed
+in the file (``stale``, ``stale_info``); with ``strict`` (``stale_symbol_policy: block``) it
+stops the strategy and the file carries the list instead of books, otherwise the strategy runs
+on its rows as they are and the books are written with the list.
 """
 
 from __future__ import annotations
@@ -57,6 +61,14 @@ def cut_pricing(until: str) -> None:
     pwb_ds.get_pricing = get_pricing
 
 
+def fresh_options(text: str | None) -> dict:
+    """``FreshPrices.from_env``'s options from ``--fresh-config`` (JSON; none: strict, the
+    defaults)."""
+    conf = json.loads(text) if text else {}
+    return {"strict": bool(conf.get("strict", True)), "tolerance": dict(conf.get("tolerance") or {}),
+            "proxies": dict(conf.get("proxies") or {}), "approximate": list(conf.get("approximate") or [])}
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser()
     p.add_argument("strategy")
@@ -69,6 +81,7 @@ def main(argv=None) -> None:
     p.add_argument("--fresh-prices", default=None, metavar="CACHE",
                    help="complete the price loads with AlphaVantage (cache directory)")
     p.add_argument("--session", default=None, help="the close the prices are completed to")
+    p.add_argument("--fresh-config", default=None, help="JSON: strict, tolerance, proxies, approximate")
     args = p.parse_args(argv)
 
     os.environ["PWB_BACKTEST_ENGINE"] = "tradewind"
@@ -89,7 +102,8 @@ def main(argv=None) -> None:
             from tradewind.live.daily.fresh import FreshPrices, install
 
             fresh = FreshPrices.from_env(args.fresh_prices, args.session or args.until,
-                                         log=lambda *a: print(*a, file=sys.stderr))
+                                         log=lambda *a: print(*a, file=sys.stderr),
+                                         **fresh_options(args.fresh_config))
             install(fresh, pwb_ds)
         from tradewind.live.daily.books import record_books
 
@@ -115,11 +129,12 @@ def main(argv=None) -> None:
     except BaseException as exc:  # noqa: BLE001 - the caller reads the error from the file
         payload.update(books=[], error=f"{type(exc).__name__}: {str(exc)[:4000]}")
     if fresh is not None:
-        # a strategy that caught the error and went on with stale prices gives no book either
         payload["fresh"] = fresh.summary()
         if fresh.stale:
-            payload.update(books=[], stale=dict(sorted(fresh.stale.items())),
-                           error=payload.get("error") or f"StalePrices: {fresh.message()[:4000]}")
+            payload.update(stale=dict(sorted(fresh.stale.items())), stale_info=dict(sorted(fresh.stale_info.items())))
+            if fresh.strict:
+                # a strategy that caught the error and went on with stale prices gives no book either
+                payload.update(books=[], error=payload.get("error") or f"StalePrices: {fresh.message()[:4000]}")
     payload["seconds"] = round(time.time() - t0, 1)
     tmp = args.out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:

@@ -30,8 +30,9 @@ One call does the whole day, in this order, and writes the report of the day:
    one-line summary. The exit code says what happened (``EXIT_*`` below); an optional command
    (``--notify-cmd``) is run with the summary when there is an alert.
 
-Exit codes: 0 done (or nothing to do), 2 usage, 3 stale prices, 4 done with alerts, 5 run
-failed, 6 broker unreachable, 7 another run holds the lock.
+Exit codes: 0 done (or nothing to do), 2 usage, 3 stale prices (nothing proposed), 4 done
+with alerts (proposed, stale symbols set aside included), 5 run failed, 6 broker unreachable,
+7 another run holds the lock.
 """
 
 from __future__ import annotations
@@ -123,7 +124,8 @@ class AlertConfig:
 class Alert:
     code: str           # stale_prices, run_failed, broker_unreachable, tracking_gap, daily_loss,
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
-    #                     fills_mismatch, orders_working, notify_failed, symbol_watch, short_borrow
+    #                     fills_mismatch, orders_working, notify_failed, symbol_watch, short_borrow,
+    #                     stale_symbol
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -326,6 +328,8 @@ class DailySession:
             return self._finish(session, None, alerts, code, status, errors=errors, stale=stale)
 
         alerts += check_day(report.row, report.sent, self.cfg)
+        if report.stale:
+            alerts.append(Alert("stale_symbol", stale_message(report.stale)))
         recon = self._reconcile(session, seen)
         if recon["mismatches"]:
             alerts.append(Alert("fills_mismatch", f"{len(recon['mismatches'])} position(s) differ from the previous "
@@ -460,6 +464,7 @@ class DailySession:
                             "close": info.get("date"), "nav": info.get("nav"),
                             "error": errors.get(s.slug, ""), "stale": sorted(stale.get(s.slug, {}))})
         stale_symbols = sorted({sym for v in stale.values() for sym in v})
+        stale_detail = list(report.stale) if report is not None else []
         codes = sorted({a.code for a in alerts})
         mode = "send" if extra.get("sent") else ("propose (send refused)" if self.send else "propose")
         if report is not None:
@@ -489,6 +494,7 @@ class DailySession:
             "sleeves": sleeves,
             "sleeves_in_error": errors,
             "stale_symbols": stale_symbols,
+            "stale_detail": stale_detail,
             "warnings": list(report.warnings) if report is not None else [],
             "borrow": dict(report.borrow) if report is not None else {},
             "reconciliation": extra.get("reconciliation", {}),
@@ -507,6 +513,13 @@ class DailySession:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"command": self.notify_cmd, "error": f"{type(exc).__name__}: {exc}"}
         return {"command": self.notify_cmd, "exit": proc.returncode, "stderr": (proc.stderr or "")[-500:]}
+
+
+def stale_message(rows: list[dict]) -> str:
+    """The ``stale_symbol`` alert: one line per symbol (last bar, cause, what was done)."""
+    head = f"{len(rows)} symbol(s) still stale after the fresh-price top-up, set aside ({rows[0].get('policy', '')}):"
+    return "\n".join([head] + [f"{x['symbol']}: last bar {x.get('last') or '?'}, {x.get('cause') or 'stale'} "
+                                f"({x.get('reason', '')}); {x.get('action', '')}" for x in rows])
 
 
 def render_markdown(d: dict) -> str:
@@ -543,7 +556,15 @@ def render_markdown(d: dict) -> str:
         state = ("error: " + s["error"]) if s["error"] else ("stale: " + ", ".join(s["stale"][:10]) if s["stale"] else "ok")
         units = "" if s["units"] is None else f"{s['units']:.6g}"
         md.append(f"| `{s['slug']}` | {s['weight']:.4f} | {units} | {s['close'] or ''} | {money(s['nav'])} | {state} |")
-    if d["stale_symbols"]:
+    if d.get("stale_detail"):
+        md += ["", "## Stale symbols", "", "| symbol | last bar | cause | sleeves | policy | done |",
+               "|---|---|---|---|---|---|"]
+        for x in d["stale_detail"]:
+            sym = x["symbol"] + (f" ({x['plan_symbol']})" if x.get("plan_symbol", x["symbol"]) != x["symbol"] else "")
+            md.append(f"| {sym} | {x.get('last') or ''} | {x.get('cause') or ''}: {x.get('reason', '')} | "
+                      + ", ".join(f"`{s}` {x.get('shares', {}).get(s, 0.0):.1%}" for s in x.get("sleeves", []))
+                      + f" | {x.get('policy', '')} | {x.get('action', '')} |")
+    elif d["stale_symbols"]:
         md += ["", "## Stale symbols", "", ", ".join(d["stale_symbols"])]
     if o["sent"]:
         md += ["", "## Orders sent", "", "| symbol | quantity | status |", "|---|---:|---|"]
@@ -625,4 +646,4 @@ if __name__ == "__main__":
 
 __all__ = ["EXIT_ALERT", "EXIT_BROKER", "EXIT_BUSY", "EXIT_FAILED", "EXIT_OK", "EXIT_STALE", "EXIT_USAGE", "Alert",
            "AlertConfig", "DailySession", "SessionResult", "check_day", "closed_session", "next_open",
-           "render_markdown"]
+           "render_markdown", "stale_message"]

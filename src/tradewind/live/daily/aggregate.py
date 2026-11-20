@@ -18,6 +18,12 @@ left out of the book and of the orders, with its reason (``Plan.refused``).
 
 **Rounding.** ``E`` is rounded to the lot (to the nearest; ``lot=0`` keeps fractional
 shares); an order smaller than ``min_order_notional`` is dropped unless it closes a line.
+
+**Stale symbols.** A symbol whose price stayed stale after the fresh-price top-up
+(``frozen``, from the runner) is not traded on the strategies' word: under ``hold`` its target
+is what the account holds (no order, no new line), under ``close`` it is zero (the holding is
+sold at the open). The exact book keeps the strategies' intent: the difference shows in the
+tracking as untraded.
 """
 
 from __future__ import annotations
@@ -61,6 +67,7 @@ class Plan:
     excluded: dict[str, float] = field(default_factory=dict)     # excluded symbols' exact shares
     refused: dict[str, str] = field(default_factory=dict)        # why each excluded symbol is not traded
     missing_price: list[str] = field(default_factory=list)
+    frozen: dict[str, str] = field(default_factory=dict)        # stale symbols: hold or close
     gross_exact: float = 0.0            # gross / capital of the exact book
     gross_target: float = 0.0           # gross / capital of the rounded book
     net_target: float = 0.0
@@ -125,8 +132,9 @@ def round_lot(q: float, lot: float) -> float:
 
 def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[str, float], capital: float,
              date: str, units: dict[str, float] | None = None, last_reset: str | None = None,
-             weights_seen: dict[str, float] | None = None) -> Plan:
-    """The day's plan: units (kept or reset), exact and rounded targets, the orders."""
+             weights_seen: dict[str, float] | None = None, frozen: dict[str, str] | None = None) -> Plan:
+    """The day's plan: units (kept or reset), exact and rounded targets, the orders.
+    ``frozen``: ``{symbol: "hold" | "close"}``, the stale symbols (module doc)."""
     prices = merged_prices(books)
     reason = ""
     if units is None:
@@ -154,6 +162,11 @@ def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[st
         # rounding to the nearest lot crossed the cap: round toward zero instead, which
         # never adds gross to the exact book
         target = {s: math.copysign(math.floor(abs(q) / meta.lot) * meta.lot, q) for s, q in exact.items()}
+    frozen = dict(frozen or {})
+    for sym, how in frozen.items():
+        if how not in ("hold", "close"):
+            raise ValueError(f"a stale symbol is held or closed, not {how!r}")
+        target[sym] = current.get(sym, 0.0) if how == "hold" else 0.0
     target = {s: q for s, q in target.items() if q}
     orders, skipped, missing = [], [], []
     for sym in sorted(set(target) | {s for s, q in current.items() if q}):
@@ -176,7 +189,7 @@ def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[st
                if not meta.tradable(s)}
     plan = Plan(date=date, capital=capital, units=units, rebalanced=bool(reason), reason=reason,
                 cap_scale=scale, exact=exact, target=target, orders=orders, skipped=skipped,
-                excluded=excluded, refused=refused, missing_price=missing)
+                excluded=excluded, refused=refused, missing_price=missing, frozen=frozen)
     plan.gross_exact = gross(exact, prices) / capital if capital > 0 else 0.0
     plan.gross_target = gross(target, prices) / capital if capital > 0 else 0.0
     plan.net_target = (sum(q * prices[s] for s, q in target.items() if s in prices) / capital
