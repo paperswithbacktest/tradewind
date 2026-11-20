@@ -30,7 +30,9 @@ class SleeveBook:
     ``positions``: shares held at the close (after the fills of that bar); ``target``: the
     shares it will hold after the next open, its positions plus the remaining size of its
     open market orders (at-close and conditional orders are listed in ``conditional`` and
-    not counted); ``open``/``close``: the bar of every feed the strategy reads; ``costs``:
+    not counted); ``open``/``close``: the bar of every feed the strategy reads -- for a name
+    the harness marks at another price than its feed's (``MARK_HOOK``: a name outside a
+    point-in-time universe, whose feed is a flat line), that mark for both; ``costs``:
     the commission charged on that bar's executions; ``half_spread``: the cost per unit of
     notional the strategy's commission scheme would charge each symbol (when it says);
     ``stale_bars``: the symbols held or targeted whose last bar is older than the book's date
@@ -62,6 +64,23 @@ class SleeveBook:
                    half_spread={k: float(v) for k, v in d.get("half_spread", {}).items()},
                    conditional=list(d.get("conditional", [])),
                    stale_bars={k: str(v) for k, v in d.get("stale_bars", {}).items()})
+
+
+# The price a harness marks a holding at when the feed does not carry it. pwb-toolbox's harness
+# (``run_strategy`` with a point-in-time universe, ``pit_exit="hold"``, its default) blanks the
+# bars of a name outside the universe into a flat line at its last member close, and marks what
+# is still held there to the real close through the cash; ``_pwb_mark_price(name, data)`` on the
+# strategy returns that real close (the feed's close for any other name).
+MARK_HOOK = "_pwb_mark_price"
+
+
+def _real_close(mark, name, data) -> float | None:
+    """The strategy's own mark for ``data`` when it has one (``MARK_HOOK``), else None."""
+    try:
+        v = _finite(mark(name, data))
+    except Exception:  # noqa: BLE001 - a feed before its first bar, a harness that cannot say
+        return None
+    return v if v is not None and v > 0 else None
 
 
 def _finite(x) -> float | None:
@@ -110,6 +129,7 @@ class BookRecorder(Analyzer):
             return
         strat = self.strategy
         broker = strat.broker
+        mark = getattr(strat, MARK_HOOK, None)
         positions: dict[str, float] = {}
         opens: dict[str, float] = {}
         closes: dict[str, float] = {}
@@ -125,6 +145,9 @@ class BookRecorder(Analyzer):
                 if isinstance(bar_day, _dt.date) and bar_day.isoformat() < today:
                     bar_dates[name] = bar_day.isoformat()
             o, c = _finite(d.open[0]), _finite(d.close[0])
+            real = _real_close(mark, name, d) if mark is not None else None
+            if real is not None and real != c:
+                o = c = real                        # a flat bar outside the universe: its open is stale too
             if c is not None and c > 0:
                 closes[name] = c
                 opens[name] = o if o is not None and o > 0 else c

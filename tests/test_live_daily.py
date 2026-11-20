@@ -133,6 +133,64 @@ def test_target_book_is_what_the_strategy_holds_after_the_next_open():
     assert set(last.close) == set(SYMBOLS) and last.nav > 0
 
 
+class _HoldOutside(tw.Strategy):
+    """Buys AAA on the first bar and holds it; AAA's feed is a flat line after ``CUT`` and the
+    real closes are ``REAL``, as pwb-toolbox's harness does for a name that left a point-in-time
+    universe (``pit_exit="hold"``)."""
+
+    CUT = 0
+    REAL: pd.Series = pd.Series(dtype=float)
+    fail = False
+
+    def next(self):
+        if len(self) == 1:
+            self.order_target_size(self.datas[0], 10)
+
+    def _pwb_mark_price(self, name, data):
+        if self.fail:
+            raise KeyError(name)
+        day = pd.Timestamp(data.datetime.date(0))
+        return float(self.REAL.loc[day]) if name == "AAA" and day > self.CUT else float(data.close[0])
+
+
+def _flat_after(frame, cut):
+    flat = frame.copy()
+    last = flat.loc[:cut, "close"].iloc[-1]
+    for col in ("open", "high", "low", "close"):
+        flat.loc[flat.index > cut, col] = last
+    return flat
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_a_held_name_outside_the_universe_is_booked_at_its_real_close(fail):
+    real = FRAMES["AAA"]
+    cut = real.index[-40]
+    flat = _flat_after(real, cut)
+    strategy = type("HoldOutside", (_HoldOutside,), {"CUT": cut, "REAL": real["close"], "fail": fail})
+    cerebro = tw.Cerebro()
+    cerebro.adddata(tw.feeds.PandasData(dataname=flat), name="AAA")
+    cerebro.adddata(tw.feeds.PandasData(dataname=FRAMES["BBB"]), name="BBB")
+    cerebro.addstrategy(strategy)
+    cerebro.broker.setcash(100_000.0)
+    with record_books(since=str(real.index[-50].date()), last_n=60) as rec:
+        cerebro.run()
+    books = rec.books
+    last = books[max(books)]
+    assert last.positions == {"AAA": 10.0}
+    assert last.close["BBB"] == pytest.approx(FRAMES["BBB"]["close"].iloc[-1])
+    if fail:                                   # a hook that cannot say: the feed's flat close
+        assert last.close["AAA"] == pytest.approx(flat["close"].iloc[-1])
+        return
+    for day, book in books.items():
+        ts = pd.Timestamp(day)
+        assert book.close["AAA"] == pytest.approx(real["close"].loc[ts])
+        if ts > cut:                           # the flat bar's open is the stale close: the mark
+            assert book.open["AAA"] == book.close["AAA"]
+        else:
+            assert book.open["AAA"] == pytest.approx(real["open"].loc[ts])
+    assert len({b.close["AAA"] for b in books.values()}) == len(books)
+
+
 def test_books_cut_at_a_past_close_equal_the_full_runs():
     full = _provider().books(None, last_n=30)
     day = sorted(full["momentum"])[-10]
