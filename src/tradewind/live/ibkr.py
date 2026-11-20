@@ -39,6 +39,9 @@ LIVE_PORTS = frozenset({7496, 4001})        # TWS live, IB Gateway live (default
 PAPER_PREFIXES = ("DU", "DF")               # paper account ids
 
 # message codes (TWS API "message codes" page)
+# warnings (status ValidationError) after which TWS / IB Gateway has not sent the order on:
+# 321 "The API interface is currently in Read-Only mode" (API settings: Read-Only API ticked)
+REFUSED_WARNINGS = frozenset({321})
 LINK_LOST = frozenset({1100, 2110})         # TWS <-> IB servers lost
 LINK_RESTORED = frozenset({1101, 1102})     # restored; 1101: data lost, resubscribe
 SOCKET_ERRORS = frozenset({502, 504, 1300})  # cannot connect / not connected / socket port reset
@@ -49,6 +52,14 @@ _PENDING = frozenset({"PendingSubmit", "ApiPending", "PendingCancel"})
 _CANCELLED = frozenset({"Cancelled", "ApiCancelled"})
 
 _EPOCH = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
+
+
+def _never_sent(trade) -> bool:
+    """An order TWS refused before sending it on (a ``REFUSED_WARNINGS`` warning, no permId):
+    it is not working at the broker, although ib_async keeps it among the open trades."""
+    if trade.orderStatus.status != "ValidationError" or getattr(trade.order, "permId", 0):
+        return False
+    return any(int(getattr(e, "errorCode", 0) or 0) in REFUSED_WARNINGS for e in getattr(trade, "log", ()) or ())
 
 
 def _ns_of(when) -> int:
@@ -102,6 +113,8 @@ def status_message(client_id: str, status: str, *, acked: bool, cancel_asked: bo
     if status == "Inactive":
         return Rejected(client_id, reason or "order inactive at the broker", code, t)
     if status == "ValidationError":
+        if code in REFUSED_WARNINGS:    # a warning that means the order never left TWS / IB Gateway
+            return Rejected(client_id, reason or "order refused by TWS / IB Gateway", code, t)
         return Notice(reason or "order validation warning", code, client_id, t)
     return None                         # Filled (executions carry it), pending states
 
@@ -119,8 +132,12 @@ class IBAdapter:
                  require_paper: bool = True, readonly: bool = False, exchange: str = "SMART",
                  currency: str = "USD", contracts: dict | None = None, reconnect: bool = True,
                  reconnect_delays: tuple = (2, 5, 10, 30, 60), commission_wait: float = 10.0,
-                 ib=None, ib_module=None):
+                 base_fx: float | None = None, ib=None, ib_module=None):
         self.host, self.port, self.client_id = host, int(port), int(client_id)
+        self.base_fx = base_fx                 # one unit of the base currency in `currency` (EURUSD)
+        self.base_currency = currency
+        self.fx_missing = False
+        self.fx_used = 1.0
         self.account = account
         self.require_paper = require_paper
         self.readonly = readonly
@@ -321,25 +338,52 @@ class IBAdapter:
             self._retry_at = time.monotonic()
 
     # -- account --------------------------------------------------------------------------------------
+    def account_values(self) -> tuple[float | None, float | None]:
+        """The account's cash and net liquidation value in ``self.currency``.
+
+        IB reports ``NetLiquidation`` and ``TotalCashValue`` in the account's **base** currency
+        only. When the base is not ``self.currency`` (an EUR account trading in USD), they are
+        converted with IB's own ``ExchangeRate`` for ``self.currency`` (base units per unit,
+        published once the account holds that currency), or else with ``base_fx`` (the price
+        of one unit of the base currency in ``self.currency``: EURUSD for an EUR account).
+        Neither: ``(None, None)``, and ``base_currency`` / ``fx_missing`` say why."""
+        values: dict[tuple[str, str], float] = {}
+        for value in self.ib.accountValues(self.account):
+            tag = value.tag.removeprefix("$LEDGER-")
+            try:
+                values.setdefault((tag, value.currency), float(value.value))
+            except (TypeError, ValueError):
+                continue
+        bases = sorted({cur for (tag, cur) in values if tag == "NetLiquidation" and cur != "BASE"})
+        self.base_currency = self.currency if self.currency in bases or not bases else bases[0]
+        self.fx_missing = False
+        if self.base_currency == self.currency:
+            return values.get(("TotalCashValue", self.currency)), values.get(("NetLiquidation", self.currency))
+        rate = values.get(("ExchangeRate", self.currency))         # base units per unit of self.currency
+        if rate and rate > 0:
+            per_base = 1.0 / rate
+        elif self.base_fx:
+            per_base = float(self.base_fx)
+        else:
+            self.fx_missing = True
+            return None, None
+        self.fx_used = per_base
+        cash = values.get(("TotalCashValue", self.base_currency))
+        nlv = values.get(("NetLiquidation", self.base_currency))
+        return (None if cash is None else cash * per_base), (None if nlv is None else nlv * per_base)
+
     def snapshot(self, full_sync: bool = False) -> AccountSnapshot:
         ib = self.ib
         t = self.now()
         if ib is None or not ib.isConnected():
             return AccountSnapshot(None, None, self.currency, time=t)
-        cash = nlv = None
-        for value in ib.accountValues(self.account):
-            if value.currency not in (self.currency, "BASE"):
-                continue
-            if value.tag == "TotalCashValue" and (cash is None or value.currency == self.currency):
-                cash = float(value.value)
-            elif value.tag == "NetLiquidation" and (nlv is None or value.currency == self.currency):
-                nlv = float(value.value)
+        cash, nlv = self.account_values()
         positions = tuple(sorted((p.contract.symbol, float(p.position), float(p.avgCost))
                                  for p in ib.positions(self.account) if p.position))
         orders = tuple(BrokerOrder(tr.order.orderRef, tr.contract.symbol,
                                    (1.0 if tr.order.action == "BUY" else -1.0) * float(tr.order.totalQuantity),
                                    float(tr.orderStatus.filled))
-                       for tr in ib.openTrades() if tr.order.orderRef)
+                       for tr in ib.openTrades() if tr.order.orderRef and not _never_sent(tr))
         executions = ()
         if full_sync:
             executions = tuple(self._execution(f, f.commissionReport.commission if f.commissionReport else 0.0)

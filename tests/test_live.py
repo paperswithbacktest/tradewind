@@ -484,6 +484,9 @@ def test_ib_status_mapping():
     assert not status_message("c", "Cancelled", **{**kw, "acked": True, "tif": "GTC"}).expired
     assert isinstance(status_message("c", "Inactive", **kw), Rejected)
     assert isinstance(status_message("c", "ValidationError", **kw), Notice)
+    ro = status_message("c", "ValidationError", **kw, code=321,
+                        reason="Error validating request: The API interface is currently in Read-Only mode.")
+    assert isinstance(ro, Rejected) and ro.code == 321
 
 
 # -- the IB adapter against a stub of ib_async's interface -------------------------------------------
@@ -695,3 +698,51 @@ def test_a_strategy_without_notify_hooks_still_gets_its_fills():
     live, _, venue, _ = _session(Silent, max_slices=3)
     assert live.broker._tw_quiet_orders is False and live.broker._tw_quiet_trades is False
     assert live.broker.getposition(live.datas[0]).size == 7 == venue.positions["A"][0]
+
+
+def _eur_stub(values):
+    stub = _StubIB()
+    V = types.SimpleNamespace
+    stub.accountValues = lambda account="": [V(tag=t, value=v, currency=c) for t, v, c in values]
+    return stub
+
+
+def test_ib_adapter_reads_a_non_usd_base_account_in_usd():
+    # an EUR account: IB gives NetLiquidation and TotalCashValue in EUR only
+    eur = [("NetLiquidation", "1000054.09", "EUR"), ("TotalCashValue", "1000000.00", "EUR"),
+           ("$LEDGER-ExchangeRate", "1.00", "EUR"), ("$LEDGER-ExchangeRate", "1.00", "BASE")]
+    adapter = IBAdapter(ib=_eur_stub(eur), ib_module=_ib_module())
+    adapter.connect()
+    snap = adapter.snapshot()
+    assert snap.net_liquidation is None and snap.cash is None
+    assert adapter.fx_missing and adapter.base_currency == "EUR"
+    # the rate given by the caller (EURUSD 1.16)
+    adapter = IBAdapter(ib=_eur_stub(eur), ib_module=_ib_module(), base_fx=1.16)
+    adapter.connect()
+    snap = adapter.snapshot()
+    assert snap.net_liquidation == pytest.approx(1000054.09 * 1.16) and snap.cash == pytest.approx(1_160_000.0)
+    # IB's own rate, once the account holds USD, wins over the caller's: 1 USD = 0.8 EUR
+    with_usd = eur + [("ExchangeRate", "0.8", "USD"), ("TotalCashValue", "5", "USD")]
+    adapter = IBAdapter(ib=_eur_stub(with_usd), ib_module=_ib_module(), base_fx=1.16)
+    adapter.connect()
+    snap = adapter.snapshot()
+    assert snap.net_liquidation == pytest.approx(1000054.09 / 0.8) and not adapter.fx_missing
+    # a USD account is read as it is
+    adapter = IBAdapter(ib=_StubIB(), ib_module=_ib_module())
+    adapter.connect()
+    assert (adapter.snapshot().cash, adapter.snapshot().net_liquidation) == (1234.5, 9999.0)
+
+
+def test_ib_adapter_read_only_api_refusal_is_a_rejection_not_a_working_order():
+    stub = _StubIB()
+    adapter = IBAdapter(ib=stub, ib_module=_ib_module())
+    adapter.connect()
+    adapter.place(OrderRequest("tw-s-000002", "SPY", 1.0, "LMT", limit_price=730.2, tif="DAY"))
+    trade = stub.placed[0]
+    trade.orderStatus.status = "ValidationError"
+    trade.log.append(types.SimpleNamespace(status="ValidationError", errorCode=321,
+                                           message="Warning 321: The API interface is currently in Read-Only mode."))
+    stub.orderStatusEvent.emit(trade)
+    out = adapter.drain()
+    assert [type(m).__name__ for m in out] == ["Rejected"] and out[0].code == 321
+    assert adapter.snapshot().open_orders == ()

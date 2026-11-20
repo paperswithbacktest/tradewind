@@ -367,6 +367,21 @@ def test_ibkr_account_is_paper_only_and_read_only_when_proposing():
     assert not stub.placed
 
 
+def test_ibkr_account_with_a_non_usd_base_needs_a_rate():
+    stub = _StubIB()
+    v = types.SimpleNamespace
+    stub.accountValues = lambda account="": [v(tag="TotalCashValue", value="1000000", currency="EUR"),
+                                             v(tag="NetLiquidation", value="1000054", currency="EUR")]
+    account = IBPaperAccount(adapter=_adapter(stub), send=False)
+    with pytest.raises(AdapterError, match="base currency is EUR"):
+        account.snapshot()
+    stub2 = _StubIB()
+    stub2.accountValues = stub.accountValues
+    adapter = IBAdapter("127.0.0.1", 7497, 31, ib=stub2, ib_module=_ibm(), readonly=True, base_fx=1.15)
+    snap = IBPaperAccount(adapter=adapter, send=False).snapshot()
+    assert snap.nav == pytest.approx(1000054 * 1.15) and snap.cash == pytest.approx(1_150_000)
+
+
 def test_ibkr_account_sends_market_on_open_orders():
     stub = _StubIB()
     account = IBPaperAccount(adapter=_adapter(stub, readonly=False), send=True, ack_wait=0.0)
