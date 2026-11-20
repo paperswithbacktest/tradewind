@@ -235,6 +235,8 @@ class PwbProvider:
                 payload = json.load(fh)
             if payload.get("error") or _behind(payload, until):
                 payload = None                      # the data may have caught up since: run again
+            elif any("outside" not in b for b in payload.get("books", [])):
+                payload = None                      # written before the books said what is outside
         cached = payload is not None
         if cached and self.fresh_prices and payload.get("fresh"):
             self.fresh[sleeve.slug] = payload["fresh"]

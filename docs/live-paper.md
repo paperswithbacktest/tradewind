@@ -62,6 +62,7 @@ borrow_source: auto        # the shorts' fee and availability (below); auto is t
 borrow_fee_alert: 1.0      # % a year: a short whose fee is at or above it is hard to borrow
 stale_symbol_policy: hold  # a symbol still stale after the fresh-price top-up: hold, close, block
 stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
+out_of_universe_policy: no_new # a name held outside a point-in-time universe: never bought live; follow
 fresh_price_tolerance: {}  # by kind (equity, fx, fx_minor, crypto, index) or symbol ("Fresh prices")
 fresh_index_proxy_approximate: []   # indices continued with a proxy that does not track them
 sleeves:
@@ -173,6 +174,43 @@ The day's warnings (and the session report) also say:
 - `note: …` — the meta-portfolio's `notes:` while the symbol is held or targeted.
 
 `watch:` lines raise the `symbol_watch` alert of the session; `note:` lines do not.
+
+### Names outside a point-in-time universe
+
+A catalogue strategy run on a point-in-time universe (pwb-toolbox, `universe="sp500"` and its
+default `pit_exit="hold"`) keeps a name that has left `Stocks-Daily-LiquidUniverse` until its
+own next rebalance: the backtest neither sells it nor buys more (the harness refuses the
+order), and marks it at its real close. `decomposing_the_price_earnings_ratio` held ET, HDB,
+MOS, PR and USAR that way in November 2026, until its annual rebalance in May. A paper account
+that starts from nothing would, read literally, *buy* them on the first day. It does not:
+
+- each book says which of the names it holds or targets the harness puts outside its universe
+  at the book's close (`SleeveBook.outside`, read through the strategy's `_pwb_is_out`, the
+  same flags that blank the bars and refuse the orders: no second load of the universe, no
+  network);
+- under `out_of_universe_policy: no_new` (the default; Édouard's decision of 2026-11-20) the
+  part of a symbol's book that comes from those sleeves may keep, reduce or close what the
+  account holds, never add to it nor turn it around. A first buy is refused, a reduction or a
+  sale is followed, a long is never turned short (nor a short long), a book that wants more
+  than is held gets what is held. Rounding to a lot never goes above the held line.
+- The cap is per symbol on the aggregate, but only on the outside sleeves' part of it. With
+  `E_out` the exact shares of the sleeves that hold the name outside their universe, `E_in`
+  the others' and `H` the account's position, the target is
+  `E_in + sign(E_out) × min(|E_out|, max(sign(E_out) × (H − E_in), 0))`: a sleeve that holds
+  the same name *inside* its universe still trades it freely, and the outside part only keeps
+  what the account holds beyond the members' part (the account does not say which sleeve owns
+  which share, so the members are served first). Capping each sleeve's leg against the whole
+  account would have let two outside sleeves each "keep" the same shares; capping the whole
+  symbol would have stopped a member sleeve from buying a name another sleeve is merely
+  holding on.
+- `follow` trades the books as they are (the behaviour before).
+
+The planned exact book is the capped one, so the tracking reports what the strategies'
+backtests hold beyond it as *untraded*. The day's warnings have one line per name
+(`out of universe: ET: outside the universe of decomposing_the_price_earnings_ratio +612 (books
+want +612); held +0; target +0 (no_new: capped)`), the report a table of them, and the session
+raises `out_of_universe` when the cap changed a target. A stale symbol's policy applies after
+this one. Books cached by an earlier version (without the list) are computed again.
 
 ### The cost of borrowing the shorts
 
@@ -422,6 +460,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 | `send_interrupted` | a send started and did not finish: check the broker's orders by hand |
 | `fills_mismatch`, `orders_working` | the reconciliation above |
 | `symbol_watch` | a held or targeted name whose data stopped or froze, or a hard-to-borrow short ("Names to watch") |
+| `out_of_universe` | proposed: a name a sleeve holds outside its point-in-time universe was not bought, or not added to, for it (`out_of_universe_policy`, "Names outside a point-in-time universe"); one line each with the sleeves (legs), what the books want, what is held and the target kept |
 | `short_borrow` | a short with a fee at or above `borrow_fee_alert`, or with no or too few shares to borrow ("The cost of borrowing the shorts") |
 
 | exit code | |
@@ -429,7 +468,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 | 0 | done, no alert (or nothing to do) |
 | 2 | usage: options, meta-portfolio file |
 | 3 | stale prices: nothing proposed; run it again later |
-| 4 | done, with alerts (stale symbols set aside included: proposed) |
+| 4 | done, with alerts (stale symbols set aside and names held outside a universe included: proposed) |
 | 5 | the run failed |
 | 6 | the broker is unreachable |
 | 7 | another run holds the lock |

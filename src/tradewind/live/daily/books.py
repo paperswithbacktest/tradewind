@@ -36,7 +36,10 @@ class SleeveBook:
     the commission charged on that bar's executions; ``half_spread``: the cost per unit of
     notional the strategy's commission scheme would charge each symbol (when it says);
     ``stale_bars``: the symbols held or targeted whose last bar is older than the book's date
-    (a delisted stock whose data stopped), with that date."""
+    (a delisted stock whose data stopped), with that date; ``outside``: the symbols held or
+    targeted that the harness says are outside the strategy's point-in-time universe at the
+    book's date (``OUT_HOOK``), sorted -- the backtest may keep them, the live run does not open
+    them (``aggregate.py``, ``out_of_universe_policy``)."""
 
     date: str
     nav: float
@@ -49,6 +52,7 @@ class SleeveBook:
     half_spread: dict[str, float] = field(default_factory=dict)
     conditional: list = field(default_factory=list)
     stale_bars: dict[str, str] = field(default_factory=dict)
+    outside: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -63,7 +67,8 @@ class SleeveBook:
                    costs=float(d.get("costs", 0.0)), cash=float(d.get("cash", 0.0)),
                    half_spread={k: float(v) for k, v in d.get("half_spread", {}).items()},
                    conditional=list(d.get("conditional", [])),
-                   stale_bars={k: str(v) for k, v in d.get("stale_bars", {}).items()})
+                   stale_bars={k: str(v) for k, v in d.get("stale_bars", {}).items()},
+                   outside=sorted(str(x) for x in d.get("outside", [])))
 
 
 # The price a harness marks a holding at when the feed does not carry it. pwb-toolbox's harness
@@ -73,6 +78,14 @@ class SleeveBook:
 # strategy returns that real close (the feed's close for any other name).
 MARK_HOOK = "_pwb_mark_price"
 
+# Whether a name is outside the strategy's point-in-time universe on the current bar, as the
+# harness itself decides it (pwb-toolbox 0.1.52: ``_pwb_is_out(data)`` on the strategy, from the
+# same membership flags that blank the bars and refuse the orders; False for a name the caller
+# listed itself, and for every name of a run without a point-in-time universe). Read on the
+# strategy rather than recomputed from ``Stocks-Daily-LiquidUniverse``: same flags, same as-of
+# tolerance, no second load. A harness without it: no name is ever outside.
+OUT_HOOK = "_pwb_is_out"
+
 
 def _real_close(mark, name, data) -> float | None:
     """The strategy's own mark for ``data`` when it has one (``MARK_HOOK``), else None."""
@@ -81,6 +94,14 @@ def _real_close(mark, name, data) -> float | None:
     except Exception:  # noqa: BLE001 - a feed before its first bar, a harness that cannot say
         return None
     return v if v is not None and v > 0 else None
+
+
+def _is_out(hook, data) -> bool:
+    """The harness's own answer for ``data`` (``OUT_HOOK``); False when it cannot say."""
+    try:
+        return bool(hook(data))
+    except Exception:  # noqa: BLE001 - a feed before its first bar, a harness that cannot say
+        return False
 
 
 def _finite(x) -> float | None:
@@ -130,6 +151,8 @@ class BookRecorder(Analyzer):
         strat = self.strategy
         broker = strat.broker
         mark = getattr(strat, MARK_HOOK, None)
+        out_hook = getattr(strat, OUT_HOOK, None)
+        feeds: dict[str, object] = {}
         positions: dict[str, float] = {}
         opens: dict[str, float] = {}
         closes: dict[str, float] = {}
@@ -137,6 +160,7 @@ class BookRecorder(Analyzer):
         bar_dates: dict[str, str] = {}
         for d in strat.datas:
             name = getattr(d, "_name", None) or str(d)
+            feeds.setdefault(name, d)
             size = float(broker.getposition(d).size)
             if size:
                 positions[name] = size
@@ -174,9 +198,12 @@ class BookRecorder(Analyzer):
                 conditional.append({"symbol": name, "size": remaining, "type": order.getordername()})
         target = {k: v for k, v in target.items() if v}
         stale = {k: v for k, v in bar_dates.items() if k in target or k in positions}
+        outside = [] if out_hook is None else sorted(
+            k for k in set(target) | set(positions) if k in feeds and _is_out(out_hook, feeds[k]))
         book = SleeveBook(date=today, nav=float(broker.getvalue()), positions=positions, target=target,
                           open=opens, close=closes, costs=costs, cash=float(broker.getcash()),
-                          half_spread=spreads, conditional=conditional, stale_bars=stale)
+                          half_spread=spreads, conditional=conditional, stale_bars=stale,
+                          outside=outside)
         if self.books and self.books[-1].date == today:
             self.books[-1] = book
         else:
@@ -232,4 +259,4 @@ def record_books(since: str | None = None, last_n: int = 30):
         Engine.run = original  # type: ignore[method-assign]
 
 
-__all__ = ["BookRecorder", "SleeveBook", "record_books"]
+__all__ = ["MARK_HOOK", "OUT_HOOK", "BookRecorder", "SleeveBook", "record_books"]

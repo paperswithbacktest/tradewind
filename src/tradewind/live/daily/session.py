@@ -125,7 +125,7 @@ class Alert:
     code: str           # stale_prices, run_failed, broker_unreachable, tracking_gap, daily_loss,
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
     #                     fills_mismatch, orders_working, notify_failed, symbol_watch, short_borrow,
-    #                     stale_symbol
+    #                     stale_symbol, out_of_universe
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -330,6 +330,9 @@ class DailySession:
         alerts += check_day(report.row, report.sent, self.cfg)
         if report.stale:
             alerts.append(Alert("stale_symbol", stale_message(report.stale)))
+        capped = [x for x in report.out_of_universe if x["capped"]]
+        if capped:
+            alerts.append(Alert("out_of_universe", out_of_universe_message(capped)))
         recon = self._reconcile(session, seen)
         if recon["mismatches"]:
             alerts.append(Alert("fills_mismatch", f"{len(recon['mismatches'])} position(s) differ from the previous "
@@ -495,6 +498,7 @@ class DailySession:
             "sleeves_in_error": errors,
             "stale_symbols": stale_symbols,
             "stale_detail": stale_detail,
+            "out_of_universe": list(report.out_of_universe) if report is not None else [],
             "warnings": list(report.warnings) if report is not None else [],
             "borrow": dict(report.borrow) if report is not None else {},
             "reconciliation": extra.get("reconciliation", {}),
@@ -520,6 +524,16 @@ def stale_message(rows: list[dict]) -> str:
     head = f"{len(rows)} symbol(s) still stale after the fresh-price top-up, set aside ({rows[0].get('policy', '')}):"
     return "\n".join([head] + [f"{x['symbol']}: last bar {x.get('last') or '?'}, {x.get('cause') or 'stale'} "
                                 f"({x.get('reason', '')}); {x.get('action', '')}" for x in rows])
+
+
+def out_of_universe_message(rows: list[dict]) -> str:
+    """The ``out_of_universe`` alert: the names whose book target was capped because the
+    sleeves wanting them hold them outside their point-in-time universe."""
+    head = (f"{len(rows)} name(s) held outside a point-in-time universe, not bought live "
+            f"(out_of_universe_policy {rows[0].get('policy', '')}):")
+    return "\n".join([head] + [
+        f"{x['symbol']}: legs " + ", ".join(f"{s} {q:+.4g}" for s, q in sorted(x["sleeves"].items()))
+        + f"; books want {x['wanted_total']:+.4g}, held {x['held']:+g}, target {x['target']:+g}" for x in rows])
 
 
 def render_markdown(d: dict) -> str:
@@ -566,6 +580,13 @@ def render_markdown(d: dict) -> str:
                       + f" | {x.get('policy', '')} | {x.get('action', '')} |")
     elif d["stale_symbols"]:
         md += ["", "## Stale symbols", "", ", ".join(d["stale_symbols"])]
+    if d.get("out_of_universe"):
+        md += ["", "## Held outside a point-in-time universe", "",
+               "| symbol | legs (units x target) | books want | held | target | policy |", "|---|---|---:|---:|---:|---|"]
+        for x in d["out_of_universe"]:
+            md.append(f"| {x['symbol']} | " + ", ".join(f"`{s}` {q:+.4g}" for s, q in sorted(x["sleeves"].items()))
+                      + f" | {x['wanted_total']:+.4g} | {x['held']:+g} | {x['target']:+g} | {x['policy']}: "
+                      + ("capped" if x["capped"] else "followed") + " |")
     if o["sent"]:
         md += ["", "## Orders sent", "", "| symbol | quantity | status |", "|---|---:|---|"]
         md += [f"| {s['symbol']} | {s['quantity']:+g} | {s.get('status', '')} {s.get('reason', '')} |" for s in o["sent"]]
@@ -646,4 +667,4 @@ if __name__ == "__main__":
 
 __all__ = ["EXIT_ALERT", "EXIT_BROKER", "EXIT_BUSY", "EXIT_FAILED", "EXIT_OK", "EXIT_STALE", "EXIT_USAGE", "Alert",
            "AlertConfig", "DailySession", "SessionResult", "check_day", "closed_session", "next_open",
-           "render_markdown", "stale_message"]
+           "out_of_universe_message", "render_markdown", "stale_message"]
