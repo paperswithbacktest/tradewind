@@ -60,6 +60,10 @@ notes:                     # repeated in the day's warnings while the symbol is 
 borrow_check: false        # IBKR: read the shortable tick of every short before sending
 borrow_source: auto        # the shorts' fee and availability (below); auto is the default at IBKR
 borrow_fee_alert: 1.0      # % a year: a short whose fee is at or above it is hard to borrow
+stale_symbol_policy: hold  # a symbol still stale after the fresh-price top-up: hold, close, block
+stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
+fresh_price_tolerance: {}  # by kind (equity, fx, fx_minor, crypto, index) or symbol ("Fresh prices")
+fresh_index_proxy_approximate: []   # indices continued with a proxy that does not track them
 sleeves:
   - {slug: dynamic_versus_static_asset_allocation_from_theory_halfway_to_practice, weight: 0.128}
   - {slug: protective_asset_allocation_paa_a_simple_momentum_based_alternative_for_term_deposits, weight: 0.075}
@@ -240,9 +244,9 @@ last day, only for the symbols that strategy loads.
 | | |
 |---|---|
 | key | `ALPHAVANTAGE_API_KEY` in the environment (the name data-api uses). It is never written to a file or printed. Without it the run stops before any strategy runs. |
-| rate | `ALPHAVANTAGE_RPM` requests a minute, 75 by default (the smallest premium plan). A throttling answer waits a minute and retries; a network error is retried four times. |
-| sources | stocks and ETFs: `TIME_SERIES_DAILY_ADJUSTED`, `outputsize=compact` (100 sessions; `ALPHAVANTAGE_EQUITY_FUNCTION=TIME_SERIES_DAILY` for raw closes). Currency pairs: `FX_DAILY`. Crypto: `DIGITAL_CURRENCY_DAILY`. |
-| not covered | indices, commodities, bonds. A live series of these datasets that is behind stops the run, listed as not covered. |
+| rate | `ALPHAVANTAGE_RPM` requests a minute, 75 by default (the smallest premium plan). A throttling answer waits a minute and retries; a network error is retried four times; an empty answer (`{}`, seen for TLT on 2026-11-20, which answered normally minutes later) is asked again after 5, 10 and 20 seconds. |
+| sources | stocks and ETFs: `TIME_SERIES_DAILY_ADJUSTED`, `outputsize=compact` (100 sessions; `ALPHAVANTAGE_EQUITY_FUNCTION=TIME_SERIES_DAILY` for raw closes); a share class with a dot is asked with a dash first (`PBR.A` -> `PBR-A`, AlphaVantage's spelling). Currency pairs: `FX_DAILY`. Crypto: `DIGITAL_CURRENCY_DAILY`. Indices: their proxy ETF's returns (below). |
+| not covered | commodities, bonds, and an index without a proxy. A live series of these datasets that is behind is stale, listed as not covered. |
 | cache | `DIR/prices/SESSION/FUNCTION/SYMBOL.json`: each answer is read once a session, shared by the strategies, the `--send` run and a rerun after an error. |
 
 **The junction.** The anchor is the last day both sources have before the dataset's last
@@ -254,18 +258,81 @@ close is the price the account trades at. A dividend or a split between the two 
 then reads like an event the adjusted series has taken in. It is not "un-adjusted" at the
 junction, and orders are not sized in pre-split shares.
 
-**The check.** `k` must agree within 0.5 % on the anchor and the four common days before
-it. Otherwise the two sources do not quote the same series (a reused ticker, a split one
-of them missed), and the symbol is refused. A dataset last bar more than 0.5 % away from
+**The check.** `k` must agree within the tolerance on the anchor and the four common days
+before it. Otherwise the two sources do not quote the same series (a reused ticker, a split
+one of them missed), and the symbol is refused. A dataset last bar more than 0.5 % away from
 AlphaVantage's is replaced and listed in the proposal's warnings.
 
-**When the run stops.** A symbol is *live* when its last bar is within 45 days of the
-session. Older ones are delisted names and are left as they are. The market's last close is
-SPY's last AlphaVantage bar, so a holiday is not counted as a missing day. A live symbol
-still ending before that close after the top-up is *stale*: unknown to AlphaVantage,
-refused, not covered, or not read. Then the strategy stops, its books are not cached, and
-the run exits with code 3, proposes nothing, and lists the symbols. Run it again: the
-answers already read come from the cache.
+| kind | default tolerance | why |
+|---|---:|---|
+| `equity` (stocks, ETFs) | 0.5 % | one series, two vendors |
+| `fx` (EUR, GBP, JPY, CHF, CAD, AUD, NZD, NOK, SEK, DKK against USD) | 0.5 % | |
+| `fx_minor` (every other currency) | 1.5 % | the two sources fix at different hours: KRWUSD moved by 1.01 % over five days on 2026-11-19 |
+| `crypto` | 0.5 % | |
+| `index` (an index against its tracking ETF) | 1 % | the ETF's adjusted returns carry its dividends |
+
+`fresh_price_tolerance` in the meta-portfolio changes them, by kind or by symbol
+(`{fx_minor: 0.02, CHGG: 0.01}`); a single number sets every kind.
+
+**Indices through a proxy ETF.** An index of `Indices-Daily-Price` that is behind is
+continued with the returns of its *proxy*: by default the ETF substitute the orders already
+use (`substitutes`, `SPX -> SPY` and here `VIX -> VIXY`), or `fresh_index_proxies`
+(`{}`: none). The anchor is chosen as above; the index keeps its own levels up to it, and each
+later bar is `level(anchor) x ETF(day) / ETF(anchor)` (adjusted closes). An ETF that tracks
+its index (SPY, IVV, VOO for SPX; QQQ for NDX; IWM for RUT; DIA for the Dow) is checked like
+a splice, at the `index` tolerance. **An ETF that does not track its index is not chained by
+default.** VIXY holds short-dated VIX futures: its level is not the VIX's, its daily moves are
+roughly half the VIX's, and the roll costs it several percent a month in contango. A strategy
+that reads the VIX's *level* -- the 15 / 30 / 50 gate of the VIX-options sleeve -- would be
+fed a level that drifts away from the index. Such an index stays stale, with that reason
+("its proxy VIXY does not track VIX in level"), and goes to the stale-symbol policy below. To
+chain it anyway, list it: `fresh_index_proxy_approximate: [VIX]` -- only for a strategy that
+reads the index's returns, or whose gate is far from its thresholds; the bars are then
+unchecked and the log says they are an approximation.
+
+**Stale symbols.** A symbol is *live* when its last bar is within 45 days of the session.
+Older ones are delisted names and are left as they are. The market's last close is SPY's
+last AlphaVantage bar, so a holiday is not counted as a missing day. A live symbol still
+ending before that close after the top-up is *stale*, with a cause:
+
+| cause | meaning (2026-11-19 examples) |
+|---|---|
+| `delisted` | AlphaVantage's `LISTING_STATUS` gives a delisting date (BZH, KVUE, ROKU, WBD) |
+| `relisted` | the ticker was listed anew after the dataset's last bar, another security (NG: "Nova Gold Corp" since 2026-11-11, no common day) |
+| `silent` | AlphaVantage's series stops too and the name is not delisted (WPRT: active, no bar after 2026-10-23) |
+| `diverged` | the two sources disagree beyond the tolerance (CHGG 0.80 %, SID 0.94 %) |
+| `unknown` | AlphaVantage does not know the symbol (IDRUSD) |
+| `no_source` | no source for the dataset, or an index whose proxy is not chained (VIX) |
+| `fetch_error` | AlphaVantage could not be read |
+
+`LISTING_STATUS` is read once a session (cached with the bars), and only when a stock is
+stale. What happens next is the meta-portfolio's `stale_symbol_policy`:
+
+| policy | the strategy | the stale symbol | the day |
+|---|---|---|---|
+| `hold` (default) | runs on the symbol's rows as they are (its price frozen at its last bar) | its target is what the account holds: no order on it, never a new line | proposed, alert `stale_symbol`, exit code 4 |
+| `close` | the same | its target is 0: the holding is sold at the open | proposed, alert `stale_symbol`, exit code 4 |
+| `block` | stops at the first stale load, its books are not cached | -- | nothing proposed, exit code 3 (the behaviour before this option) |
+
+`hold` is the default because it is the one that never trades on a price that could not be
+checked: a delisted name is settled by the broker (cash, or the acquirer's shares) and an
+order on it would be refused anyway (KVUE has no IB contract); a name whose two sources
+disagree (CHGG, SID) is still trading, and selling it on a data glitch is a trade the
+strategy did not ask for. `close` is for a book that must not carry a line it cannot price.
+Under both, the exact book keeps the strategies' intent, so the tracking shows the
+difference as *untraded*. An index is frozen under its substitute (VIX -> VIXY at the
+account): that freezes the substitute for every sleeve that trades it.
+
+**The guard.** A sleeve with more than `stale_symbol_max_weight` (20 %) of its gross on stale
+symbols -- each line counted at the larger of its position and its target, at the book's
+close -- stays in error: the run proposes nothing (exit code 3), the report gives the share
+and the symbols. A sleeve that only reads a stale index (SPX for the free-lunch sleeve,
+without a proxy) has no close at the session and stops the run the same way.
+
+The `stale_symbol` alert lists each symbol with its last bar, its cause and what was done
+(`held at +120, no order (the strategies' book wanted +0)`), and the report has a table of
+them with the share of each sleeve's gross. Run the day again later: the answers already
+read come from the cache.
 
 Bars dated after the last session whose close (16:30 New York) has passed are never taken.
 A run at 22:00 Paris uses the day's close. The books of a fresh run are cached apart from the
@@ -344,7 +411,8 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 
 | alert | raised when |
 |---|---|
-| `stale_prices` | a sleeve has no book at the session's close (data behind, symbols still stale after the fresh-price top-up); the report lists the symbols and the sleeves |
+| `stale_prices` | nothing proposed: a sleeve has no book at the session's close (data behind), more than `stale_symbol_max_weight` of a sleeve's gross is stale, or `stale_symbol_policy: block`; the report lists the symbols and the sleeves |
+| `stale_symbol` | proposed anyway: symbols still stale after the fresh-price top-up, held or closed by `stale_symbol_policy` ("Fresh prices"); one line each with the last bar and the cause |
 | `run_failed` | a strategy or the run failed; every sleeve is still run, and those in error are listed |
 | `broker_unreachable` | the account cannot be opened or read (TWS / IB Gateway closed or logged out) |
 | `tracking_gap` | the cumulative gap to the backtest is above `--alert-gap` of the NAV (1 %), or the day's gap above `--alert-gap-day` (0.5 %) |
@@ -361,7 +429,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 | 0 | done, no alert (or nothing to do) |
 | 2 | usage: options, meta-portfolio file |
 | 3 | stale prices: nothing proposed; run it again later |
-| 4 | done, with alerts |
+| 4 | done, with alerts (stale symbols set aside included: proposed) |
 | 5 | the run failed |
 | 6 | the broker is unreachable |
 | 7 | another run holds the lock |

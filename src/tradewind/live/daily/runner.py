@@ -3,7 +3,10 @@
 One call of ``DailyRunner.run_day`` after the US close:
 
 1. each strategy runs in signal mode up to the last close (``providers.py``) and gives its
-   target book;
+   target book; the symbols still stale after the fresh-price top-up are put under the
+   meta-portfolio's ``stale_symbol_policy`` (``hold`` by default: no order on them; ``close``:
+   sold; ``block``: nothing proposed), and a sleeve with more than ``stale_symbol_max_weight``
+   of its gross on them stays in error (``StaleData``: nothing proposed);
 2. the account settles the day (the simulated account fills yesterday's orders at today's
    open) and is read: positions, cash, NAV;
 3. the day is tracked against the backtest (``tracking.py``);
@@ -61,6 +64,20 @@ class DayReport:
     warnings: list = field(default_factory=list)
     fx: dict = field(default_factory=dict)      # the account's currency, its origin, the rate and its source
     borrow: dict = field(default_factory=dict)  # the shorts' fee, availability and cost of carry (borrow.py)
+    stale: list = field(default_factory=list)   # the stale symbols and what was done with them
+
+
+def stale_share(book: SleeveBook, symbols) -> float:
+    """The part of a sleeve's gross on ``symbols``: each line counted at the larger of its
+    position and its target, at the book's close."""
+    def value(sym):
+        q = max(abs(book.target.get(sym, 0.0)), abs(book.positions.get(sym, 0.0)))
+        p = book.close.get(sym, float("nan"))
+        return q * p if q and math.isfinite(p) else 0.0
+
+    names = set(book.target) | set(book.positions)
+    total = sum(value(s) for s in names)
+    return sum(value(s) for s in set(symbols) & names) / total if total > 0 else 0.0
 
 
 class DailyRunner:
@@ -103,6 +120,75 @@ class DailyRunner:
         return self._today or last_session()
 
     # -- one day ---------------------------------------------------------------------------------
+    def _stale_symbols(self, history: dict[str, dict[str, SleeveBook]], as_of: str | None) -> dict[str, dict]:
+        """The symbols the provider left stale, ``{symbol: {last, cause, reason, dataset,
+        sleeves, shares, plan_symbol}}``, under the meta-portfolio's policy; raises
+        ``StaleData`` under ``block``, or when a sleeve has more than
+        ``stale_symbol_max_weight`` of its gross on them (that sleeve is put in error)."""
+        meta = self.meta
+        by_sleeve = {k: dict(v) for k, v in (getattr(self.provider, "stale", None) or {}).items() if v}
+        if not by_sleeve:
+            return {}
+        details = getattr(self.provider, "stale_info", None) or {}
+        out: dict[str, dict] = {}
+        for slug, syms in sorted(by_sleeve.items()):
+            for sym, why in sorted(syms.items()):
+                d = out.setdefault(sym, {"symbol": sym, "last": "", "cause": "", "reason": str(why), "dataset": "",
+                                         "sleeves": [], "shares": {}})
+                d.update({k: v for k, v in (details.get(slug, {}).get(sym) or {}).items()
+                          if k in ("last", "cause", "reason", "dataset")})
+                d["sleeves"].append(slug)
+        listing = "\n".join(f"  {s}: last bar {d['last'] or '?'}, {d['cause'] or 'stale'}: {d['reason']}"
+                            for s, d in sorted(out.items()))
+        if meta.stale_symbol_policy == "block":
+            raise StaleData(f"{len(out)} symbol(s) still stale after the fresh-price top-up and "
+                            f"stale_symbol_policy is block (nothing is proposed):\n{listing}")
+        over = []
+        for slug, syms in sorted(by_sleeve.items()):
+            h = history.get(slug) or {}
+            dates = [d for d in h if as_of is None or d <= as_of]
+            if not dates:
+                continue
+            share = stale_share(h[max(dates)], syms)
+            for sym in syms:
+                out[sym]["shares"][slug] = share
+            if share > meta.stale_symbol_max_weight:
+                over.append((slug, share, sorted(syms)))
+        if over:
+            errors = getattr(self.provider, "errors", None)
+            lines = []
+            for slug, share, names in over:
+                msg = (f"{slug}: {share:.1%} of its gross on stale symbols ({', '.join(names)}), above "
+                       f"stale_symbol_max_weight {meta.stale_symbol_max_weight:.0%}: the sleeve stays in error")
+                lines.append(msg)
+                if isinstance(errors, dict):
+                    errors[slug] = msg
+            raise StaleData("\n".join(lines) + " (nothing is proposed)\n" + listing)
+        for sym, d in out.items():
+            sub = meta.substitutes.get(sym)
+            d["plan_symbol"] = sub.symbol if sub is not None else sym
+        return out
+
+    def _stale_report(self, stale: dict[str, dict], plan, held: dict[str, float]) -> tuple[list, list[str]]:
+        """What was done with each stale symbol (``DayReport.stale``) and the day's warnings."""
+        policy = self.meta.stale_symbol_policy
+        rows, warnings = [], []
+        for sym, d in sorted(stale.items()):
+            ps = d["plan_symbol"]
+            have, want = held.get(ps, 0.0), plan.exact.get(ps, 0.0)
+            if policy == "hold":
+                action = (f"held at {have:+g}, no order" if have else "not held, not bought") + (
+                    f" (the strategies' book wanted {want:+.4g})" if abs(want - have) > 1e-9 else "")
+            else:
+                action = f"closed: {-have:+g} at the open" if have else "not held, not bought"
+            via = f" (traded as {ps})" if ps != sym else ""
+            rows.append(dict(d, held=have, wanted=want, target=plan.target.get(ps, 0.0), policy=policy,
+                             action=action))
+            warnings.append(f"stale symbol: {sym}{via}: last bar {d['last'] or '?'}, {d['cause'] or 'stale'} "
+                            f"({d['reason']}); {policy}: {action}; in " + ", ".join(
+                                f"{s} ({d['shares'].get(s, 0.0):.1%} of its gross)" for s in d["sleeves"]))
+        return rows, warnings
+
     def _pick(self, history: dict[str, dict[str, SleeveBook]], as_of: str | None):
         warnings = []
         lasts = {slug: max(h) for slug, h in history.items() if h}
@@ -158,21 +244,23 @@ class DailyRunner:
     def _watch(self, plan, books: dict[str, SleeveBook], history: dict[str, dict[str, SleeveBook]],
                held: dict[str, float], day: str) -> list[str]:
         """Symbols to look at before sending: notes of the meta-portfolio, delisted or frozen
-        prices, forex odd lots and caveats, hard-to-borrow shorts."""
+        prices, forex odd lots and caveats, hard-to-borrow shorts. The stale symbols have
+        their own warning (``_stale_report``)."""
         meta = self.meta
         out: list[str] = []
         live = {s for s, q in plan.target.items() if q} | {s for s, q in held.items() if q}
+        quiet = set(plan.frozen)
         for sym in sorted(live):
             if sym in meta.notes:
                 out.append(f"note: {sym}: {meta.notes[sym]} (target {plan.target.get(sym, 0.0):+g}, "
                            f"held {held.get(sym, 0.0):+g})")
         for slug, b in sorted(books.items()):
             for sym, last in sorted(b.stale_bars.items()):
-                if sym in live:
+                if sym in live and sym not in quiet:
                     out.append(f"watch: {sym}: last price {last}, before the close {b.date} (delisted? data "
                                f"stopped), still in {slug}")
         flagged = {w.split(":")[1].strip() for w in out if w.startswith("watch:")}
-        for sym in sorted(live - flagged):
+        for sym in sorted(live - flagged - quiet):
             if is_fx(sym):
                 continue
             closes = []
@@ -322,6 +410,7 @@ class DailyRunner:
     def run_day(self, as_of: str | None = None, send: bool = False) -> DayReport:
         meta = self.meta
         history = self.provider.books(as_of, last_n=FROZEN_CLOSES + 1)
+        stale = self._stale_symbols(history, as_of)
         history, sub_warnings, subs = self._substitute(history)
         day, books, warnings = self._pick(history, as_of)
         for sub in subs.values():
@@ -372,7 +461,10 @@ class DailyRunner:
         plan = plan_day(meta, books, held, capital, day,
                         units=None if prev is None else prev["units"],
                         last_reset=None if prev is None else prev.get("last_reset"),
-                        weights_seen=None if prev is None else prev.get("weights"))
+                        weights_seen=None if prev is None else prev.get("weights"),
+                        frozen={d["plan_symbol"]: meta.stale_symbol_policy for d in stale.values()})
+        stale_rows, stale_warnings = self._stale_report(stale, plan, held)
+        warnings += stale_warnings
         for sym in plan.missing_price:
             warnings.append(f"{sym}: held but no strategy prices it; its order has no reference price")
         if plan.refused:
@@ -393,7 +485,7 @@ class DailyRunner:
                 raise RuntimeError(f"kill switch: {self.kill.reason}; nothing is sent")
             sent = self.account.place(plan.orders, day)
 
-        report = DayReport(day, plan, row, sent, warnings=warnings, fx=fx, borrow=borrow)
+        report = DayReport(day, plan, row, sent, warnings=warnings, fx=fx, borrow=borrow, stale=stale_rows)
         self._write_proposal(report, snap, books, capital)
 
         # the state of the day
@@ -524,4 +616,4 @@ def last_session(today: _dt.date | None = None) -> str:
     return day.isoformat()
 
 
-__all__ = ["AccountCurrencyError", "DailyRunner", "DayReport", "StaleData", "last_session"]
+__all__ = ["AccountCurrencyError", "DailyRunner", "DayReport", "StaleData", "last_session", "stale_share"]
