@@ -50,6 +50,7 @@ from dataclasses import asdict, dataclass, field
 
 from ...calendars import NYSE, ExchangeCalendar
 from ..guards import KillSwitch
+from .instruments import is_fx
 from .runner import DailyRunner, StaleData
 
 EXIT_OK = 0
@@ -61,6 +62,7 @@ EXIT_BROKER = 6
 EXIT_BUSY = 7
 
 _NS = 1_000_000_000
+FX_RECONCILE_TOLERANCE = 0.03       # relative: a forex position against the previous one plus the orders
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -119,7 +121,7 @@ class AlertConfig:
 class Alert:
     code: str           # stale_prices, run_failed, broker_unreachable, tracking_gap, daily_loss,
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
-    #                     fills_mismatch, orders_working, notify_failed
+    #                     fills_mismatch, orders_working, notify_failed, symbol_watch
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -331,6 +333,8 @@ class DailySession:
         for w in report.warnings:                   # traded on stale data (allow_stale)
             if w.startswith("the data's last close") or ": last close " in w:
                 alerts.append(Alert("stale_prices", w))
+            elif w.startswith("watch: "):           # a delisted name, a hard-to-borrow short, a note
+                alerts.append(Alert("symbol_watch", w[len("watch: "):]))
         if alerts:
             code, status = EXIT_ALERT, "alert"
         return self._finish(session, report, alerts, code, status, errors=errors, stale=stale,
@@ -381,14 +385,17 @@ class DailySession:
             return out
         expected = dict(days[prev].get("held", {}))
         for s in prev_marker.get("sent", []):
-            if s.get("status") in ("rejected", "cancelled"):
+            if s.get("status") in ("rejected", "cancelled", "skipped"):
                 continue
             expected[s["symbol"]] = expected.get(s["symbol"], 0.0) + float(s["quantity"])
         held = today.get("held", {})
         working = {s for s, _q in out["working"]}
         for sym in sorted(set(expected) | set(held)):
             e, h = expected.get(sym, 0.0), held.get(sym, 0.0)
-            if abs(e - h) > 1e-6 * max(1.0, abs(e)) and sym not in working:
+            # a forex order on an inverted pair is sized in USD at the reference close: the
+            # currency it brings differs by the move to the fill (FX_RECONCILE_TOLERANCE)
+            tol = FX_RECONCILE_TOLERANCE if is_fx(sym) else 1e-6
+            if abs(e - h) > tol * max(1.0, abs(e)) and sym not in working:
                 out["mismatches"].append({"symbol": sym, "held": h, "expected": e})
         return out
 
@@ -467,7 +474,9 @@ class DailySession:
                           "net": row.get("net"), "positions": row.get("positions"),
                           "cash": extra.get("cash")},
             "tracking": {k: row.get(k) for k in ("gap_day", "gap_cum", "rounding", "untraded", "timing", "costs",
-                                                 "residual", "expected_change", "costs_paid", "costs_backtest")},
+                                                 "fx", "residual", "expected_change", "costs_paid", "costs_backtest",
+                                                 "gap_day_base", "gap_cum_base")},
+            "account": dict(report.fx, nav_base=row.get("nav_base")) if report is not None and report.fx else {},
             "orders": {"proposed": proposed, "sent": sent, "filled": fills,
                        "skipped": len(plan.skipped) if plan else 0},
             "sleeves": sleeves,
@@ -501,13 +510,20 @@ def render_markdown(d: dict) -> str:
 
     md = [f"# Paper run, session {d['session']}", "", f"**{d['summary']}**", "",
           f"- status: **{d['status']}** (exit code {d['exit_code']}), mode {d['mode']}, run at {d['run_at']}"]
+    a = d.get("account") or {}
+    if a:
+        cur = a["currency"]
+        md.append(f"- account currency **{cur}** ({a['origin']}); rate {a['rate']:.6g} USD per {cur} ({a['source']})")
+        if cur != "USD" and p["nav"] is not None:
+            md.append(f"- in {cur}: NAV {money(a.get('nav_base'))}, gap to the backtest day "
+                      f"{money(t.get('gap_day_base'))}, cumulative {money(t.get('gap_cum_base'))}")
     if p["nav"] is not None:
         md += [(f"- portfolio value (NAV) {money(p['nav'])}, day {money(p['day_change'])} "
                 f"({p['day_return']:+.2%}); backtest {money(p['nav_expected'])}"),
                f"- gross {p['gross']:.2f} x NAV, net {p['net']:+.2f}, {p['positions']} position(s)",
                (f"- gap to the backtest: day {money(t['gap_day'])}, cumulative {money(t['gap_cum'])} = rounding "
                 f"{money(t['rounding'])} + untraded {money(t['untraded'])} + timing {money(t['timing'])} + costs "
-                f"{money(t['costs'])} + residual {money(t['residual'])}"),
+                f"{money(t['costs'])} + fx {money(t.get('fx'))} + residual {money(t['residual'])} (USD)"),
                (f"- orders: {len(o['proposed'])} proposed, {len(o['sent'])} sent, {len(o['filled'])} filled at "
                 f"today's open, {o['skipped']} under the minimum"),
                f"- proposal: `{d['proposal']}`"]
@@ -567,15 +583,14 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    from .__main__ import make_account, make_provider
+    from .__main__ import OVERRIDES, make_account, make_provider
     from .meta import MetaPortfolio
 
     args = parser().parse_args(argv)
     if args.replay:
         print("--replay is not a day: use python -m tradewind.live.daily", file=sys.stderr)
         return EXIT_USAGE
-    overrides = {k: getattr(args, k) for k in ("capital", "leverage", "max_gross", "rebalance", "lot",
-                                                "min_order_notional", "python", "papers_dir")}
+    overrides = {k: getattr(args, k) for k in OVERRIDES}
     try:
         meta = MetaPortfolio.load(args.meta, **overrides)
         now = _dt.datetime.fromisoformat(args.now) if args.now else None

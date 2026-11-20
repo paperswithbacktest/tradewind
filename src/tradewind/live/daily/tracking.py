@@ -27,6 +27,8 @@ prices, so that with no other effect they add up to the gap exactly:
   fill price)``;
 * ``costs`` -- the backtest's costs at the units minus the costs paid:
   ``sum_s k_s(t) x costs_s(t) - sum fills costs``;
+* ``fx`` -- an account whose currency is not USD: the cash it holds in its own currency,
+  valued in USD, moves with the rate: ``base_cash(t-1) x (rate(t) - rate(t-1))``;
 * ``residual`` -- the rest: interest, dividends and corporate actions the account books, data
   revised between two runs, sleeves whose fills are not at the open, prices missing.
 """
@@ -43,8 +45,9 @@ from .aggregate import combine, merged_prices
 from .books import SleeveBook
 
 COLUMNS = ["date", "nav_real", "nav_expected", "gap_day", "gap_cum", "rounding", "untraded", "timing", "costs",
-           "residual", "real_change", "expected_change", "costs_paid", "costs_backtest", "gross", "net",
-           "positions", "orders", "fills", "rebalanced", "cap_scale", "data_date", "notes"]
+           "fx", "residual", "real_change", "expected_change", "costs_paid", "costs_backtest", "gross", "net",
+           "positions", "orders", "fills", "rebalanced", "cap_scale", "data_date", "notes",
+           "account_currency", "fx_rate", "fx_source", "nav_base", "gap_day_base", "gap_cum_base"]
 
 
 def _dot(book: dict[str, float], move: dict[str, float]) -> tuple[float, list[str]]:
@@ -68,7 +71,7 @@ def _sub(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
 
 
 def track_day(prev: dict, books: dict[str, SleeveBook], books_prev: dict[str, SleeveBook],
-              held: dict[str, float], nav_real: float, fills: list) -> dict:
+              held: dict[str, float], nav_real: float, fills: list, fx_rate: float | None = None) -> dict:
     """The tracking row of the day of ``books`` against ``prev`` (the previous day's state).
 
     ``books_prev``: the sleeves' books at ``prev["date"]`` as today's run sees them (better
@@ -122,6 +125,11 @@ def track_day(prev: dict, books: dict[str, SleeveBook], books_prev: dict[str, Sl
     costs_paid = sum(f.costs for f in fills)
     costs_backtest = sum(k * books[slug].costs for slug, k in k_cur.items() if slug in books)
     costs = costs_backtest - costs_paid
+    # an account in another currency than the books' USD: its cash in that currency moves
+    # with the rate (prev["base_cash"] units, from prev["fx_rate"] to today's)
+    fx = 0.0
+    if fx_rate is not None and prev.get("fx_rate") and prev.get("base_cash"):
+        fx = float(prev["base_cash"]) * (float(fx_rate) - float(prev["fx_rate"]))
     gap = real - expected
     missing = sorted(set(m1) | set(m2) | set(m3) | set(m4))
     if missing:
@@ -129,7 +137,7 @@ def track_day(prev: dict, books: dict[str, SleeveBook], books_prev: dict[str, Sl
     nav_expected = prev["nav_expected"] + expected
     return {"nav_real": nav_real, "nav_expected": nav_expected, "gap_day": gap,
             "gap_cum": nav_real - nav_expected, "rounding": rounding, "untraded": untraded, "timing": timing,
-            "costs": costs, "residual": gap - rounding - untraded - timing - costs, "real_change": real, "expected_change": expected,
+            "costs": costs, "fx": fx, "residual": gap - rounding - untraded - timing - costs - fx, "real_change": real, "expected_change": expected,
             "costs_paid": costs_paid, "costs_backtest": costs_backtest, "fills": len(fills),
             "notes": "; ".join(notes)}
 

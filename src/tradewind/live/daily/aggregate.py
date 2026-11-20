@@ -12,6 +12,10 @@ or the weights change, and whenever the summed book would exceed ``max_gross``.
 sleeves; if its gross value exceeds ``max_gross x capital`` every unit is scaled down by the
 same factor (IB's limit is on the account, not on each sleeve).
 
+**Refused symbols.** A symbol the meta-portfolio never trades (``MetaPortfolio.refusal``:
+``exclude_symbols``, an index without a substitute, a currency without an IDEALPRO pair) is
+left out of the book and of the orders, with its reason (``Plan.refused``).
+
 **Rounding.** ``E`` is rounded to the lot (to the nearest; ``lot=0`` keeps fractional
 shares); an order smaller than ``min_order_notional`` is dropped unless it closes a line.
 """
@@ -55,6 +59,7 @@ class Plan:
     orders: list[ProposedOrder]
     skipped: list[ProposedOrder] = field(default_factory=list)   # under min_order_notional
     excluded: dict[str, float] = field(default_factory=dict)     # excluded symbols' exact shares
+    refused: dict[str, str] = field(default_factory=dict)        # why each excluded symbol is not traded
     missing_price: list[str] = field(default_factory=list)
     gross_exact: float = 0.0            # gross / capital of the exact book
     gross_target: float = 0.0           # gross / capital of the rounded book
@@ -167,9 +172,11 @@ def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[st
             skipped.append(order)
         else:
             orders.append(order)
+    refused = {s: str(meta.refusal(s)) for s in set(excluded) | {s for s, q in current.items() if q}
+               if not meta.tradable(s)}
     plan = Plan(date=date, capital=capital, units=units, rebalanced=bool(reason), reason=reason,
                 cap_scale=scale, exact=exact, target=target, orders=orders, skipped=skipped,
-                excluded=excluded, missing_price=missing)
+                excluded=excluded, refused=refused, missing_price=missing)
     plan.gross_exact = gross(exact, prices) / capital if capital > 0 else 0.0
     plan.gross_target = gross(target, prices) / capital if capital > 0 else 0.0
     plan.net_target = (sum(q * prices[s] for s, q in target.items() if s in prices) / capital

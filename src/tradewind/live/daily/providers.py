@@ -61,11 +61,20 @@ def _behind(payload: dict, until: str | None) -> bool:
 
 class EngineProvider:
     """``builders``: ``{slug: f(until) -> engine}``, ``until`` an ISO date or None; the
-    engine is run inside ``record_books`` and its books kept."""
+    engine is run inside ``record_books`` and its books kept. ``prices``: an optional
+    ``f(symbols, start, end) -> {symbol: {date: (open, close)}}`` for the substitutes of
+    indices."""
 
-    def __init__(self, builders: dict[str, Callable]):
+    def __init__(self, builders: dict[str, Callable], prices: Callable | None = None):
         self.builders = builders
         self.seconds: dict[str, float] = {}
+        self._prices = prices
+
+    def prices(self, symbols, start, end):
+        """``prices(symbols, start, end)`` given at construction (the substitutes' prices)."""
+        if self._prices is None:
+            raise RuntimeError("no price loader given to this EngineProvider")
+        return self._prices(symbols, start, end)
 
     def books(self, as_of: str | None = None, last_n: int = 2) -> dict[str, dict[str, SleeveBook]]:
         out = {}
@@ -152,6 +161,30 @@ class PwbProvider:
             self.warnings.append(f"{slug}: the dataset's last bar differed from AlphaVantage's by more than "
                                  "0.5% (a partial bar, replaced): " + ", ".join(fresh["partial_last_bars"][:20]))
 
+    def prices(self, symbols: list[str], start: str, end: str) -> dict[str, dict[str, tuple[float, float]]]:
+        """Daily ``(open, close)`` of ``symbols`` from the PWB datasets, ``{symbol: {date: ...}}``
+        (the substitutes of indices that no sleeve holds); completed from AlphaVantage like the
+        strategies' loads when fresh prices are on."""
+        folder = os.path.join(self.cache_dir, "prices")
+        os.makedirs(folder, exist_ok=True)
+        out = os.path.join(folder, f"{'_'.join(symbols)}_{start}_{end}{'-fresh' if self.fresh_prices else ''}.json")
+        if not os.path.exists(out):
+            cmd = [self.python, "-m", "tradewind.live.daily.pwb_prices", out, ",".join(symbols),
+                   "--start", start, "--end", end]
+            if self.fresh_prices:
+                cmd += ["--fresh-prices", self.fresh_cache, "--session", end]
+            proc = subprocess.run(cmd, env=self._env(), capture_output=True, text=True, timeout=1800, check=False)
+            if not os.path.exists(out):
+                raise RuntimeError(f"prices of {symbols}: nothing written (exit {proc.returncode}): "
+                                   f"{(proc.stderr or proc.stdout or '')[-800:]}")
+        with open(out, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if payload.get("error"):
+            os.remove(out)
+            raise RuntimeError(f"prices of {symbols}: {payload['error']}")
+        return {sym: {d: (float(v[0]), float(v[1])) for d, v in rows.items()}
+                for sym, rows in payload.get("prices", {}).items()}
+
     def books(self, as_of: str | None = None, last_n: int = 2, *, until: str | None = None
               ) -> dict[str, dict[str, SleeveBook]]:
         until = until or as_of
@@ -226,6 +259,12 @@ class ReplayProvider:
             else:
                 self._history = self.inner.books(self.until, self.last_n)
         return self._history
+
+    def prices(self, symbols, start, end):
+        loader = getattr(self.inner, "prices", None)
+        if loader is None:
+            raise RuntimeError("this provider loads no prices")
+        return loader(symbols, start, end)
 
     def dates(self) -> list[str]:
         """The closes every strategy has a book for, oldest first."""

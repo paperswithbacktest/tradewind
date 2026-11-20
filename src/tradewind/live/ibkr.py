@@ -62,6 +62,24 @@ def _never_sent(trade) -> bool:
     return any(int(getattr(e, "errorCode", 0) or 0) in REFUSED_WARNINGS for e in getattr(trade, "log", ()) or ())
 
 
+_CURRENCY = frozenset({"USD", "EUR", "GBP", "AUD", "NZD", "CAD", "CHF", "JPY", "NOK", "SEK", "DKK", "PLN", "CZK", "HUF",
+                       "TRY", "MXN", "ZAR", "SGD", "HKD", "CNH", "ILS", "KRW", "RUB"})
+
+
+def is_cash_pair(symbol: str) -> bool:
+    """An IDEALPRO pair written as IB's local symbol, ``EUR.USD`` or ``USD.JPY``."""
+    return (len(symbol) == 7 and symbol[3] == "." and symbol[:3] in _CURRENCY and symbol[4:] in _CURRENCY
+            and symbol[:3] != symbol[4:])
+
+
+def contract_name(contract) -> str:
+    """The symbol a contract is known by here: its symbol, or ``BASE.QUOTE`` for a forex pair
+    (every USD.xxx pair has the symbol ``USD``)."""
+    if getattr(contract, "secType", "") == "CASH":
+        return f"{contract.symbol}.{contract.currency}"
+    return contract.symbol
+
+
 def _ns_of(when) -> int:
     if isinstance(when, _dt.datetime):
         if when.tzinfo is None:
@@ -138,12 +156,18 @@ class IBAdapter:
         self.base_currency = currency
         self.fx_missing = False
         self.fx_used = 1.0
+        self.fx_source = ""                    # "" (no conversion), "ib" or "given"
+        self.base_detected = False             # the base currency was read off the account
+        self.published_fx: float | None = None  # IB's rate: units of `currency` per unit of the base
+        self.base_cash: float | None = None    # the cash held in the base currency (CashBalance)
+        self.nav_base: float | None = None     # NetLiquidation in the base currency
         self.account = account
         self.require_paper = require_paper
         self.readonly = readonly
         self.exchange = exchange
         self.currency = currency
         self.contracts = dict(contracts or {})
+        self.instruments: dict[str, dict] = {}     # {symbol: spec} of contracts that are not stocks
         self.reconnect = reconnect
         self.reconnect_delays = tuple(reconnect_delays)
         self.commission_wait = float(commission_wait)
@@ -174,10 +198,24 @@ class IBAdapter:
             self._ibm = ib_async
         return self._ibm
 
+    def _build(self, symbol: str):
+        """The unqualified contract of ``symbol``: a forex pair (``USD.JPY``) on IDEALPRO, a
+        future described in ``instruments``, or a stock on ``exchange``."""
+        lib = self._lib()
+        if is_cash_pair(symbol):
+            return lib.Forex(pair=symbol.replace(".", ""), exchange="IDEALPRO")
+        spec = self.instruments.get(symbol)
+        if spec and spec.get("sec_type") == "FUT":
+            mult = spec.get("multiplier")
+            return lib.Future(spec.get("symbol", symbol), str(spec["expiry"]), spec["exchange"],
+                              currency=spec.get("currency", self.currency),
+                              multiplier=("" if mult is None else f"{float(mult):g}"))
+        return lib.Stock(symbol, self.exchange, self.currency)
+
     def contract(self, symbol: str):
         contract = self.contracts.get(symbol)
         if contract is None:
-            contract = self._lib().Stock(symbol, self.exchange, self.currency)
+            contract = self._build(symbol)
             self.messages.acquire()
             qualified = self.ib.qualifyContracts(contract)
             if not qualified:
@@ -290,7 +328,7 @@ class IBAdapter:
     def _execution(self, fill, commission: float) -> Execution:
         ex = fill.execution
         sign = 1.0 if ex.side in ("BOT", "BUY") else -1.0
-        return Execution(ex.orderRef, ex.execId, fill.contract.symbol, sign * float(ex.shares), float(ex.price),
+        return Execution(ex.orderRef, ex.execId, contract_name(fill.contract), sign * float(ex.shares), float(ex.price),
                          float(commission), _ns_of(fill.time))
 
     def _on_exec(self, trade, fill) -> None:
@@ -356,14 +394,19 @@ class IBAdapter:
                 continue
         bases = sorted({cur for (tag, cur) in values if tag == "NetLiquidation" and cur != "BASE"})
         self.base_currency = self.currency if self.currency in bases or not bases else bases[0]
+        self.base_detected = bool(bases)
         self.fx_missing = False
+        self.nav_base = values.get(("NetLiquidation", self.base_currency))
+        self.base_cash = values.get(("CashBalance", self.base_currency))
         if self.base_currency == self.currency:
+            self.published_fx, self.fx_used, self.fx_source = 1.0, 1.0, ""
             return values.get(("TotalCashValue", self.currency)), values.get(("NetLiquidation", self.currency))
         rate = values.get(("ExchangeRate", self.currency))         # base units per unit of self.currency
-        if rate and rate > 0:
-            per_base = 1.0 / rate
+        self.published_fx = 1.0 / rate if rate and rate > 0 else None
+        if self.published_fx is not None:
+            per_base, self.fx_source = self.published_fx, "ib"
         elif self.base_fx:
-            per_base = float(self.base_fx)
+            per_base, self.fx_source = float(self.base_fx), "given"
         else:
             self.fx_missing = True
             return None, None
@@ -378,9 +421,9 @@ class IBAdapter:
         if ib is None or not ib.isConnected():
             return AccountSnapshot(None, None, self.currency, time=t)
         cash, nlv = self.account_values()
-        positions = tuple(sorted((p.contract.symbol, float(p.position), float(p.avgCost))
+        positions = tuple(sorted((contract_name(p.contract), float(p.position), float(p.avgCost))
                                  for p in ib.positions(self.account) if p.position))
-        orders = tuple(BrokerOrder(tr.order.orderRef, tr.contract.symbol,
+        orders = tuple(BrokerOrder(tr.order.orderRef, contract_name(tr.contract),
                                    (1.0 if tr.order.action == "BUY" else -1.0) * float(tr.order.totalQuantity),
                                    float(tr.orderStatus.filled))
                        for tr in ib.openTrades() if tr.order.orderRef and not _never_sent(tr))
@@ -390,6 +433,34 @@ class IBAdapter:
                                for f in ib.fills() if f.execution.orderRef)
             self._emitted_exec.update(e.exec_id for e in executions)
         return AccountSnapshot(cash, nlv, self.currency, positions, orders, executions, full_sync, t)
+
+    def shortable(self, symbols, wait: float = 4.0) -> dict[str, float]:
+        """IB's shortable level of each stock (generic tick 236; delayed data accepted, since
+        a paper account often has no real-time subscription): above 2.5 easy to borrow, above
+        1.5 hard to borrow (a locate), otherwise not available. Read-only; a symbol IB does
+        not answer for is left out."""
+        if not self.is_connected():
+            raise AdapterError("not connected to TWS / IB Gateway")
+        ib = self.ib
+        ib.reqMarketDataType(3)                 # delayed when there is no subscription
+        tickers = {}
+        for sym in symbols:
+            try:
+                contract = self.contract(sym)
+            except AdapterError:
+                continue
+            self.messages.acquire()
+            tickers[sym] = (contract, ib.reqMktData(contract, "236", False, False))
+        end = time.monotonic() + wait
+        while time.monotonic() < end and any(_nan(getattr(t, "shortable", None)) for _c, t in tickers.values()):
+            ib.sleep(0.25)
+        out = {}
+        for sym, (contract, t) in tickers.items():
+            v = getattr(t, "shortable", None)
+            if not _nan(v):
+                out[sym] = float(v)
+            ib.cancelMktData(contract)
+        return out
 
     # -- waiting ----------------------------------------------------------------------------------------
     def drain(self) -> list:
@@ -428,6 +499,13 @@ class IBAdapter:
         self._attempt = 0
         self._queue.append(Connection(True, "reconnected", 0, self.now()))
         self._queue.append(self.snapshot(full_sync=True))
+
+
+def _nan(v) -> bool:
+    try:
+        return v is None or not float(v) >= 0       # None, NaN or IB's -1
+    except (TypeError, ValueError):
+        return True
 
 
 class IBBars:
@@ -506,4 +584,4 @@ class IBBars:
                              "volume": [r.volume for r in records]}, index=index)
 
 
-__all__ = ["IBAdapter", "IBBars", "ib_order_fields", "status_message"]
+__all__ = ["IBAdapter", "IBBars", "contract_name", "ib_order_fields", "is_cash_pair", "status_message"]
