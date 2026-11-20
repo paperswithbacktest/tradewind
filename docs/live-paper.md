@@ -131,7 +131,10 @@ others (`books/latest-DATE-fresh/`).
    **7497** (Gateway: 4002); *Trusted IPs* 127.0.0.1; untick *Read-Only API* (the propose
    run connects read-only on its own side, and sending needs it unticked).
 3. Check the account's base currency. The weights apply to the NetLiquidation the account
-   reports. If the base is not USD, set `capital:` in USD in the meta-portfolio file.
+   reports. If the base is not USD, set `capital:` in USD in the meta-portfolio file. IB
+   reports the account's value in its base currency only; the run converts it with IB's own
+   USD exchange rate, which IB publishes once the account holds USD. Until then (the first
+   run of an EUR account), pass `--base-fx-rate` (EURUSD: the price of 1 EUR in USD).
 4. Dry run without TWS: `--broker sim --replay 20` replays the last 20 closes on a simulated
    account (below).
 
@@ -146,7 +149,8 @@ others (`books/latest-DATE-fresh/`).
    the file is removed.
 
 The proposal lists orders that IB will refuse (an unknown ticker, a short with no borrow),
-and the send reports them as `rejected`. Tracking then shows them as rounding.
+and the send reports them as `rejected`. With *Read-Only API* still ticked, every order is
+refused (warning 321) and reported as `rejected`. Tracking then shows them as rounding.
 
 ## The scheduled day
 
