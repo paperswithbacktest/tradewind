@@ -52,7 +52,12 @@ lot: 1                     # round to whole shares (0: fractional)
 min_order_notional: 200    # smaller orders are not sent
 papers_dir: ~/dev/pwb/papers
 python: ~/venvs/pwb/bin/python                # the environment with pwb-toolbox
-exclude_symbols: []        # data series that are not instruments (a spot commodity, an index)
+exclude_symbols: []        # data series that are not instruments (a spot commodity)
+substitutes:               # indices are not tradable (below); SPX -> SPY is the default
+  VIX: VIXY
+notes:                     # repeated in the day's warnings while the symbol is held or targeted
+  ONDS: hard to borrow (IB shortable 2.0 on 2026-11-20)
+borrow_check: false        # IBKR: read the shortable tick of every short before sending
 sleeves:
   - {slug: dynamic_versus_static_asset_allocation_from_theory_halfway_to_practice, weight: 0.128}
   - {slug: protective_asset_allocation_paa_a_simple_momentum_based_alternative_for_term_deposits, weight: 0.075}
@@ -62,6 +67,79 @@ sleeves:
 ```
 
 `capital:` fixes the amount the weights apply to. Without it, the account's NAV is used.
+
+### Spot forex (IDEALPRO)
+
+A strategy that trades PWB's forex series (`AUDUSD`, `JPYUSD` ...: the USD price of one unit
+of the currency, the book in units of that currency) is traded on IBKR's IDEALPRO spot pairs.
+The run itself (targets, gross, tracking) stays in the strategy's units, whose notional is in
+USD. The IBKR account converts at the broker:
+
+- **IB's direction.** The pair's base is the first of EUR, GBP, AUD, NZD, USD it contains:
+  `AUDUSD` is `AUD.USD` (same quantity), `JPYUSD` is `USD.JPY`, inverted: buying `q` JPY
+  sells `q × price` USD. So are CAD, CHF, NOK, SEK, PLN, CZK, TRY, MXN, ZAR, KRW.
+- **Orders** are in units of the pair's base currency, rounded to one unit, market and good
+  till cancelled (IDEALPRO has no opening auction: the order fills when it is sent, or at the
+  reopening on Sunday evening).
+- **Positions and fills** come back in the strategy's units: an inverted position of `x` USD
+  at an average cost of `S` JPY per USD holds `-x × S` JPY, the yen actually exchanged. Its
+  difference with the plan (the move between the reference close and the fill) is tolerated up
+  to 3 % by the reconciliation.
+- **Never traded**, with the reason in the warnings: BRL, CLP, ISK, INR, IDR (no IDEALPRO pair:
+  non-deliverable currencies), RUB (USD.RUB is listed, its trading is restricted), and any
+  currency Tradewind does not know on IDEALPRO. A series quoted the other way (`USDJPY`, a
+  price in JPY) is not traded either: its backtest values the position in JPY as if it were USD.
+- **KRW** has a pair (USD.KRW) but is not freely convertible: it is traded with a warning;
+  try a paper order before relying on it.
+- **Odd lots.** IDEALPRO fills orders from about 25,000 USD at the interbank quote; a
+  smaller order is an odd lot, at a wider price. Each one is named in the warnings
+  (`fx_odd_lot:` sets the threshold). With a forex sleeve of about 30,000 USD at leverage 4,
+  most of its orders are odd lots.
+- Commission (proposal estimate and simulated account): 0.20 bp of the trade value, at
+  least 2 USD.
+- The carry of the strategy's series (the forward points, `.FXR` series) is not traded: the
+  account earns or pays the interest of its currency balances instead.
+
+### Indices and their substitutes
+
+An index (`SPX`, `VIX`, `NDX`, `RUT`, a symbol ending in `.IDX` ...; `indices:` adds more) cannot
+be bought. The meta-portfolio says what is traded instead:
+
+```yaml
+substitutes:
+  SPX: SPY                 # the default: SPY at the same notional
+  VIX: VIXY                # an ETP at the same notional: a proxy, VIXY is not the VIX
+  # SPX: null              # no substitute: SPX is refused
+  # SPX: {symbol: MES, kind: future, multiplier: 5, expiry: "20261218", exchange: CME}
+```
+
+- **ETF** (`SPY`, `VIXY`, `VXX`): `q × index / ETF price` shares, at each close. The ETF's
+  prices come from a sleeve that holds it, or else from the PWB datasets (completed by
+  `--fresh-prices` like the strategies' loads). The sleeve's backtest stays on the index:
+  what the substitute does differently (dividends, VIXY's roll) goes to the residual of the
+  tracking.
+- **Future** (an option, never on by default): `q / multiplier` contracts of the contract
+  named (`expiry` `YYYYMMDD` or `YYYYMM`, `exchange`), priced at `multiplier × index` (the basis
+  is ignored: fine for ES / MES on SPX, poor for VIX futures, which trade far from the spot).
+  Nothing rolls: within `roll_days` (5) of the expiry the run stops until the next contract
+  is written. Sent as a market order for the day (no opening auction on CME / CFE). Not yet
+  tried on the paper account.
+- **No substitute**: the index is refused, with its reason in the warnings, and the IBKR
+  account refuses any batch of orders that holds one before sending anything.
+
+### Names to watch
+
+The day's warnings (and the session report) also say:
+
+- `watch: KVUE: last price 2025-…` — a symbol held or targeted whose data stopped before the
+  close (a delisted stock still in a book); `watch: X: close unchanged … over the last 3
+  closes` — prices frozen;
+- `watch: ONDS: hard to borrow (IB shortable 2.0)` — with `borrow_check: true` on an IBKR
+  account, every short is checked on IB's shortable tick (236, delayed data accepted,
+  read-only): 1.5-2.5 needs a locate, 1.5 or less is not available;
+- `note: …` — the meta-portfolio's `notes:` while the symbol is held or targeted.
+
+`watch:` lines raise the `symbol_watch` alert of the session; `note:` lines do not.
 
 ## The daily command
 
@@ -203,6 +281,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 | `missed_open`, `kill_switch` | `--send` asked but nothing sent: past the open's cut-off, or `KILL` present |
 | `send_interrupted` | a send started and did not finish: check the broker's orders by hand |
 | `fills_mismatch`, `orders_working` | the reconciliation above |
+| `symbol_watch` | a held or targeted name whose data stopped or froze, or a hard-to-borrow short ("Names to watch") |
 
 | exit code | |
 |---|---|
@@ -319,9 +398,10 @@ strategies built by a function), `ReplayProvider`, `SimAccount` / `IBPaperAccoun
 - Fresh prices cost one request per live symbol a session. A strategy that loads a
   2 000-name universe makes up to ~2 000 requests, about 27 minutes at 75 a minute, the
   first time in a session. The next strategies and the `--send` run read the cache.
-- US stocks and ETFs only. A strategy that trades a series that is not an instrument
-  (spot commodities, reconstructed bond prices, indices) needs a tradable variant first.
-  Until then, exclude it or its symbols.
+- US stocks and ETFs, IDEALPRO spot forex against USD, and indices through a substitute.
+  A strategy that trades another series that is not an instrument (spot commodities,
+  reconstructed bond prices) needs a tradable variant first. Until then, exclude it or its
+  symbols.
 - The cap applies to the planned book at the close. Marked at the next close, the account
   drifts with prices, so keep `max_gross` below IB's limit.
 - At-close and conditional orders (limit, stop) are listed in the proposal's warnings and

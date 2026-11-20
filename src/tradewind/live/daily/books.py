@@ -32,7 +32,9 @@ class SleeveBook:
     open market orders (at-close and conditional orders are listed in ``conditional`` and
     not counted); ``open``/``close``: the bar of every feed the strategy reads; ``costs``:
     the commission charged on that bar's executions; ``half_spread``: the cost per unit of
-    notional the strategy's commission scheme would charge each symbol (when it says)."""
+    notional the strategy's commission scheme would charge each symbol (when it says);
+    ``stale_bars``: the symbols held or targeted whose last bar is older than the book's date
+    (a delisted stock whose data stopped), with that date."""
 
     date: str
     nav: float
@@ -44,6 +46,7 @@ class SleeveBook:
     cash: float = 0.0
     half_spread: dict[str, float] = field(default_factory=dict)
     conditional: list = field(default_factory=list)
+    stale_bars: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -57,7 +60,8 @@ class SleeveBook:
                    close={k: float(v) for k, v in d.get("close", {}).items()},
                    costs=float(d.get("costs", 0.0)), cash=float(d.get("cash", 0.0)),
                    half_spread={k: float(v) for k, v in d.get("half_spread", {}).items()},
-                   conditional=list(d.get("conditional", [])))
+                   conditional=list(d.get("conditional", [])),
+                   stale_bars={k: str(v) for k, v in d.get("stale_bars", {}).items()})
 
 
 def _finite(x) -> float | None:
@@ -110,11 +114,16 @@ class BookRecorder(Analyzer):
         opens: dict[str, float] = {}
         closes: dict[str, float] = {}
         spreads: dict[str, float] = {}
+        bar_dates: dict[str, str] = {}
         for d in strat.datas:
             name = getattr(d, "_name", None) or str(d)
             size = float(broker.getposition(d).size)
             if size:
                 positions[name] = size
+            with contextlib.suppress(Exception):    # a feed before its first bar
+                bar_day = d.datetime.date(0)
+                if isinstance(bar_day, _dt.date) and bar_day.isoformat() < today:
+                    bar_dates[name] = bar_day.isoformat()
             o, c = _finite(d.open[0]), _finite(d.close[0])
             if c is not None and c > 0:
                 closes[name] = c
@@ -141,9 +150,10 @@ class BookRecorder(Analyzer):
             else:
                 conditional.append({"symbol": name, "size": remaining, "type": order.getordername()})
         target = {k: v for k, v in target.items() if v}
+        stale = {k: v for k, v in bar_dates.items() if k in target or k in positions}
         book = SleeveBook(date=today, nav=float(broker.getvalue()), positions=positions, target=target,
                           open=opens, close=closes, costs=costs, cash=float(broker.getcash()),
-                          half_spread=spreads, conditional=conditional)
+                          half_spread=spreads, conditional=conditional, stale_bars=stale)
         if self.books and self.books[-1].date == today:
             self.books[-1] = book
         else:

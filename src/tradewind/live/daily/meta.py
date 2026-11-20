@@ -11,7 +11,14 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     min_order_notional: 200    # smaller orders are not sent (an order closing a line always is)
     papers_dir: ~/dev/pwb/papers
     python: /path/to/venv/bin/python      # the environment that has pwb-toolbox
-    exclude_symbols: [VIX]     # never traded (an index, a spot commodity series...)
+    exclude_symbols: [GC1]     # never traded (a spot commodity series...)
+    substitutes:               # indices are not tradable: what is traded instead (instruments.py)
+      SPX: SPY                 # the default: SPY at the same notional
+      VIX: VIXY                # an ETP at the same notional (a proxy: VIXY is not the VIX)
+      # SPX: {symbol: MES, kind: future, multiplier: 5, expiry: "20261218", exchange: CME}
+    notes:                     # said in the day's warnings while the symbol is held or targeted
+      ONDS: hard to borrow (IB shortable 2.0 on 2026-11-20)
+    borrow_check: false        # IBKR account: check the shortable tick of every short (read-only)
     fresh_prices: alphavantage # complete the monthly price datasets up to the last close
     sleeves:
       - {slug: protective_asset_allocation_paa_..., weight: 0.075}
@@ -26,6 +33,8 @@ import os
 from dataclasses import dataclass, field
 
 import pandas as pd
+
+from .instruments import DEFAULT_SUBSTITUTES, Substitute, fx_refusal, is_index
 
 REBALANCE = ("daily", "weekly", "monthly", "never")
 
@@ -55,6 +64,11 @@ class MetaPortfolio:
     python: str = ""
     exclude_symbols: list[str] = field(default_factory=list)
     fresh_prices: str = ""              # "alphavantage": the price loads completed to the last close
+    substitutes: dict = field(default_factory=dict)     # {index: Substitute | "ETF" | {...} | None}
+    indices: list[str] = field(default_factory=list)   # more symbols that are indices (not tradable)
+    notes: dict = field(default_factory=dict)          # {symbol: text} said while held or targeted
+    borrow_check: bool = False          # IBKR: read the shortable tick of the shorts (warnings only)
+    fx_odd_lot: float = 25_000.0        # an IDEALPRO order below this USD notional is an odd lot
 
     def __post_init__(self):
         if self.rebalance not in REBALANCE:
@@ -66,13 +80,31 @@ class MetaPortfolio:
             raise ValueError("a sleeve is listed twice")
         if any(s.weight < 0 for s in self.sleeves):
             raise ValueError("weights must be non-negative")
+        table: dict = dict(DEFAULT_SUBSTITUTES)
+        table.update(self.substitutes or {})            # None (or false) for an index: no substitute
+        self.substitutes = {k: v for k, v in ((k, Substitute.parse(v)) for k, v in table.items()) if v is not None}
+        for idx, sub in self.substitutes.items():
+            if self.is_index(sub.symbol):
+                raise ValueError(f"the substitute of {idx} is an index itself: {sub.symbol}")
+        self.notes = {str(k): str(v) for k, v in (self.notes or {}).items()}
 
     @property
     def weights(self) -> dict[str, float]:
         return {s.slug: s.weight for s in self.sleeves}
 
+    def is_index(self, symbol: str) -> bool:
+        return is_index(symbol, self.indices)
+
+    def refusal(self, symbol: str) -> str | None:
+        """Why ``symbol`` is never traded, or None."""
+        if symbol in self.exclude_symbols:
+            return "excluded (exclude_symbols)"
+        if self.is_index(symbol):
+            return "an index is not tradable, and it has no substitute (substitutes)"
+        return fx_refusal(symbol)
+
     def tradable(self, symbol: str) -> bool:
-        return symbol not in self.exclude_symbols
+        return self.refusal(symbol) is None
 
     # -- loading ---------------------------------------------------------------------------------
     @classmethod

@@ -50,6 +50,7 @@ from dataclasses import asdict, dataclass, field
 
 from ...calendars import NYSE, ExchangeCalendar
 from ..guards import KillSwitch
+from .instruments import is_fx
 from .runner import DailyRunner, StaleData
 
 EXIT_OK = 0
@@ -61,6 +62,7 @@ EXIT_BROKER = 6
 EXIT_BUSY = 7
 
 _NS = 1_000_000_000
+FX_RECONCILE_TOLERANCE = 0.03       # relative: a forex position against the previous one plus the orders
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -119,7 +121,7 @@ class AlertConfig:
 class Alert:
     code: str           # stale_prices, run_failed, broker_unreachable, tracking_gap, daily_loss,
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
-    #                     fills_mismatch, orders_working, notify_failed
+    #                     fills_mismatch, orders_working, notify_failed, symbol_watch
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -331,6 +333,8 @@ class DailySession:
         for w in report.warnings:                   # traded on stale data (allow_stale)
             if w.startswith("the data's last close") or ": last close " in w:
                 alerts.append(Alert("stale_prices", w))
+            elif w.startswith("watch: "):           # a delisted name, a hard-to-borrow short, a note
+                alerts.append(Alert("symbol_watch", w[len("watch: "):]))
         if alerts:
             code, status = EXIT_ALERT, "alert"
         return self._finish(session, report, alerts, code, status, errors=errors, stale=stale,
@@ -381,14 +385,17 @@ class DailySession:
             return out
         expected = dict(days[prev].get("held", {}))
         for s in prev_marker.get("sent", []):
-            if s.get("status") in ("rejected", "cancelled"):
+            if s.get("status") in ("rejected", "cancelled", "skipped"):
                 continue
             expected[s["symbol"]] = expected.get(s["symbol"], 0.0) + float(s["quantity"])
         held = today.get("held", {})
         working = {s for s, _q in out["working"]}
         for sym in sorted(set(expected) | set(held)):
             e, h = expected.get(sym, 0.0), held.get(sym, 0.0)
-            if abs(e - h) > 1e-6 * max(1.0, abs(e)) and sym not in working:
+            # a forex order on an inverted pair is sized in USD at the reference close: the
+            # currency it brings differs by the move to the fill (FX_RECONCILE_TOLERANCE)
+            tol = FX_RECONCILE_TOLERANCE if is_fx(sym) else 1e-6
+            if abs(e - h) > tol * max(1.0, abs(e)) and sym not in working:
                 out["mismatches"].append({"symbol": sym, "held": h, "expected": e})
         return out
 

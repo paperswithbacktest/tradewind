@@ -28,7 +28,8 @@ from dataclasses import dataclass, field
 from ..guards import KillSwitch
 from .aggregate import Plan, combine, gross, merged_prices, plan_day
 from .books import SleeveBook
-from .brokers import ibkr_tiered_commission
+from .brokers import estimated_commission
+from .instruments import FX_CAUTION, fx_pair, is_fx, substitute_books
 from .meta import MetaPortfolio
 from .tracking import Journal, track_day
 
@@ -119,11 +120,101 @@ class DailyRunner:
             books[slug] = h[last]
         return day, books, warnings
 
+    def _substitute(self, history: dict[str, dict[str, SleeveBook]]):
+        """The books with their indices replaced by the meta-portfolio's substitutes."""
+        used = {i: s for i, s in self.meta.substitutes.items()
+                if any(i in b.close or i in b.target or i in b.positions for h in history.values() for b in h.values())}
+        if not used:
+            return history, [], {}
+        prices: dict = {}
+        warnings: list[str] = []
+        etfs = sorted({s.symbol for s in used.values() if s.kind == "etf"})
+        dates = sorted({d for h in history.values() for d in h})
+        loader = getattr(self.provider, "prices", None)
+        if etfs and dates and loader is not None:
+            try:
+                prices = loader(etfs, dates[0], dates[-1])
+            except Exception as exc:  # noqa: BLE001 - the substitution then says what is missing
+                warnings.append(f"prices of the substitutes {etfs} not loaded: {exc}")
+        history, more = substitute_books(history, used, prices)
+        return history, warnings + more, used
+
+    def _watch(self, plan, books: dict[str, SleeveBook], history: dict[str, dict[str, SleeveBook]],
+               held: dict[str, float], day: str) -> list[str]:
+        """Symbols to look at before sending: notes of the meta-portfolio, delisted or frozen
+        prices, forex odd lots and caveats, hard-to-borrow shorts."""
+        meta = self.meta
+        out: list[str] = []
+        live = {s for s, q in plan.target.items() if q} | {s for s, q in held.items() if q}
+        for sym in sorted(live):
+            if sym in meta.notes:
+                out.append(f"note: {sym}: {meta.notes[sym]} (target {plan.target.get(sym, 0.0):+g}, "
+                           f"held {held.get(sym, 0.0):+g})")
+        for slug, b in sorted(books.items()):
+            for sym, last in sorted(b.stale_bars.items()):
+                if sym in live:
+                    out.append(f"watch: {sym}: last price {last}, before the close {b.date} (delisted? data "
+                               f"stopped), still in {slug}")
+        flagged = {w.split(":")[1].strip() for w in out if w.startswith("watch:")}
+        for sym in sorted(live - flagged):
+            if is_fx(sym):
+                continue
+            closes = []
+            for h in history.values():
+                for d in sorted(x for x in h if x <= day)[-3:]:
+                    if sym in h[d].close:
+                        closes.append((d, h[d].close[sym]))
+            series = dict(sorted(closes))
+            if len(series) >= 3 and len(set(series.values())) == 1:
+                out.append(f"watch: {sym}: close unchanged at {next(iter(series.values())):g} over the last "
+                           f"{len(series)} closes (delisted? frozen data)")
+        for o in plan.orders:
+            pair = fx_pair(o.symbol)
+            if pair is None or not math.isfinite(o.notional):
+                continue
+            if o.notional < meta.fx_odd_lot:
+                out.append(f"forex odd lot: {o.symbol} {o.quantity:+,.0f} ({pair.ib_pair}) is {o.notional:,.0f} USD, "
+                           f"under {meta.fx_odd_lot:,.0f}: IDEALPRO fills it as an odd lot, at a wider price")
+        for cur in sorted({p.currency for p in map(fx_pair, live) if p is not None} & set(FX_CAUTION)):
+            out.append(f"forex: {FX_CAUTION[cur]}")
+        if meta.borrow_check:
+            shorts = sorted(s for s, q in plan.target.items() if q < 0 and not is_fx(s)
+                            and not any(s == sub.symbol and sub.kind == "future" for sub in meta.substitutes.values()))
+            check = getattr(self.account, "shortable", None)
+            if shorts and check is None:
+                out.append("borrow check asked, but this account cannot read the shortable tick")
+            elif shorts:
+                try:
+                    levels = check(shorts)
+                except Exception as exc:  # noqa: BLE001 - a check, never a reason to stop
+                    out.append(f"borrow check failed: {exc}")
+                    levels = {}
+                for sym in shorts:
+                    v = levels.get(sym)
+                    if v is None:
+                        continue
+                    if v <= 1.5:
+                        out.append(f"watch: {sym}: not available to borrow (IB shortable {v:g}); the short "
+                                   f"{plan.target[sym]:+g} will be refused")
+                    elif v <= 2.5:
+                        out.append(f"watch: {sym}: hard to borrow (IB shortable {v:g}): the short "
+                                   f"{plan.target[sym]:+g} needs a locate and may be refused")
+                missing = [s for s in shorts if levels.get(s) is None]
+                if missing:
+                    out.append("borrow check: no shortable tick for " + ", ".join(missing[:10]))
+        return out
+
     def run_day(self, as_of: str | None = None, send: bool = False) -> DayReport:
         meta = self.meta
         history = self.provider.books(as_of, last_n=3)
+        history, sub_warnings, subs = self._substitute(history)
         day, books, warnings = self._pick(history, as_of)
-        warnings = list(getattr(self.provider, "warnings", [])) + warnings
+        for sub in subs.values():
+            sub.check_expiry(day)
+        specs = {s.symbol: s.spec() for s in subs.values() if s.spec()}
+        if specs and hasattr(self.account, "set_instruments"):
+            self.account.set_instruments(specs)
+        warnings = list(getattr(self.provider, "warnings", [])) + sub_warnings + warnings
         state = self._load()
         earlier = sorted(d for d in state["days"] if d < day)
         prev = state["days"][earlier[-1]] if earlier else None
@@ -162,9 +253,10 @@ class DailyRunner:
                         weights_seen=None if prev is None else prev.get("weights"))
         for sym in plan.missing_price:
             warnings.append(f"{sym}: held but no strategy prices it; its order has no reference price")
-        if plan.excluded:
-            warnings.append("excluded symbols not traded: "
-                            + ", ".join(f"{s} {q:+.2f}" for s, q in sorted(plan.excluded.items())))
+        if plan.refused:
+            warnings.append("not traded: " + "; ".join(
+                f"{s} {plan.excluded.get(s, held.get(s, 0.0)):+.2f} ({why})" for s, why in sorted(plan.refused.items())))
+        warnings += self._watch(plan, books, history, held, day)
         for b in books.values():
             for c in b.conditional:
                 warnings.append(f"conditional order not counted in the target: {c}")
@@ -215,14 +307,14 @@ class DailyRunner:
             lines_csv.append(",".join(str(x) for x in (
                 o.symbol, "BUY" if o.quantity > 0 else "SELL", f"{abs(o.quantity):g}", f"{o.price:.4f}",
                 f"{o.notional:.2f}", f"{o.current:g}", f"{o.target:g}", f"{o.exact:.4f}",
-                f"{ibkr_tiered_commission(o.quantity, o.price):.2f}" if math.isfinite(o.price) else "",
+                f"{estimated_commission(o):.2f}" if math.isfinite(o.price) else "",
                 (st.get("status", "") + (" " + st["reason"] if st.get("reason") else "")).strip() or "proposed")))
         with open(base + ".csv", "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines_csv) + "\n")
 
         buys = sum(o.notional for o in plan.orders if o.quantity > 0 and math.isfinite(o.notional))
         sells = sum(o.notional for o in plan.orders if o.quantity < 0 and math.isfinite(o.notional))
-        commission = sum(ibkr_tiered_commission(o.quantity, o.price) for o in plan.orders if math.isfinite(o.price))
+        commission = sum(estimated_commission(o) for o in plan.orders if math.isfinite(o.price))
         r = report.row
         md = [f"# Orders for the open after {day}", "",
               (f"- mode: **{'SENT' if report.sent else 'proposal (nothing sent)'}**, account `{snap.account}` "
@@ -257,6 +349,14 @@ class DailyRunner:
             md.append(f"| {o.symbol} | {'BUY' if o.quantity > 0 else 'SELL'} | {abs(o.quantity):g} | {o.price:,.2f} | "
                       f"{o.notional:,.0f} | {o.current:g} -> {o.target:g} | {st.get('status', 'proposed')} "
                       f"{st.get('reason', '')} |")
+        fx = [(o, fx_pair(o.symbol)) for o in plan.orders if fx_pair(o.symbol) is not None]
+        if fx:
+            md += ["", "## Forex orders at IDEALPRO (quantity in the pair's base currency)", "",
+                   "| symbol | book quantity | IB pair | IB side | IB quantity | notional USD |", "|---|---:|---|---|---:|---:|"]
+            for o, pair in fx:
+                q = pair.ib_quantity(o.quantity, o.price)
+                md.append(f"| {o.symbol} | {o.quantity:+,.0f} {pair.book_base} | {pair.ib_pair} | "
+                          f"{'BUY' if q > 0 else 'SELL'} | {abs(q):,.0f} {pair.ib_base} | {o.notional:,.0f} |")
         if plan.skipped:
             md += ["", "## Not sent (under the minimum order)", ""]
             md += [f"- {o.symbol} {o.quantity:+g} ({o.notional:,.0f})" for o in plan.skipped]

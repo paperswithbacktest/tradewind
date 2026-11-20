@@ -14,6 +14,16 @@ drives -- on a **paper account only**: it refuses any port other than the paper 
 7497, IB Gateway 4002) and any account whose id is not a paper id (``DU...``), and it connects
 read-only unless the run sends orders. It holds no credentials: it attaches to a TWS or IB
 Gateway session the user has already logged into.
+
+**Instruments at IBKR** (``instruments.py``). A stock or ETF is a ``Stock`` on SMART, sent
+market-on-open (``MKT``, ``OPG``). A spot forex symbol of the books (``AUDUSD``, ``JPYUSD``) is
+sent on its IDEALPRO pair, in IB's direction and in units of the pair's base currency
+(``USD.JPY``: ``q`` JPY bought = ``q x price`` USD sold), as a market order good till
+cancelled (IDEALPRO has no opening auction: it fills when sent, or at the reopening on a
+weekend); positions and executions come back in the books' units (an inverted pair through
+its average cost, so the JPY held is what was exchanged). A future (an index's substitute) is
+a ``MKT`` ``DAY`` order on the contract the meta-portfolio names. An index is never sent:
+``place`` refuses the whole batch before sending anything.
 """
 
 from __future__ import annotations
@@ -28,6 +38,7 @@ from ..adapter import AdapterError
 from ..ibkr import PAPER_PORTS, PAPER_PREFIXES, IBAdapter
 from ..messages import Ack, Canceled, Execution, OrderRequest, Rejected
 from .aggregate import ProposedOrder
+from .instruments import fx_pair, ibkr_fx_commission, is_index
 
 
 def ibkr_tiered_commission(quantity: float, price: float) -> float:
@@ -37,6 +48,14 @@ def ibkr_tiered_commission(quantity: float, price: float) -> float:
     if not q:
         return 0.0
     return min(max(0.0035 * q, 0.35), 0.01 * q * abs(price))
+
+
+def estimated_commission(order: ProposedOrder) -> float:
+    """IBKR's commission for a proposed order: IDEALPRO's for a forex symbol, the tiered stock
+    rate otherwise."""
+    if fx_pair(order.symbol) is not None:
+        return ibkr_fx_commission(order.notional)
+    return ibkr_tiered_commission(order.quantity, order.price)
 
 
 @dataclass
@@ -102,7 +121,10 @@ class SimAccount:
     def _costs(self, quantity: float, price: float, symbol: str) -> float:
         c = abs(quantity) * price * self._half_spread(symbol)
         if self.commission == "ibkr_tiered":
-            c += ibkr_tiered_commission(quantity, price)
+            if fx_pair(symbol) is not None:
+                c += ibkr_fx_commission(abs(quantity) * price)
+            else:
+                c += ibkr_tiered_commission(quantity, price)
         return c
 
     # -- the four calls ---------------------------------------------------------------------------
@@ -207,13 +229,39 @@ class IBPaperAccount:
                                f"pass account='DU...'")
         self.account = acct
 
+    # -- the books' symbols at IB --------------------------------------------------------------------
+    def set_instruments(self, specs: dict[str, dict]) -> None:
+        """Contracts that are not stocks (an index's future substitute): ``{symbol: spec}``."""
+        self.adapter.instruments.update(specs)
+
+    def _book_symbol(self, ib_symbol: str, known) -> str:
+        """The books' name of an IB symbol (``USD.JPY`` -> ``JPYUSD``, or the name a book uses)."""
+        pair = fx_pair(ib_symbol) if "." in ib_symbol else None
+        if pair is None:
+            return ib_symbol
+        for name in known:
+            p = fx_pair(name)
+            if p is not None and p.ib_pair == pair.ib_pair and p.usd_quoted:
+                return name
+        return f"{pair.currency}USD"
+
+    def _to_book(self, ib_symbol: str, quantity: float, price: float, known) -> tuple[str, float, float]:
+        """An IB position or execution (``quantity`` of ``ib_symbol`` at ``price``) in the books'
+        symbol, units and price."""
+        name = self._book_symbol(ib_symbol, known)
+        pair = fx_pair(name) if name != ib_symbol else None
+        if pair is None:
+            return name, quantity, price
+        return name, pair.book_quantity(quantity, price), pair.book_price(price)
+
     def settle(self, date: str, opens: dict[str, float], closes: dict[str, float]) -> list[Fill]:
         snap = self.adapter.snapshot(full_sync=True)
+        known = set(opens) | set(closes)
         fills = []
         for e in snap.executions:
-            ref = opens.get(e.symbol, e.price)
-            fills.append(Fill(e.symbol, float(e.quantity), float(e.price), float(ref), float(e.commission),
-                              e.client_id))
+            sym, q, px = self._to_book(e.symbol, float(e.quantity), float(e.price), known)
+            ref = opens.get(sym, px)
+            fills.append(Fill(sym, q, px, float(ref), float(e.commission), e.client_id))
         self._fills = fills
         return fills
 
@@ -226,22 +274,76 @@ class IBPaperAccount:
                                f"the rate (--base-fx-rate, the price of 1 {base} in {cur})")
         if snap.net_liquidation is None or snap.cash is None:
             raise AdapterError("the account values are not available yet (TWS still synchronising?)")
-        positions = {s: q for s, (q, _avg) in snap.position_map().items() if q}
+        known = set(closes or {})
+        positions: dict[str, float] = {}
+        for s, (q, avg) in snap.position_map().items():
+            if not q:
+                continue
+            pair = fx_pair(s) if "." in s else None
+            if pair is not None and pair.inverted and not avg:
+                # no average cost: the book's units at the close (approximate)
+                name = self._book_symbol(s, known)
+                px = (closes or {}).get(name)
+                if not px:
+                    raise AdapterError(f"{s}: no average cost and no close of {name} to read the position in "
+                                       f"{pair.currency}")
+                positions[name] = positions.get(name, 0.0) - q / px
+                continue
+            name, bq, _px = self._to_book(s, q, avg, known)
+            positions[name] = positions.get(name, 0.0) + bq
+        working = []
+        for o in snap.open_orders:
+            rest = o.quantity - math.copysign(o.filled, o.quantity)
+            name = self._book_symbol(o.symbol, known)
+            pair = fx_pair(name) if name != o.symbol else None
+            if pair is not None and pair.inverted:
+                px = (closes or {}).get(name)
+                rest = -rest / px if px else float("nan")
+            working.append((name, rest))
         return Snapshot(cash=float(snap.cash), nav=float(snap.net_liquidation), positions=positions,
-                        fills=list(getattr(self, "_fills", [])),
-                        open_orders=[(o.symbol, o.quantity - math.copysign(o.filled, o.quantity))
-                                     for o in snap.open_orders],
+                        fills=list(getattr(self, "_fills", [])), open_orders=working,
                         account=self.account, currency=snap.currency)
+
+    def request(self, client_id: str, order: ProposedOrder) -> OrderRequest:
+        """The IB order of a proposed order: a stock market-on-open, a forex pair on IDEALPRO in
+        IB's direction (market, good till cancelled), a future market for the day."""
+        pair = fx_pair(order.symbol)
+        if pair is not None:
+            if not pair.usd_quoted:
+                raise AdapterError(f"{order.symbol}: a forex symbol is traded from its XXXUSD series only")
+            if not (order.price > 0 and math.isfinite(order.price)):
+                raise AdapterError(f"{order.symbol}: no reference price to size the {pair.ib_pair} order")
+            q = round(pair.ib_quantity(float(order.quantity), float(order.price)))
+            return OrderRequest(client_id, pair.ib_pair, float(q), "MKT", tif="GTC")
+        if order.symbol in self.adapter.instruments:
+            return OrderRequest(client_id, order.symbol, float(order.quantity), "MKT", tif="DAY")
+        return OrderRequest(client_id, order.symbol, float(order.quantity), "MKT", tif="OPG")
+
+    def shortable(self, symbols: list[str], wait: float = 4.0) -> dict[str, float]:
+        """IB's shortable level of each stock (tick 236, delayed data allowed): above 2.5 easy
+        to borrow, 1.5-2.5 hard (a locate), 1.5 or less none. Read-only."""
+        return self.adapter.shortable(symbols, wait=wait)
 
     def place(self, orders: list[ProposedOrder], date: str) -> list[dict]:
         if not self.send:
             raise AdapterError("this account was opened read-only (propose mode): nothing is sent")
+        indices = sorted({o.symbol for o in orders if is_index(o.symbol)})
+        if indices:
+            raise AdapterError(f"orders on indices {indices}: an index is not tradable (substitute it in the "
+                               f"meta-portfolio); nothing is sent")
         stamp = date.replace("-", "")
-        ids = {}
+        requests = {}
         for i, o in enumerate(orders, 1):
             cid = f"twd-{stamp}-{i:04d}"
+            requests[cid] = (o, self.request(cid, o))      # every order is mapped before any is sent
+        ids, skipped = {}, []
+        for cid, (o, req) in requests.items():
+            if not req.quantity:                           # a forex order under one unit of the base
+                skipped.append({"id": cid, "symbol": o.symbol, "quantity": o.quantity, "status": "skipped",
+                                "reason": f"under one unit of {req.symbol}"})
+                continue
             ids[cid] = o
-            self.adapter.place(OrderRequest(cid, o.symbol, float(o.quantity), "MKT", tif="OPG"))
+            self.adapter.place(req)
         status = {cid: "sent" for cid in ids}
         reasons: dict[str, str] = {}
         deadline = time.monotonic() + self.ack_wait
@@ -260,10 +362,10 @@ class IBPaperAccount:
                 elif isinstance(m, Execution):
                     status[cid] = "filled"
         return [{"id": cid, "symbol": o.symbol, "quantity": o.quantity, "status": status[cid],
-                 "reason": reasons.get(cid, "")} for cid, o in ids.items()]
+                 "reason": reasons.get(cid, "")} for cid, o in ids.items()] + skipped
 
     def close(self) -> None:
         self.adapter.disconnect()
 
 
-__all__ = ["Fill", "IBPaperAccount", "SimAccount", "Snapshot", "ibkr_tiered_commission"]
+__all__ = ["Fill", "IBPaperAccount", "SimAccount", "Snapshot", "estimated_commission", "ibkr_tiered_commission"]

@@ -47,6 +47,8 @@ interface may change.
 
 ::: tradewind.live.daily.brokers
 
+::: tradewind.live.daily.instruments
+
 ::: tradewind.live.daily.tracking
 
 ::: tradewind.live.daily.meta
