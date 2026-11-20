@@ -414,7 +414,7 @@ class DailyRunner:
         r = report.row
         md = [f"# Orders for the open after {day}", "",
               (f"- mode: **{'SENT' if report.sent else 'proposal (nothing sent)'}**, account `{snap.account}` "
-               f"({type(self.account).__name__}), currency {snap.currency}"),
+               f"({type(self.account).__name__}), values in {snap.currency}"),
               f"- data: last close {day}; sleeves dated " + ", ".join(sorted({b.date for b in books.values()})),
               f"- account NAV {snap.nav:,.2f}, cash {snap.cash:,.2f}; capital allocated {capital:,.2f} (USD)",
               (f"- backtest NAV {r['nav_expected']:,.2f}; gap today {r['gap_day']:+,.2f}, "
