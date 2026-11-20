@@ -24,6 +24,28 @@ shares); an order smaller than ``min_order_notional`` is dropped unless it close
 is what the account holds (no order, no new line), under ``close`` it is zero (the holding is
 sold at the open). The exact book keeps the strategies' intent: the difference shows in the
 tracking as untraded.
+
+**Names outside a point-in-time universe.** A backtest with a point-in-time universe
+(pwb-toolbox, ``pit_exit="hold"``) keeps a name that left the universe until the strategy's
+next rebalance; its book then holds it (``SleeveBook.outside``). The live account never
+*opens* such a line: under ``out_of_universe_policy: no_new`` (the default) the part of a
+symbol's book that comes from the sleeves holding it outside their universe may keep, reduce
+or close what the account holds, never add to it nor turn it around. Per symbol, with ``E_out``
+the exact shares of those sleeves, ``E_in`` the others' and ``H`` the account's position::
+
+    room  = sign(E_out) x (H - E_in)          # what the account holds beyond the members' part
+    c     = sign(E_out) x min(|E_out|, max(room, 0))
+    target = round(E_in + c)
+
+So a symbol held only outside the universe ends with ``|target| <= |H|``, on ``H``'s side
+(a first buy is refused, a reduction or a sale is followed, a short is never turned long), and
+a sleeve that holds it *inside* its universe trades it freely: the cap is on the aggregate of
+the symbol, but only on the outside sleeves' part of it (the account does not know which sleeve
+owns which share, so ``H`` is read net of the members' part). ``follow`` trades the books as
+they are (the behaviour before). The planned exact book (``Plan.exact``) is the capped one,
+so the tracking counts what the strategies' backtests hold beyond it as *untraded* (planned
+against the backtests), not as rounding; ``Plan.out_of_universe`` keeps what they wanted. A
+stale symbol's policy applies after this one.
 """
 
 from __future__ import annotations
@@ -68,6 +90,7 @@ class Plan:
     refused: dict[str, str] = field(default_factory=dict)        # why each excluded symbol is not traded
     missing_price: list[str] = field(default_factory=list)
     frozen: dict[str, str] = field(default_factory=dict)        # stale symbols: hold or close
+    out_of_universe: list[dict] = field(default_factory=list)   # names held outside a PIT universe
     gross_exact: float = 0.0            # gross / capital of the exact book
     gross_target: float = 0.0           # gross / capital of the rounded book
     net_target: float = 0.0
@@ -130,6 +153,30 @@ def round_lot(q: float, lot: float) -> float:
     return math.copysign(whole * lot, q) if whole else 0.0
 
 
+def outside_parts(units: dict[str, float], books: dict[str, SleeveBook]) -> dict[str, dict[str, float]]:
+    """``{symbol: {sleeve: units x target}}`` of the sleeves whose book holds ``symbol`` outside
+    their point-in-time universe (``SleeveBook.outside``), zeros included."""
+    out: dict[str, dict[str, float]] = {}
+    for slug, k in units.items():
+        book = books.get(slug)
+        if book is None or not k:
+            continue
+        for sym in book.outside:
+            out.setdefault(sym, {})[slug] = k * book.target.get(sym, 0.0)
+    return out
+
+
+def cap_outside(e_in: float, e_out: float, held: float) -> float:
+    """The exact target of a symbol whose part ``e_out`` comes from sleeves holding it outside
+    their universe: that part keeps or reduces what the account holds beyond ``e_in``, never
+    adds to it nor turns it around (module doc)."""
+    if not e_out:
+        return e_in
+    sign = math.copysign(1.0, e_out)
+    room = max(sign * (held - e_in), 0.0)
+    return e_in + sign * min(abs(e_out), room)
+
+
 def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[str, float], capital: float,
              date: str, units: dict[str, float] | None = None, last_reset: str | None = None,
              weights_seen: dict[str, float] | None = None, frozen: dict[str, str] | None = None) -> Plan:
@@ -162,6 +209,30 @@ def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[st
         # rounding to the nearest lot crossed the cap: round toward zero instead, which
         # never adds gross to the exact book
         target = {s: math.copysign(math.floor(abs(q) / meta.lot) * meta.lot, q) for s, q in exact.items()}
+    rows = []
+    for sym, parts in sorted(outside_parts(units, books).items()):
+        if not meta.tradable(sym):
+            continue
+        e_out = sum(parts.values())
+        e_all = exact.get(sym, 0.0)
+        e_in = e_all - e_out
+        have = current.get(sym, 0.0)
+        followed = target.get(sym, 0.0)
+        kept = followed
+        if meta.out_of_universe_policy == "no_new":
+            capped = cap_outside(e_in, e_out, have)
+            kept = followed if capped == e_all else round_lot(capped, meta.lot)
+            if capped != e_all:                     # the planned book: the tracking calls the rest untraded
+                if capped:
+                    exact[sym] = capped
+                else:
+                    exact.pop(sym, None)
+            if abs(e_in) < 1e-12:                   # held outside only: never above the account's line
+                kept = math.copysign(min(abs(kept), abs(have)), have) if kept * have > 0 else 0.0
+            target[sym] = kept
+        rows.append({"symbol": sym, "sleeves": dict(parts), "wanted": e_out, "wanted_total": e_all,
+                     "inside": e_in, "held": have, "followed": followed, "target": kept,
+                     "policy": meta.out_of_universe_policy, "capped": abs(kept - followed) > 1e-9})
     frozen = dict(frozen or {})
     for sym, how in frozen.items():
         if how not in ("hold", "close"):
@@ -189,7 +260,8 @@ def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[st
                if not meta.tradable(s)}
     plan = Plan(date=date, capital=capital, units=units, rebalanced=bool(reason), reason=reason,
                 cap_scale=scale, exact=exact, target=target, orders=orders, skipped=skipped,
-                excluded=excluded, refused=refused, missing_price=missing, frozen=frozen)
+                excluded=excluded, refused=refused, missing_price=missing, frozen=frozen,
+                out_of_universe=rows)
     plan.gross_exact = gross(exact, prices) / capital if capital > 0 else 0.0
     plan.gross_target = gross(target, prices) / capital if capital > 0 else 0.0
     plan.net_target = (sum(q * prices[s] for s, q in target.items() if s in prices) / capital
@@ -197,5 +269,16 @@ def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[st
     return plan
 
 
-__all__ = ["Plan", "ProposedOrder", "combine", "due_for_reset", "gross", "merged_prices", "plan_day",
-           "round_lot", "sleeve_units"]
+__all__ = [
+    "Plan",
+    "ProposedOrder",
+    "cap_outside",
+    "combine",
+    "due_for_reset",
+    "gross",
+    "merged_prices",
+    "outside_parts",
+    "plan_day",
+    "round_lot",
+    "sleeve_units",
+]

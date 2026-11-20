@@ -65,6 +65,7 @@ class DayReport:
     fx: dict = field(default_factory=dict)      # the account's currency, its origin, the rate and its source
     borrow: dict = field(default_factory=dict)  # the shorts' fee, availability and cost of carry (borrow.py)
     stale: list = field(default_factory=list)   # the stale symbols and what was done with them
+    out_of_universe: list = field(default_factory=list)  # names held outside a PIT universe (aggregate.py)
 
 
 def stale_share(book: SleeveBook, symbols) -> float:
@@ -465,6 +466,8 @@ class DailyRunner:
                         frozen={d["plan_symbol"]: meta.stale_symbol_policy for d in stale.values()})
         stale_rows, stale_warnings = self._stale_report(stale, plan, held)
         warnings += stale_warnings
+        outside_rows = out_of_universe_rows(plan)
+        warnings += [out_of_universe_line(x) for x in outside_rows]
         for sym in plan.missing_price:
             warnings.append(f"{sym}: held but no strategy prices it; its order has no reference price")
         if plan.refused:
@@ -485,7 +488,8 @@ class DailyRunner:
                 raise RuntimeError(f"kill switch: {self.kill.reason}; nothing is sent")
             sent = self.account.place(plan.orders, day)
 
-        report = DayReport(day, plan, row, sent, warnings=warnings, fx=fx, borrow=borrow, stale=stale_rows)
+        report = DayReport(day, plan, row, sent, warnings=warnings, fx=fx, borrow=borrow, stale=stale_rows,
+                           out_of_universe=outside_rows)
         self._write_proposal(report, snap, books, capital)
 
         # the state of the day
@@ -608,6 +612,24 @@ class DailyRunner:
         return [self.run_day(d, send=send) for d in dates]
 
 
+def out_of_universe_rows(plan) -> list[dict]:
+    """The plan's names held outside a point-in-time universe, with the target kept (after a
+    stale symbol's policy, which applies last)."""
+    return [dict(x, target=plan.target.get(x["symbol"], 0.0),
+                 capped=abs(plan.target.get(x["symbol"], 0.0) - x["followed"]) > 1e-9)
+            for x in plan.out_of_universe]
+
+
+def out_of_universe_line(x: dict) -> str:
+    """One name held outside its universe: the sleeves (legs), what they want, what is held,
+    the target kept."""
+    legs = ", ".join(f"{s} {q:+.4g}" for s, q in sorted(x["sleeves"].items()))
+    inside = f", members' part {x['inside']:+.4g}" if abs(x["inside"]) > 1e-12 else ""
+    done = "capped" if x["capped"] else "followed"
+    return (f"out of universe: {x['symbol']}: outside the universe of {legs} (books want {x['wanted']:+.4g}"
+            f"{inside}); held {x['held']:+g}; target {x['target']:+g} ({x['policy']}: {done})")
+
+
 def last_session(today: _dt.date | None = None) -> str:
     """The last weekday on or before ``today`` (holidays are the data's business)."""
     day = today or _dt.date.today()
@@ -616,4 +638,5 @@ def last_session(today: _dt.date | None = None) -> str:
     return day.isoformat()
 
 
-__all__ = ["AccountCurrencyError", "DailyRunner", "DayReport", "StaleData", "last_session", "stale_share"]
+__all__ = ["AccountCurrencyError", "DailyRunner", "DayReport", "StaleData", "last_session", "out_of_universe_line",
+           "out_of_universe_rows", "stale_share"]

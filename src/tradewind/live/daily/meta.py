@@ -33,6 +33,8 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     fresh_index_proxy_approximate: [VIX]   # chained although VIXY does not track the VIX (unchecked)
     stale_symbol_policy: hold  # a symbol still stale after the top-up: hold (default), close, block
     stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
+    out_of_universe_policy: no_new # a name a sleeve holds outside its point-in-time universe: kept,
+                                   #   reduced or sold, never bought (default); follow: as the books say
     sleeves:
       - {slug: protective_asset_allocation_paa_..., weight: 0.075}
       - {slug: decomposing_the_price_earnings_ratio, weight: 0.109,
@@ -52,6 +54,8 @@ from .instruments import DEFAULT_SUBSTITUTES, Substitute, fx_refusal, is_index
 REBALANCE = ("daily", "weekly", "monthly", "never")
 #: what the run does with a symbol still stale after the fresh-price top-up (runner.py)
 STALE_POLICIES = ("hold", "close", "block")
+#: what the run does with a name a sleeve holds outside its point-in-time universe (aggregate.py)
+OUT_OF_UNIVERSE_POLICIES = ("no_new", "follow")
 
 
 @dataclass
@@ -93,6 +97,7 @@ class MetaPortfolio:
     fresh_index_proxy_approximate: list[str] = field(default_factory=list)
     stale_symbol_policy: str = "hold"   # hold: no order on it; close: target 0; block: nothing proposed
     stale_symbol_max_weight: float = 0.2    # of a sleeve's gross: above it, the sleeve stays in error
+    out_of_universe_policy: str = "no_new"  # no_new: never opened nor added to live; follow: the books
 
     def __post_init__(self):
         if self.rebalance not in REBALANCE:
@@ -117,6 +122,10 @@ class MetaPortfolio:
         self.stale_symbol_policy = str(self.stale_symbol_policy or "hold").lower()
         if self.stale_symbol_policy not in STALE_POLICIES:
             raise ValueError(f"stale_symbol_policy is one of {STALE_POLICIES}, not {self.stale_symbol_policy!r}")
+        self.out_of_universe_policy = str(self.out_of_universe_policy or "no_new").lower()
+        if self.out_of_universe_policy not in OUT_OF_UNIVERSE_POLICIES:
+            raise ValueError(f"out_of_universe_policy is one of {OUT_OF_UNIVERSE_POLICIES}, "
+                             f"not {self.out_of_universe_policy!r}")
         self.stale_symbol_max_weight = float(self.stale_symbol_max_weight)
         if not 0.0 <= self.stale_symbol_max_weight <= 1.0:
             raise ValueError("stale_symbol_max_weight is a fraction of a sleeve's gross, between 0 and 1")
@@ -211,4 +220,4 @@ class MetaPortfolio:
         return cls.from_dict(d)
 
 
-__all__ = ["REBALANCE", "STALE_POLICIES", "MetaPortfolio", "Sleeve"]
+__all__ = ["OUT_OF_UNIVERSE_POLICIES", "REBALANCE", "STALE_POLICIES", "MetaPortfolio", "Sleeve"]
