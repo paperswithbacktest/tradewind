@@ -58,6 +58,8 @@ substitutes:               # indices are not tradable (below); SPX -> SPY is the
 notes:                     # repeated in the day's warnings while the symbol is held or targeted
   ONDS: hard to borrow (IB shortable 2.0 on 2026-11-20)
 borrow_check: false        # IBKR: read the shortable tick of every short before sending
+borrow_source: auto        # the shorts' fee and availability (below); auto is the default at IBKR
+borrow_fee_alert: 1.0      # % a year: a short whose fee is at or above it is hard to borrow
 sleeves:
   - {slug: dynamic_versus_static_asset_allocation_from_theory_halfway_to_practice, weight: 0.128}
   - {slug: protective_asset_allocation_paa_a_simple_momentum_based_alternative_for_term_deposits, weight: 0.075}
@@ -167,6 +169,49 @@ The day's warnings (and the session report) also say:
 - `note: …` — the meta-portfolio's `notes:` while the symbol is held or targeted.
 
 `watch:` lines raise the `symbol_watch` alert of the session; `note:` lines do not.
+
+### The cost of borrowing the shorts
+
+Every short of the day, proposed (a negative target) or held, gets the borrow fee and the shares
+the broker can lend that day, and its cost of carry, in a *Short borrow* section of the proposal
+and of the report of the day (`borrow` in `reports/SESSION.json`):
+
+| column | |
+|---|---|
+| short (target / held) | the target's quantity and the account's; the short carried is the target's, or the held one when the target closes it (one more night) |
+| short value | the short carried × the close, USD |
+| fee bps/yr | IB's indicative borrow fee, in basis points a year |
+| available | the shares IB can lend (`> 10,000,000` when IB caps the figure) |
+| cost a day | fee × short value / 365, USD; the total a day and a year is above the table |
+
+**Sources** (`borrow_source:` or `--borrow-source`):
+
+- `hub`: IB's short-stock file (`ftp2.interactivebrokers.com`, user `shortstock`) as the private
+  dataset `paperswithbacktest/InteractiveBrokers-Daily-ShortAvailability` keeps it, one snapshot
+  a US business day after the close (the latest is used; a snapshot more than 4 days older than
+  the session is used with a note). It works without TWS / IB Gateway; it needs
+  `huggingface_hub`, `pyarrow` and a Hugging Face login that can read the dataset. The file lists
+  every stock IB can lend: a short that is not in it has no availability.
+- `ib`: IB's shortable tick (236) on the IBKR account, read-only, delayed data accepted. It gives
+  a level, not a fee: the costs are then `n/a`.
+- `auto` (the default on an IBKR account): `hub`, then `ib` when the dataset cannot be read; the
+  note says why. `none` (the default on the simulated account): no section.
+
+If no source answers, every short is `unknown`, with the reason in the notes; the run goes on.
+
+**Flags.** A short is flagged, in the warnings (`borrow: …`) and with the session's alert
+`short_borrow`, when it is
+
+- `hard_to_borrow`: a fee at or above `borrow_fee_alert` (1 % a year by default; USD general
+  collateral costs about 0.25 %, 25 bps, and IB's list had SPY at 0.26 % on 2026-11-20), or an IB
+  shortable level of 2.5 or less;
+- `no_availability`: absent from IB's list, 0 shares available, or a shortable level of 1.5 or
+  less: the short will be refused;
+- `insufficient`: fewer shares available than the short (when IB does not cap the figure).
+
+The fee is IB's indicative rate for the day: the rate actually charged is set each day on the
+position held, and the account also earns (or not) a rebate on the short proceeds, which the
+report gives in the JSON (`rebate_rate`) but does not net.
 
 ## The daily command
 
@@ -288,7 +333,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
    `reports/latest.*`): a one-line summary, the portfolio's value and the day's change, the
    orders proposed, sent and filled at the day's open, the gap to the backtest and its terms,
    each sleeve's close, units and state (error, stale symbols), the stale symbols, the
-   reconciliation, the warnings and the alerts.
+   reconciliation, the shorts' borrow fee and cost of carry, the warnings and the alerts.
 
 ```text
 2026-12-15 DONE | NAV 110,214 (+0.19%) | gap to backtest -38 (-0.03%) | orders 14 proposed, 14 sent, 12 filled | alerts: none
@@ -308,6 +353,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 | `send_interrupted` | a send started and did not finish: check the broker's orders by hand |
 | `fills_mismatch`, `orders_working` | the reconciliation above |
 | `symbol_watch` | a held or targeted name whose data stopped or froze, or a hard-to-borrow short ("Names to watch") |
+| `short_borrow` | a short with a fee at or above `borrow_fee_alert`, or with no or too few shares to borrow ("The cost of borrowing the shorts") |
 
 | exit code | |
 |---|---|

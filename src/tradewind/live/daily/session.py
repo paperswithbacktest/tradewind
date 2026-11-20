@@ -50,6 +50,8 @@ from dataclasses import asdict, dataclass, field
 
 from ...calendars import NYSE, ExchangeCalendar
 from ..guards import KillSwitch
+from .borrow import alert_lines
+from .borrow import markdown as borrow_markdown
 from .instruments import is_fx
 from .runner import DailyRunner, StaleData
 
@@ -121,7 +123,7 @@ class AlertConfig:
 class Alert:
     code: str           # stale_prices, run_failed, broker_unreachable, tracking_gap, daily_loss,
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
-    #                     fills_mismatch, orders_working, notify_failed, symbol_watch
+    #                     fills_mismatch, orders_working, notify_failed, symbol_watch, short_borrow
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -197,7 +199,7 @@ class DailySession:
                  send: bool = False, now: _dt.datetime | None = None, session: str | None = None,
                  alerts: AlertConfig | None = None, allow_stale: bool = False, force: bool = False,
                  notify_cmd: str = "", notify: str = "alerts", calendar: ExchangeCalendar = NYSE,
-                 log=print):
+                 log=print, borrow=None):
         if notify not in ("alerts", "always", "never"):
             raise ValueError("notify is 'alerts', 'always' or 'never'")
         self.meta = meta
@@ -214,6 +216,7 @@ class DailySession:
         self.notify = notify
         self.calendar = calendar
         self.log = log
+        self.borrow = borrow                # the shorts' borrow source (borrow.py), None: no section
         for sub in ("sessions", "reports"):
             os.makedirs(os.path.join(self.dir, sub), exist_ok=True)
 
@@ -300,7 +303,8 @@ class DailySession:
 
         seen: dict = {}
         self._watch(account, session, seen)
-        runner = DailyRunner(self.meta, provider, account, self.dir, allow_stale=self.allow_stale, log=self.log)
+        runner = DailyRunner(self.meta, provider, account, self.dir, allow_stale=self.allow_stale, log=self.log,
+                             borrow=self.borrow)
         code, status, report = EXIT_OK, "done", None
         try:
             report = runner.run_day(session, send=send)
@@ -335,6 +339,9 @@ class DailySession:
                 alerts.append(Alert("stale_prices", w))
             elif w.startswith("watch: "):           # a delisted name, a hard-to-borrow short, a note
                 alerts.append(Alert("symbol_watch", w[len("watch: "):]))
+        for x in alert_lines(report.borrow):        # the day's borrow data (borrow.py)
+            alerts.append(Alert("short_borrow", f"{x['symbol']}: {x['status'].replace('_', ' ')} ({x['why']}); "
+                                                f"short {x['short_quantity']:,.0f}"))
         if alerts:
             code, status = EXIT_ALERT, "alert"
         return self._finish(session, report, alerts, code, status, errors=errors, stale=stale,
@@ -483,6 +490,7 @@ class DailySession:
             "sleeves_in_error": errors,
             "stale_symbols": stale_symbols,
             "warnings": list(report.warnings) if report is not None else [],
+            "borrow": dict(report.borrow) if report is not None else {},
             "reconciliation": extra.get("reconciliation", {}),
             "proposal": report.proposal_md if report is not None else "",
         }
@@ -549,6 +557,8 @@ def render_markdown(d: dict) -> str:
         md += ["", "## Reconciliation", ""]
         md += [f"- {m['symbol']}: held {m['held']:g}, expected {m['expected']:g}" for m in r.get("mismatches", [])]
         md += [f"- working at the broker: {s} {q:+g}" for s, q in r.get("working", [])]
+    if d.get("borrow", {}).get("lines"):
+        md += [""] + borrow_markdown(d["borrow"])[:-1]
     if d["warnings"]:
         md += ["", "## Warnings", ""] + [f"- {w}" for w in d["warnings"]]
     md.append("")
@@ -583,7 +593,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    from .__main__ import OVERRIDES, make_account, make_provider
+    from .__main__ import OVERRIDES, make_account, make_borrow, make_provider
     from .meta import MetaPortfolio
 
     args = parser().parse_args(argv)
@@ -604,7 +614,8 @@ def main(argv=None) -> int:
     day = DailySession(meta, directory, provider_factory=lambda: make_provider(args, meta, directory),
                        account_factory=lambda send: make_account(args, directory, send),
                        send=args.send, now=now, session=args.as_of, alerts=cfg, allow_stale=args.allow_stale,
-                       force=args.force, notify_cmd=args.notify_cmd, notify=args.notify)
+                       force=args.force, notify_cmd=args.notify_cmd, notify=args.notify,
+                       borrow=make_borrow(meta, args.broker))
     return day.run().code
 
 
