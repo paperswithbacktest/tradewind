@@ -35,6 +35,8 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
     out_of_universe_policy: no_new # a name a sleeve holds outside its point-in-time universe: kept,
                                    #   reduced or sold, never bought (default); follow: as the books say
+    universe_max_age_days: 35      # alert universe_age when the point-in-time universe a sleeve
+                                   #   uses ends more than this many days before the session
     sleeves:
       - {slug: protective_asset_allocation_paa_..., weight: 0.075}
       - {slug: decomposing_the_price_earnings_ratio, weight: 0.109,
@@ -98,6 +100,7 @@ class MetaPortfolio:
     stale_symbol_policy: str = "hold"   # hold: no order on it; close: target 0; block: nothing proposed
     stale_symbol_max_weight: float = 0.2    # of a sleeve's gross: above it, the sleeve stays in error
     out_of_universe_policy: str = "no_new"  # no_new: never opened nor added to live; follow: the books
+    universe_max_age_days: float = 35.0     # the point-in-time universe's last date may lag the session this much
 
     def __post_init__(self):
         if self.rebalance not in REBALANCE:
@@ -127,6 +130,9 @@ class MetaPortfolio:
             raise ValueError(f"out_of_universe_policy is one of {OUT_OF_UNIVERSE_POLICIES}, "
                              f"not {self.out_of_universe_policy!r}")
         self.stale_symbol_max_weight = float(self.stale_symbol_max_weight)
+        self.universe_max_age_days = float(self.universe_max_age_days)
+        if not self.universe_max_age_days > 0:
+            raise ValueError("universe_max_age_days is a number of calendar days, above 0")
         if not 0.0 <= self.stale_symbol_max_weight <= 1.0:
             raise ValueError("stale_symbol_max_weight is a fraction of a sleeve's gross, between 0 and 1")
         tol = self.fresh_price_tolerance

@@ -63,6 +63,7 @@ borrow_fee_alert: 1.0      # % a year: a short whose fee is at or above it is ha
 stale_symbol_policy: hold  # a symbol still stale after the fresh-price top-up: hold, close, block
 stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
 out_of_universe_policy: no_new # a name held outside a point-in-time universe: never bought live; follow
+universe_max_age_days: 35  # alert universe_age when the point-in-time universe ends longer ago than this
 fresh_price_tolerance: {}  # by kind (equity, fx, fx_minor, crypto, index) or symbol ("Fresh prices")
 fresh_index_proxy_approximate: []   # indices continued with a proxy that does not track them
 sleeves:
@@ -211,6 +212,19 @@ backtests hold beyond it as *untraded*. The day's warnings have one line per nam
 want +612); held +0; target +0 (no_new: capped)`), the report a table of them, and the session
 raises `out_of_universe` when the cap changed a target. A stale symbol's policy applies after
 this one. Books cached by an earlier version (without the list) are computed again.
+
+**The age of the universe.** Past the last date of `Stocks-Daily-LiquidUniverse` the harness
+carries the last known composition forward (`membership_mask`: a date that is not a session of
+the table resolves to the last one), so a table that is not rebuilt breaks nothing: the names
+that entered or left since are just not seen, neither bought as new members nor flagged as
+outside. The table is rebuilt once a month (data-api's `pit_liquid_universe`, on the 7th), so
+a month and a few days is its normal age at worst. Each strategy's worker reports the last date
+of the universe it loaded (read off the table pwb-toolbox already holds in memory, no second
+load; none for a strategy without a point-in-time universe), the report of the day has the line
+`universe as of 07/10 (43 days), 3 sleeve(s) on a point-in-time universe` (the oldest date
+when the sleeves differ), and the session raises `universe_age` when the age in calendar days
+is above `universe_max_age_days` (35). No sleeve on a point-in-time universe: no line, no
+alert. Books cached by an earlier version say nothing about it (they are not run again for it).
 
 ### The cost of borrowing the shorts
 
@@ -439,7 +453,8 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
    `reports/latest.*`): a one-line summary, the portfolio's value and the day's change, the
    orders proposed, sent and filled at the day's open, the gap to the backtest and its terms,
    each sleeve's close, units and state (error, stale symbols), the stale symbols, the
-   reconciliation, the shorts' borrow fee and cost of carry, the warnings and the alerts.
+   reconciliation, the shorts' borrow fee and cost of carry, the age of the point-in-time
+   universe, the warnings and the alerts.
 
 ```text
 2026-12-15 DONE | NAV 110,214 (+0.19%) | gap to backtest -38 (-0.03%) | orders 14 proposed, 14 sent, 12 filled | alerts: none
@@ -461,6 +476,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 | `fills_mismatch`, `orders_working` | the reconciliation above |
 | `symbol_watch` | a held or targeted name whose data stopped or froze, or a hard-to-borrow short ("Names to watch") |
 | `out_of_universe` | proposed: a name a sleeve holds outside its point-in-time universe was not bought, or not added to, for it (`out_of_universe_policy`, "Names outside a point-in-time universe"); one line each with the sleeves (legs), what the books want, what is held and the target kept |
+| `universe_age` | the point-in-time universe a sleeve uses ends more than `universe_max_age_days` (35) calendar days before the session: its last composition is carried forward, entries and exits since are not seen ("The age of the universe"); the sleeves are listed |
 | `short_borrow` | a short with a fee at or above `borrow_fee_alert`, or with no or too few shares to borrow ("The cost of borrowing the shorts") |
 
 | exit code | |

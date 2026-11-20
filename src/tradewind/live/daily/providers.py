@@ -12,7 +12,8 @@ day in ``cache_dir``: a second run of the same day (propose, then send) reuses t
 close first (``fresh.py``). A symbol still stale is listed per sleeve (``stale``,
 ``stale_info``) and the books are kept; the runner decides what to do with it
 (``stale_symbol_policy``). With ``stale_symbol_policy: block`` it stops the run
-(``StaleData``), as before.
+(``StaleData``), as before. The last date of the point-in-time universe each sleeve loaded is
+kept too (``universe_last``; the session's ``universe_age`` alert).
 
 ``ReplayProvider`` runs each strategy once up to ``until`` and serves every earlier day from
 that run: a strategy is causal, so its book at a past close is the same whether the run
@@ -119,6 +120,7 @@ class PwbProvider:
         self.errors: dict[str, str] = {}            # the sleeves of the last books() that failed
         self.stale: dict[str, dict[str, str]] = {}  # their live symbols still behind, when stale
         self.stale_info: dict[str, dict[str, dict]] = {}    # {slug: {symbol: {dataset, last, cause, reason}}}
+        self.universe_last: dict[str, str] = {}     # {slug: last date of its point-in-time universe}
 
     def _env(self) -> dict:
         env = dict(os.environ)
@@ -207,7 +209,7 @@ class PwbProvider:
         folder = os.path.join(self.cache_dir, tag)
         os.makedirs(folder, exist_ok=True)
         out: dict[str, dict[str, SleeveBook]] = {}
-        self.errors, self.stale, self.stale_info = {}, {}, {}
+        self.errors, self.stale, self.stale_info, self.universe_last = {}, {}, {}, {}
         failures: list[BaseException] = []
         for sleeve in self.meta.sleeves:
             try:
@@ -251,6 +253,8 @@ class PwbProvider:
         if self.fresh_prices and payload.get("fresh"):
             self._note_fresh(sleeve.slug, payload["fresh"])
         self._note_stale(sleeve.slug, payload)
+        if payload.get("universe_last"):            # absent: no universe, or a book cached before
+            self.universe_last[sleeve.slug] = str(payload["universe_last"])[:10]
         history = {b["date"]: SleeveBook.from_dict(b) for b in payload["books"]}
         last = max(history) if history else "none"
         self.log(f"[signal] {sleeve.slug}: last close {last}"
@@ -284,6 +288,11 @@ class ReplayProvider:
     @property
     def stale_info(self) -> dict:
         return getattr(self.inner, "stale_info", None) or {}
+
+    @property
+    def universe_last(self) -> dict:
+        """The inner provider's last date of each sleeve's point-in-time universe."""
+        return getattr(self.inner, "universe_last", None) or {}
 
     @property
     def errors(self) -> dict:
