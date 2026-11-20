@@ -33,9 +33,18 @@ from .instruments import FX_CAUTION, fx_pair, is_fx, substitute_books
 from .meta import MetaPortfolio
 from .tracking import Journal, track_day
 
+#: a held name whose close has not moved over this many closes is flagged (prices frozen or
+#: delisted); fewer would flag the end of a monthly dataset, carried forward for a few days
+FROZEN_CLOSES = 5
+
 
 class StaleData(RuntimeError):
     """A strategy's last close is older than the day asked for."""
+
+
+class AccountCurrencyError(RuntimeError):
+    """The account's currency is not the one the meta-portfolio expects, or no rate converts
+    it to the books' USD: nothing is sized."""
 
 
 @dataclass
@@ -48,6 +57,7 @@ class DayReport:
     proposal_md: str = ""
     chart: str | None = None
     warnings: list = field(default_factory=list)
+    fx: dict = field(default_factory=dict)      # the account's currency, its origin, the rate and its source
 
 
 class DailyRunner:
@@ -161,11 +171,11 @@ class DailyRunner:
                 continue
             closes = []
             for h in history.values():
-                for d in sorted(x for x in h if x <= day)[-3:]:
+                for d in sorted(x for x in h if x <= day)[-FROZEN_CLOSES:]:
                     if sym in h[d].close:
                         closes.append((d, h[d].close[sym]))
             series = dict(sorted(closes))
-            if len(series) >= 3 and len(set(series.values())) == 1:
+            if len(series) >= FROZEN_CLOSES and len(set(series.values())) == 1:
                 out.append(f"watch: {sym}: close unchanged at {next(iter(series.values())):g} over the last "
                            f"{len(series)} closes (delisted? frozen data)")
         for o in plan.orders:
@@ -204,9 +214,86 @@ class DailyRunner:
                     out.append("borrow check: no shortable tick for " + ", ".join(missing[:10]))
         return out
 
+    # -- the account's currency ------------------------------------------------------------------
+    def _pwb_rate(self, cur: str, day: str, books: dict[str, SleeveBook]) -> tuple[float, str] | None:
+        """USD per unit of ``cur`` from the PWB forex series ``<cur>USD``: a sleeve's close, or
+        the provider's price loader (completed by fresh prices when they are on)."""
+        sym = f"{cur}USD"
+        found = [(b.date, b.close[sym]) for b in books.values() if sym in b.close and b.close[sym] > 0]
+        if found:
+            d, px = max(found)
+            return float(px), d
+        loader = getattr(self.provider, "prices", None)
+        if loader is None:
+            return None
+        start = (_dt.date.fromisoformat(day) - _dt.timedelta(days=14)).isoformat()
+        try:
+            rows = loader([sym], start, day).get(sym, {})
+        except Exception as exc:  # noqa: BLE001 - the next source is tried
+            self.log(f"[fx] {sym} from PWB: {exc}")
+            return None
+        rows = {d: v for d, v in rows.items() if d <= day and v[1] > 0}
+        if not rows:
+            return None
+        d = max(rows)
+        return float(rows[d][1]), d
+
+    def account_fx(self, day: str, books: dict[str, SleeveBook]) -> dict:
+        """The account's currency (read off the account; a simulated account is in USD unless
+        told otherwise) and the day's rate to the books' USD: IB's own, else PWB's ``<cur>USD``,
+        else the rate given (``--base-fx-rate``). ``meta.account_currency``, when set, must
+        match the account."""
+        info_of = getattr(self.account, "currency_info", None)
+        info = info_of() if info_of is not None else {"currency": "USD", "published": 1.0, "fallback": None}
+        cur = str(info["currency"]).upper()
+        kind = getattr(self.account, "kind", "")
+        forced = self.meta.account_currency
+        if forced and forced != cur:
+            raise AccountCurrencyError(
+                f"the meta-portfolio says the account is in {forced} (account_currency), the "
+                f"{'IBKR' if kind == 'ibkr' else 'simulated'} account is in {cur}: nothing is sized")
+        if forced:
+            origin = "forced"
+        elif kind == "ibkr":
+            origin = "detected"
+        elif getattr(self.account, "explicit_currency", False):
+            origin = "simulated account"
+        else:
+            origin = "default"
+        if cur == "USD":
+            rate, source = 1.0, "USD account"
+        elif info.get("published"):
+            rate, source = float(info["published"]), "IB"
+        else:
+            pwb = self._pwb_rate(cur, day, books)
+            if pwb is not None:
+                rate, source = pwb[0], f"PWB {cur}USD {pwb[1]}"
+            elif info.get("fallback"):
+                rate, source = float(info["fallback"]), "--base-fx-rate"
+            else:
+                raise AccountCurrencyError(
+                    f"the account is in {cur} and no {cur}USD rate is available: IB publishes none until the "
+                    f"account holds USD, PWB has no {cur}USD close up to {day}; pass --base-fx-rate (USD per {cur})")
+        if cur != "USD" and hasattr(self.account, "set_fx"):
+            self.account.set_fx(rate)
+        return {"currency": cur, "origin": origin, "rate": rate, "source": source}
+
+    def capital_usd(self, fx: dict, nav_usd: float) -> float:
+        """``meta.capital`` in USD (``capital_currency``: USD, or the account's by default)."""
+        meta = self.meta
+        if not meta.capital:
+            return float(nav_usd)
+        cc = meta.capital_currency or fx["currency"]
+        if cc == "USD":
+            return float(meta.capital)
+        if cc == fx["currency"]:
+            return float(meta.capital) * fx["rate"]
+        raise AccountCurrencyError(f"capital_currency {cc}: give the capital in USD or in the account's currency "
+                                   f"{fx['currency']}")
+
     def run_day(self, as_of: str | None = None, send: bool = False) -> DayReport:
         meta = self.meta
-        history = self.provider.books(as_of, last_n=3)
+        history = self.provider.books(as_of, last_n=FROZEN_CLOSES + 1)
         history, sub_warnings, subs = self._substitute(history)
         day, books, warnings = self._pick(history, as_of)
         for sub in subs.values():
@@ -229,23 +316,30 @@ class DailyRunner:
             for b in books.values():
                 spreads.update(b.half_spread)
             self.account.set_book_spreads(spreads)
+        fx = self.account_fx(day, books)
         fills = self.account.settle(day, opens, closes)
         snap = self.account.snapshot(closes)
         held = {s: q for s, q in snap.positions.items() if q}
         if snap.open_orders:
             warnings.append(f"{len(snap.open_orders)} order(s) still working at the broker: "
                             + ", ".join(f"{s} {q:+g}" for s, q in snap.open_orders[:8]))
-        capital = float(meta.capital) if meta.capital else float(snap.nav)
+        capital = self.capital_usd(fx, snap.nav)
+        base_cash = float(getattr(snap, "base_cash", 0.0) or 0.0)
         if not capital > 0:
             raise RuntimeError(f"the account's NAV is {snap.nav}: nothing to allocate")
 
         if prev is None:
             row = {"nav_real": snap.nav, "nav_expected": snap.nav, "gap_day": 0.0, "gap_cum": 0.0,
-                   "rounding": 0.0, "untraded": 0.0, "timing": 0.0, "costs": 0.0, "residual": 0.0, "real_change": 0.0,
+                   "rounding": 0.0, "untraded": 0.0, "timing": 0.0, "costs": 0.0, "fx": 0.0, "residual": 0.0,
+                   "real_change": 0.0,
                    "expected_change": 0.0, "costs_paid": sum(f.costs for f in fills), "costs_backtest": 0.0,
                    "fills": len(fills), "notes": "first day"}
         else:
-            row = track_day(prev, books, books_prev, held, snap.nav, fills)
+            row = track_day(prev, books, books_prev, held, snap.nav, fills, fx_rate=fx["rate"])
+        rate = fx["rate"]
+        row.update(account_currency=fx["currency"], currency_origin=fx["origin"], fx_rate=rate,
+                   fx_source=fx["source"], nav_base=snap.nav / rate, gap_day_base=row["gap_day"] / rate,
+                   gap_cum_base=row["gap_cum"] / rate)
 
         plan = plan_day(meta, books, held, capital, day,
                         units=None if prev is None else prev["units"],
@@ -267,7 +361,7 @@ class DailyRunner:
                 raise RuntimeError(f"kill switch: {self.kill.reason}; nothing is sent")
             sent = self.account.place(plan.orders, day)
 
-        report = DayReport(day, plan, row, sent, warnings=warnings)
+        report = DayReport(day, plan, row, sent, warnings=warnings, fx=fx)
         self._write_proposal(report, snap, books, capital)
 
         # the state of the day
@@ -279,6 +373,8 @@ class DailyRunner:
             "sleeves": {slug: {"nav": b.nav, "positions": b.positions, "date": b.date} for slug, b in books.items()},
             "exact": plan.exact, "planned": {} if prev is None else prev.get("exact", {}),
             "target": plan.target, "sent": bool(send),
+            "account_currency": fx["currency"], "fx_rate": fx["rate"], "fx_source": fx["source"],
+            "base_cash": base_cash,
         }
         for later in [d for d in state["days"] if d > day]:
             del state["days"][later]                # a replayed day makes the later ones stale
@@ -320,10 +416,12 @@ class DailyRunner:
               (f"- mode: **{'SENT' if report.sent else 'proposal (nothing sent)'}**, account `{snap.account}` "
                f"({type(self.account).__name__}), currency {snap.currency}"),
               f"- data: last close {day}; sleeves dated " + ", ".join(sorted({b.date for b in books.values()})),
-              f"- account NAV {snap.nav:,.2f}, cash {snap.cash:,.2f}; capital allocated {capital:,.2f}",
+              f"- account NAV {snap.nav:,.2f}, cash {snap.cash:,.2f}; capital allocated {capital:,.2f} (USD)",
               (f"- backtest NAV {r['nav_expected']:,.2f}; gap today {r['gap_day']:+,.2f}, "
                f"cumulative {r['gap_cum']:+,.2f} (rounding {r['rounding']:+,.2f}, untraded {r['untraded']:+,.2f}, "
-               f"timing {r['timing']:+,.2f}, costs {r['costs']:+,.2f}, residual {r['residual']:+,.2f})"),
+               f"timing {r['timing']:+,.2f}, costs {r['costs']:+,.2f}, fx {r.get('fx', 0.0):+,.2f}, "
+               f"residual {r['residual']:+,.2f})"),
+              *self._currency_lines(report, snap, capital),
               (f"- units: {'reset (' + plan.reason + ')' if plan.rebalanced else 'kept'}; "
                f"gross cap scale {plan.cap_scale:.4f}"),
               (f"- target book: gross {plan.gross_target:.2f} x capital (exact {plan.gross_exact:.2f}, cap "
@@ -365,6 +463,19 @@ class DailyRunner:
             fh.write("\n".join(md))
         report.proposal_csv, report.proposal_md = base + ".csv", base + ".md"
 
+    @staticmethod
+    def _currency_lines(report: DayReport, snap, capital: float) -> list[str]:
+        fx, r = report.fx, report.row
+        if not fx:
+            return []
+        cur, rate = fx["currency"], fx["rate"]
+        line = f"- account currency **{cur}** ({fx['origin']}); rate {rate:.6g} USD per {cur} ({fx['source']})"
+        if cur == "USD":
+            return [line]
+        return [line, (f"- in {cur}: NAV {snap.nav / rate:,.2f}, cash {snap.cash / rate:,.2f}, capital "
+                       f"{capital / rate:,.2f}; gap today {r['gap_day'] / rate:+,.2f}, cumulative "
+                       f"{r['gap_cum'] / rate:+,.2f}")]
+
     # -- replay ------------------------------------------------------------------------------------
     def replay(self, dates: list[str], send: bool = True) -> list[DayReport]:
         """Run ``run_day`` on each date in order (a provider that serves past closes, such as
@@ -380,4 +491,4 @@ def last_session(today: _dt.date | None = None) -> str:
     return day.isoformat()
 
 
-__all__ = ["DailyRunner", "DayReport", "StaleData", "last_session"]
+__all__ = ["AccountCurrencyError", "DailyRunner", "DayReport", "StaleData", "last_session"]

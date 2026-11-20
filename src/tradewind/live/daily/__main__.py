@@ -29,7 +29,7 @@ import sys
 from .brokers import IBPaperAccount, SimAccount
 from .meta import REBALANCE, MetaPortfolio
 from .providers import PwbProvider, ReplayProvider
-from .runner import DailyRunner, StaleData
+from .runner import AccountCurrencyError, DailyRunner, StaleData
 
 
 def parser() -> argparse.ArgumentParser:
@@ -49,6 +49,10 @@ def parser() -> argparse.ArgumentParser:
                    help="complete the monthly price datasets up to the last close (key in ALPHAVANTAGE_API_KEY)")
     g = p.add_argument_group("meta-portfolio overrides")
     g.add_argument("--capital", type=float)
+    g.add_argument("--capital-currency", help="the currency of --capital / capital: USD, or the account's (default)")
+    g.add_argument("--account-currency",
+                   help="check: the account's currency must be this one, or nothing is sized (default: read off "
+                        "the account; a simulated account is in USD unless --sim-currency)")
     g.add_argument("--leverage", type=float)
     g.add_argument("--max-gross", type=float)
     g.add_argument("--rebalance", choices=REBALANCE)
@@ -62,14 +66,21 @@ def parser() -> argparse.ArgumentParser:
     i.add_argument("--client-id", type=int, default=31)
     i.add_argument("--account", default="", help="DU... when the login manages several accounts")
     i.add_argument("--base-fx-rate", type=float, default=None,
-                   help="an account whose base currency is not USD: the price of 1 unit of it in USD "
-                        "(EURUSD), used until IB publishes its own rate (once the account holds USD)")
+                   help="an account whose currency is not USD: the price of 1 unit of it in USD (EURUSD), "
+                        "the last resort after IB's own rate and PWB's forex series")
     s = p.add_argument_group("simulated account")
-    s.add_argument("--sim-cash", type=float, default=110_000.0)
+    s.add_argument("--sim-cash", type=float, default=110_000.0, help="in the account's currency")
+    s.add_argument("--sim-currency", default=None,
+                   help="the simulated account's currency (default USD, or --account-currency)")
     s.add_argument("--sim-costs", choices=["harness", "none"], default="harness",
                    help="harness: the half-spread the strategies' backtests charge (default)")
     s.add_argument("--sim-commission", choices=["ibkr_tiered", "none"], default="none")
     return p
+
+
+#: the command-line options that override the meta-portfolio file
+OVERRIDES = ("capital", "capital_currency", "account_currency", "leverage", "max_gross", "rebalance", "lot",
+             "min_order_notional", "python", "papers_dir")
 
 
 def make_provider(args, meta: MetaPortfolio, directory: str) -> PwbProvider:
@@ -85,13 +96,13 @@ def make_account(args, directory: str, send: bool):
         return IBPaperAccount(args.host, args.port, args.client_id, account=args.account, send=send,
                               base_fx=args.base_fx_rate)
     return SimAccount(os.path.join(directory, "sim_account.json"), cash=args.sim_cash,
-                      use_book_spreads=args.sim_costs == "harness", commission=args.sim_commission)
+                      use_book_spreads=args.sim_costs == "harness", commission=args.sim_commission,
+                      currency=args.sim_currency or args.account_currency, base_fx=args.base_fx_rate)
 
 
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
-    overrides = {k: getattr(args, k) for k in ("capital", "leverage", "max_gross", "rebalance", "lot",
-                                                "min_order_notional", "python", "papers_dir")}
+    overrides = {k: getattr(args, k) for k in OVERRIDES}
     meta = MetaPortfolio.load(args.meta, **overrides)
     directory = os.path.expanduser(args.dir)
     os.makedirs(directory, exist_ok=True)
@@ -120,11 +131,19 @@ def main(argv=None) -> int:
     except StaleData as exc:
         print(f"stale data: {exc}", file=sys.stderr)
         return 3
+    except AccountCurrencyError as exc:
+        print(f"account currency: {exc}", file=sys.stderr)
+        return 2
     finally:
         account.close()
     r = report.row
     print(f"{report.date}: {len(report.plan.orders)} order(s) {'SENT' if args.send else 'proposed'}; "
-          f"NAV {r['nav_real']:,.2f}, backtest {r['nav_expected']:,.2f}, gap {r['gap_cum']:+,.2f}")
+          f"NAV {r['nav_real']:,.2f}, backtest {r['nav_expected']:,.2f}, gap {r['gap_cum']:+,.2f} (USD)")
+    fx = report.fx
+    if fx and fx["currency"] != "USD":
+        print(f"account in {fx['currency']} ({fx['origin']}), {fx['rate']:.6g} USD per {fx['currency']} "
+              f"({fx['source']}): NAV {r['nav_base']:,.2f} {fx['currency']}, gap {r['gap_cum_base']:+,.2f} "
+              f"{fx['currency']}")
     for w in report.warnings:
         print("warning:", w)
     print("proposal:", report.proposal_md)

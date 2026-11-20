@@ -76,7 +76,11 @@ class Snapshot:
     fills: list[Fill] = field(default_factory=list)
     open_orders: list[tuple[str, float]] = field(default_factory=list)
     account: str = ""
-    currency: str = "USD"
+    currency: str = "USD"               # the currency of cash and nav (the books': USD)
+    base_currency: str = "USD"          # the account's own currency
+    fx_rate: float = 1.0                # USD per unit of base_currency
+    nav_base: float | None = None       # the NAV in base_currency
+    base_cash: float = 0.0              # cash held in base_currency (its value moves with fx_rate)
 
 
 class SimAccount:
@@ -88,7 +92,8 @@ class SimAccount:
     kind = "sim"
 
     def __init__(self, path: str, cash: float = 110_000.0, *, half_spread=0.0, default_half_spread: float = 0.0,
-                 commission: str = "none", slippage: float = 0.0, use_book_spreads: bool = False):
+                 commission: str = "none", slippage: float = 0.0, use_book_spreads: bool = False,
+                 currency: str | None = None, base_fx: float | None = None):
         self.path = path
         self.half_spread = half_spread
         self.default_half_spread = float(default_half_spread)
@@ -100,9 +105,21 @@ class SimAccount:
         if os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 self.state = json.load(fh)
+            held = self.state.get("currency", "USD")
+            if currency and currency.upper() != held:
+                raise ValueError(f"the simulated account in {path} is in {held}, not {currency.upper()}")
         else:
-            self.state = {"cash": float(cash), "positions": {}, "pending": [], "fills": [], "seq": 0,
+            cur = (currency or "USD").upper()
+            usd = cur == "USD"
+            # an account in another currency starts with its cash in that currency; the trades
+            # settle in USD (a USD balance, negative when borrowed), as at IBKR
+            self.state = {"cash": float(cash) if usd else 0.0, "base_cash": 0.0 if usd else float(cash),
+                          "currency": cur, "positions": {}, "pending": [], "fills": [], "seq": 0,
                           "last_close": {}}
+        self.currency = self.state.get("currency", "USD")
+        self.explicit_currency = bool(currency)
+        self.base_fx = base_fx
+        self.fx_rate: float | None = 1.0 if self.currency == "USD" else None
         self._spreads_from_books: dict[str, float] = {}
 
     # -- costs ------------------------------------------------------------------------------------
@@ -162,18 +179,34 @@ class SimAccount:
         self._save()
         return fills
 
+    # -- the account's currency -----------------------------------------------------------------------
+    def currency_info(self) -> dict:
+        """The account's currency and the rates it knows (USD per unit): a simulated account
+        publishes none; ``fallback`` is the rate given (``--base-fx-rate``)."""
+        return {"currency": self.currency, "published": None, "fallback": self.base_fx}
+
+    def set_fx(self, rate: float) -> None:
+        """The day's rate, USD per unit of the account's currency."""
+        self.fx_rate = float(rate)
+
     def snapshot(self, closes: dict[str, float] | None = None) -> Snapshot:
         st = self.state
         marks = dict(st["last_close"])
         marks.update(closes or {})
-        value = st["cash"]
+        base_cash = float(st.get("base_cash", 0.0))
+        if base_cash and self.fx_rate is None:
+            raise ValueError(f"the simulated account is in {self.currency}: set the day's rate first (set_fx)")
+        rate = self.fx_rate or 1.0
+        cash = st["cash"] + base_cash * rate
+        value = cash
         for sym, q in st["positions"].items():
             if sym not in marks:
                 raise ValueError(f"no price to mark {sym} in the simulated account")
             value += q * marks[sym]
-        return Snapshot(cash=st["cash"], nav=value, positions=dict(st["positions"]),
+        return Snapshot(cash=cash, nav=value, positions=dict(st["positions"]),
                         fills=[Fill(**f) for f in st.get("fills", [])],
-                        open_orders=[(o["symbol"], o["quantity"]) for o in st["pending"]], account="SIM")
+                        open_orders=[(o["symbol"], o["quantity"]) for o in st["pending"]], account="SIM",
+                        base_currency=self.currency, fx_rate=rate, nav_base=value / rate, base_cash=base_cash)
 
     def place(self, orders: list[ProposedOrder], date: str) -> list[dict]:
         out = []
@@ -228,6 +261,29 @@ class IBPaperAccount:
             raise AdapterError(f"connected account {acct!r} is not a single paper account (DU...); "
                                f"pass account='DU...'")
         self.account = acct
+
+    # -- the account's currency -----------------------------------------------------------------------
+    def currency_info(self) -> dict:
+        """The account's base currency as IB reports it (the currency of ``NetLiquidation``),
+        IB's own rate (USD per unit, once the account holds USD) and the rate given
+        (``--base-fx-rate``)."""
+        ad = self.adapter
+        given = getattr(self, "_given_fx", None)
+        if given is None:
+            given = self._given_fx = ad.base_fx
+        ad.base_fx = given
+        ad.account_values()
+        if not ad.base_detected:
+            raise AdapterError("the account values are not available yet (TWS still synchronising?): its "
+                               "currency cannot be read")
+        return {"currency": ad.base_currency, "published": ad.published_fx if ad.base_currency != ad.currency else 1.0,
+                "fallback": given}
+
+    def set_fx(self, rate: float) -> None:
+        """The rate to use when IB publishes none (USD per unit of the base currency)."""
+        if getattr(self, "_given_fx", None) is None:
+            self._given_fx = self.adapter.base_fx
+        self.adapter.base_fx = float(rate)
 
     # -- the books' symbols at IB --------------------------------------------------------------------
     def set_instruments(self, specs: dict[str, dict]) -> None:
@@ -300,9 +356,14 @@ class IBPaperAccount:
                 px = (closes or {}).get(name)
                 rest = -rest / px if px else float("nan")
             working.append((name, rest))
+        ad = self.adapter
+        rate = float(ad.fx_used) if ad.base_currency != ad.currency else 1.0
         return Snapshot(cash=float(snap.cash), nav=float(snap.net_liquidation), positions=positions,
                         fills=list(getattr(self, "_fills", [])), open_orders=working,
-                        account=self.account, currency=snap.currency)
+                        account=self.account, currency=snap.currency, base_currency=ad.base_currency,
+                        fx_rate=rate, nav_base=(ad.nav_base if ad.nav_base is not None
+                                                else float(snap.net_liquidation) / rate),
+                        base_cash=float(ad.base_cash or 0.0) if ad.base_currency != ad.currency else 0.0)
 
     def request(self, client_id: str, order: ProposedOrder) -> OrderRequest:
         """The IB order of a proposed order: a stock market-on-open, a forex pair on IDEALPRO in

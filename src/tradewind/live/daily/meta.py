@@ -8,6 +8,9 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     max_gross: 4.0             # the summed book is scaled down to this gross / NAV
     rebalance: monthly         # when the sleeves' units are reset: daily, weekly, monthly, never
     lot: 1                     # shares are rounded to this lot (0: fractional shares)
+    capital: 110000            # the capital the weights apply to (default: the account's NAV) ...
+    capital_currency: USD      # ... in USD, or by default in the account's currency
+    account_currency: EUR      # optional check: the run stops unless the account is in EUR
     min_order_notional: 200    # smaller orders are not sent (an order closing a line always is)
     papers_dir: ~/dev/pwb/papers
     python: /path/to/venv/bin/python      # the environment that has pwb-toolbox
@@ -60,6 +63,8 @@ class MetaPortfolio:
     lot: float = 1.0
     min_order_notional: float = 0.0
     capital: float | None = None        # the capital the weights apply to; None: the account's NAV
+    capital_currency: str = ""          # the currency of `capital`: "" the account's, or USD
+    account_currency: str = ""          # "": read off the account; set: the run stops if the account differs
     papers_dir: str = "~/dev/pwb/papers"
     python: str = ""
     exclude_symbols: list[str] = field(default_factory=list)
@@ -87,6 +92,12 @@ class MetaPortfolio:
             if self.is_index(sub.symbol):
                 raise ValueError(f"the substitute of {idx} is an index itself: {sub.symbol}")
         self.notes = {str(k): str(v) for k, v in (self.notes or {}).items()}
+        self.account_currency = (self.account_currency or "").upper()
+        self.capital_currency = (self.capital_currency or "").upper()
+        for name in ("account_currency", "capital_currency"):
+            v = getattr(self, name)
+            if v and not (len(v) == 3 and v.isalpha()):
+                raise ValueError(f"{name} is a currency code (EUR, USD, GBP ...), not {v!r}")
 
     @property
     def weights(self) -> dict[str, float]:

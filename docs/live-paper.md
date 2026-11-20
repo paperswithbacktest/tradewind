@@ -68,6 +68,32 @@ sleeves:
 
 `capital:` fixes the amount the weights apply to. Without it, the account's NAV is used.
 
+### The account's currency
+
+The strategies' books are in USD; the account can be in any currency (the IBKR paper account
+used for Phase 1 is in EUR). The run never assumes it:
+
+- **Read off the account.** At IBKR, the currency of `NetLiquidation` / `TotalCashValue`
+  (`$LEDGER` tags accepted): EUR, USD, GBP, CHF ... A simulated account is in USD unless
+  `--sim-currency` (or `--account-currency`) says otherwise; its `--sim-cash` is in that
+  currency.
+- **`account_currency:` / `--account-currency`** is a check: when given and different from
+  the account's, the run stops (`account currency: ...`, exit 2) instead of sizing wrongly.
+- **`capital:`** is in the account's currency, or in USD with `capital_currency: USD`.
+- **The day's rate** (USD per unit of the account's currency), in this order: IB's own
+  (`ExchangeRate`, published once the account holds USD), PWB's forex series `<CUR>USD`
+  (a sleeve's close, or the PWB datasets, completed by `--fresh-prices`), then
+  `--base-fx-rate`. None: the run stops with an explicit error. The books are sized in USD at
+  that rate.
+- **Reported in both currencies**: the proposal and the day's report give the currency, how
+  it was known (`detected`, `forced`, `default`, `simulated account`), the rate and its source,
+  the NAV, cash and gap in the account's currency; `tracking.csv` has `account_currency`,
+  `fx_rate`, `fx_source`, `nav_base`, `gap_day_base`, `gap_cum_base`.
+- **The fx term of the gap.** The cash held in the account's currency (IB's `CashBalance` in
+  that currency) is worth more or fewer USD as the rate moves; the tracking isolates it,
+  `fx = base_cash(t-1) x (rate(t) - rate(t-1))`, instead of leaving it in the residual. A USD
+  account has no fx term: its run is unchanged.
+
 ### Spot forex (IDEALPRO)
 
 A strategy that trades PWB's forex series (`AUDUSD`, `JPYUSD` ...: the USD price of one unit
@@ -132,8 +158,9 @@ substitutes:
 The day's warnings (and the session report) also say:
 
 - `watch: KVUE: last price 2025-…` — a symbol held or targeted whose data stopped before the
-  close (a delisted stock still in a book); `watch: X: close unchanged … over the last 3
-  closes` — prices frozen;
+  close (a delisted stock still in a book); `watch: X: close unchanged … over the last 5
+  closes` — prices frozen (a week: fewer would flag the few days a monthly dataset is carried
+  forward at its end);
 - `watch: ONDS: hard to borrow (IB shortable 2.0)` — with `borrow_check: true` on an IBKR
   account, every short is checked on IB's shortable tick (236, delayed data accepted,
   read-only): 1.5-2.5 needs a locate, 1.5 or less is not available;
@@ -208,11 +235,10 @@ others (`books/latest-DATE-fresh/`).
 2. *Global Configuration > API > Settings*: tick *Enable ActiveX and Socket Clients*; port
    **7497** (Gateway: 4002); *Trusted IPs* 127.0.0.1; untick *Read-Only API* (the propose
    run connects read-only on its own side, and sending needs it unticked).
-3. Check the account's base currency. The weights apply to the NetLiquidation the account
-   reports. If the base is not USD, set `capital:` in USD in the meta-portfolio file. IB
-   reports the account's value in its base currency only; the run converts it with IB's own
-   USD exchange rate, which IB publishes once the account holds USD. Until then (the first
-   run of an EUR account), pass `--base-fx-rate` (EURUSD: the price of 1 EUR in USD).
+3. The account's currency is read off the account ("The account's currency" above): set
+   `capital:` in it (or `capital_currency: USD`), and `account_currency:` if you want the run
+   to check it. Until IB publishes its own USD rate (once the account holds USD), the rate is
+   PWB's `<CUR>USD` series, or `--base-fx-rate` (EURUSD: the price of 1 EUR in USD).
 4. Dry run without TWS: `--broker sim --replay 20` replays the last 20 closes on a simulated
    account (below).
 

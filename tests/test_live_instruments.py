@@ -221,11 +221,14 @@ def test_forex_and_a_substituted_index_on_the_simulated_account(tmp_path):
     assert all(r.row["costs_paid"] >= 0 for r in reports)
 
 
+DAYS = ["2026-10-29", "2026-10-30", "2026-11-02", "2026-11-03", "2026-11-04"]
+
+
 def test_stale_and_frozen_names_notes_and_hard_to_borrow_shorts_are_flagged(tmp_path):
     hist = {"a": {d: _book(d, {"KVUE": 100.0, "ONDS": -1000.0, "X": 10.0},
                            {"KVUE": 19.04, "ONDS": 5.79 + i, "X": 50.0 + i}, stale_bars={"KVUE": "2025-11-03"})
-                  for i, d in enumerate(["2026-11-02", "2026-11-03", "2026-11-04"])},
-            "b": {d: _book(d, {"Y": 10.0}, {"Y": 10.0}) for d in ["2026-11-02", "2026-11-03", "2026-11-04"]}}
+                  for i, d in enumerate(DAYS)},
+            "b": {d: _book(d, {"Y": 10.0, "Z": 5.0}, {"Y": 10.0, "Z": 5.0 if d > DAYS[2] else 4.0}) for d in DAYS}}
 
     class Fixed:
         def books(self, as_of=None, last_n=2):
@@ -241,8 +244,8 @@ def test_stale_and_frozen_names_notes_and_hard_to_borrow_shorts_are_flagged(tmp_
                          log=lambda *a: None)
     w = "\n".join(runner.run_day().warnings)
     assert "watch: KVUE: last price 2025-11-03" in w
-    assert "watch: Y: close unchanged at 10 over the last 3 closes" in w
-    assert "watch: X" not in w
+    assert "watch: Y: close unchanged at 10 over the last 5 closes" in w
+    assert "watch: X" not in w and "watch: Z" not in w          # two flat closes: the end of a dataset
     assert "note: ONDS: hard to borrow on 2026-11-20" in w
     assert "watch: ONDS: hard to borrow (IB shortable 2)" in w
 
@@ -411,3 +414,128 @@ def test_ibkr_shortable_reads_tick_236_on_delayed_data():
     account = _account(stub, send=False)
     assert account.shortable(["ONDS", "AAPL", "ZZZZ"], wait=0.5) == {"ONDS": 2.0, "AAPL": 3.0}
     assert stub.data_type == 3 and sorted(stub.cancelled) == ["AAPL", "ONDS", "ZZZZ"]
+
+
+# -- the account's currency ----------------------------------------------------------------------------
+def _eurusd(symbols, start, end):
+    from test_live_daily import FRAMES
+
+    idx = FRAMES["AAA"].index
+    rate = pd.Series(1.10 * (1 + 0.004 * pd.Series(range(len(idx))).mod(7).sub(3).to_numpy()), index=idx)
+    out = {}
+    for s in symbols:
+        if s in ("EURUSD", "GBPUSD"):
+            r = rate.loc[start:end] * (1.0 if s == "EURUSD" else 1.2)
+            out[s] = {str(d.date()): (float(v), float(v)) for d, v in r.items()}
+    return out
+
+
+def _currency_run(tmp_path, currency=None, *, prices=True, fallback=None, n=8, name="cur", **meta_kw):
+    from test_live_daily import UNTIL, _meta, _provider
+
+    from tradewind.live.daily import ReplayProvider
+
+    inner = _provider()
+    if prices:
+        inner._prices = _eurusd
+    replay = ReplayProvider(inner, UNTIL, n + 1)
+    directory = str(tmp_path / name)
+    account = SimAccount(os.path.join(directory, "sim.json"), cash=100_000.0, currency=currency, base_fx=fallback)
+    runner = DailyRunner(_meta(**meta_kw), replay, account, directory, log=lambda *a: None)
+    reports = runner.replay(replay.dates()[-n:])
+    return runner, reports, pd.read_csv(os.path.join(directory, "tracking.csv"))
+
+
+def test_a_usd_account_is_unchanged_by_default(tmp_path):
+    _runner, reports, journal = _currency_run(tmp_path, prices=False)
+    assert reports[0].fx == {"currency": "USD", "origin": "default", "rate": 1.0, "source": "USD account"}
+    assert (journal["fx"] == 0).all() and (journal["account_currency"] == "USD").all()
+    nav = journal["nav_real"].to_numpy()
+    assert abs(journal["gap_cum"]).max() < 1e-6 * nav.max()                 # as before: no gap at all
+    assert (journal["nav_base"] == journal["nav_real"]).all()
+    with open(reports[-1].proposal_md, encoding="utf-8") as fh:
+        assert "account currency **USD** (default)" in fh.read()
+
+
+def test_a_eur_account_is_sized_in_usd_and_its_fx_effect_is_isolated(tmp_path):
+    _runner, reports, journal = _currency_run(tmp_path, "EUR", capital=100_000.0, name="eur")
+    fx = reports[0].fx
+    assert fx["currency"] == "EUR" and fx["origin"] == "simulated account" and fx["source"].startswith("PWB EURUSD")
+    first = reports[0]
+    assert first.plan.capital == pytest.approx(100_000.0 * fx["rate"])       # 100,000 EUR in USD
+    assert journal["nav_base"].iloc[0] == pytest.approx(100_000.0)
+    # the EUR cash moves with EURUSD: the whole gap is the fx term, nothing in the residual
+    nav = journal["nav_real"].to_numpy()
+    assert abs(journal["fx"]).max() > 100
+    assert journal["gap_cum"].iloc[-1] == pytest.approx(journal["fx"].sum(), abs=1e-6 * nav.max())
+    assert abs(journal["residual"]).max() < 1e-6 * nav.max()
+    assert journal["gap_cum_base"].iloc[-1] == pytest.approx(journal["gap_cum"].iloc[-1] / journal["fx_rate"].iloc[-1])
+    with open(reports[-1].proposal_md, encoding="utf-8") as fh:
+        text = fh.read()
+    assert "account currency **EUR** (simulated account)" in text and "- in EUR: NAV" in text
+
+
+def test_a_gbp_account_falls_back_on_the_rate_given(tmp_path):
+    _runner, reports, journal = _currency_run(tmp_path, "GBP", prices=False, fallback=1.27, name="gbp", n=3)
+    assert reports[0].fx["source"] == "--base-fx-rate" and reports[0].fx["rate"] == 1.27
+    assert journal["nav_base"].iloc[0] == pytest.approx(100_000.0)
+    _runner, reports, _j = _currency_run(tmp_path, "GBP", fallback=1.27, name="gbp2", n=3)
+    assert reports[0].fx["source"].startswith("PWB GBPUSD")                   # PWB before the rate given
+
+
+def test_no_rate_or_a_different_currency_stops_the_run(tmp_path):
+    from tradewind.live.daily.runner import AccountCurrencyError
+
+    with pytest.raises(AccountCurrencyError, match="--base-fx-rate"):
+        _currency_run(tmp_path, "EUR", prices=False, name="norate", n=2)
+    with pytest.raises(AccountCurrencyError, match="account is in GBP"):
+        _currency_run(tmp_path, "GBP", fallback=1.27, account_currency="EUR", name="mismatch", n=2)
+    _r, reports, _j = _currency_run(tmp_path, "EUR", account_currency="eur", name="forced", n=2)
+    assert reports[0].fx["origin"] == "forced"
+    with pytest.raises(ValueError, match="is in EUR, not GBP"):
+        SimAccount(str(tmp_path / "forced" / "sim.json"), currency="GBP")
+    with pytest.raises(AccountCurrencyError, match="capital_currency CHF"):
+        _currency_run(tmp_path, "EUR", capital=1000.0, capital_currency="CHF", name="chf", n=2)
+
+
+def _ib_values(stub, rows):
+    v = types.SimpleNamespace
+    stub.accountValues = lambda account="": [v(tag=t, value=str(x), currency=c) for t, x, c in rows]
+
+
+def test_ibkr_account_currency_is_read_off_the_account(tmp_path):
+    from tradewind.live.daily.runner import AccountCurrencyError
+
+    hist = {"a": {"2026-11-04": _book("2026-11-04", {"X": 10.0}, {"X": 50.0, "EURUSD": 1.15})}}
+
+    class Fixed:
+        def books(self, as_of=None, last_n=2):
+            return hist
+
+    def runner(stub, name, **kw):
+        account = _account(stub, send=False)
+        return DailyRunner(MetaPortfolio([Sleeve("a", 1.0)], **kw), Fixed(), account, str(tmp_path / name),
+                           today="2026-11-04", log=lambda *a: None)
+
+    # EUR, IB publishes no USD rate yet: PWB's EURUSD
+    stub = _StubIB()
+    _ib_values(stub, [("NetLiquidation", 1_000_000, "EUR"), ("TotalCashValue", 1_000_000, "EUR"),
+                      ("CashBalance", 1_000_000, "EUR")])
+    report = runner(stub, "eur", capital=110_000).run_day()
+    assert report.fx == {"currency": "EUR", "origin": "detected", "rate": 1.15, "source": "PWB EURUSD 2026-11-04"}
+    assert report.plan.capital == pytest.approx(110_000 * 1.15) and report.row["nav_base"] == pytest.approx(1e6)
+    # GBP with IB's own rate (GBP per USD): IB first
+    stub = _StubIB()
+    _ib_values(stub, [("NetLiquidation", 500_000, "GBP"), ("TotalCashValue", 500_000, "GBP"),
+                      ("ExchangeRate", 0.8, "USD")])
+    report = runner(stub, "gbp", capital=100_000, capital_currency="USD").run_day()
+    assert report.fx["currency"] == "GBP" and report.fx["source"] == "IB" and report.fx["rate"] == pytest.approx(1.25)
+    assert report.plan.capital == 100_000 and report.row["nav_real"] == pytest.approx(625_000)
+    # forced USD, the account is in EUR: stop
+    stub = _StubIB()
+    _ib_values(stub, [("NetLiquidation", 1_000_000, "EUR"), ("TotalCashValue", 1_000_000, "EUR")])
+    with pytest.raises(AccountCurrencyError, match="says the account is in USD"):
+        runner(stub, "forced", account_currency="USD").run_day()
+    # a USD account: as before
+    report = runner(_StubIB(), "usd").run_day()
+    assert report.fx == {"currency": "USD", "origin": "detected", "rate": 1.0, "source": "USD account"}

@@ -156,6 +156,11 @@ class IBAdapter:
         self.base_currency = currency
         self.fx_missing = False
         self.fx_used = 1.0
+        self.fx_source = ""                    # "" (no conversion), "ib" or "given"
+        self.base_detected = False             # the base currency was read off the account
+        self.published_fx: float | None = None  # IB's rate: units of `currency` per unit of the base
+        self.base_cash: float | None = None    # the cash held in the base currency (CashBalance)
+        self.nav_base: float | None = None     # NetLiquidation in the base currency
         self.account = account
         self.require_paper = require_paper
         self.readonly = readonly
@@ -389,14 +394,19 @@ class IBAdapter:
                 continue
         bases = sorted({cur for (tag, cur) in values if tag == "NetLiquidation" and cur != "BASE"})
         self.base_currency = self.currency if self.currency in bases or not bases else bases[0]
+        self.base_detected = bool(bases)
         self.fx_missing = False
+        self.nav_base = values.get(("NetLiquidation", self.base_currency))
+        self.base_cash = values.get(("CashBalance", self.base_currency))
         if self.base_currency == self.currency:
+            self.published_fx, self.fx_used, self.fx_source = 1.0, 1.0, ""
             return values.get(("TotalCashValue", self.currency)), values.get(("NetLiquidation", self.currency))
         rate = values.get(("ExchangeRate", self.currency))         # base units per unit of self.currency
-        if rate and rate > 0:
-            per_base = 1.0 / rate
+        self.published_fx = 1.0 / rate if rate and rate > 0 else None
+        if self.published_fx is not None:
+            per_base, self.fx_source = self.published_fx, "ib"
         elif self.base_fx:
-            per_base = float(self.base_fx)
+            per_base, self.fx_source = float(self.base_fx), "given"
         else:
             self.fx_missing = True
             return None, None
