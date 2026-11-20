@@ -186,7 +186,8 @@ class IBPaperAccount:
     kind = "ibkr"
 
     def __init__(self, host: str = "127.0.0.1", port: int = 7497, client_id: int = 31, *, account: str = "",
-                 send: bool = False, ack_wait: float = 15.0, adapter: IBAdapter | None = None):
+                 send: bool = False, ack_wait: float = 15.0, base_fx: float | None = None,
+                 adapter: IBAdapter | None = None):
         if int(port) not in PAPER_PORTS:
             raise AdapterError(f"port {port} is not a paper port {sorted(PAPER_PORTS)}: this runner trades "
                                f"paper accounts only")
@@ -195,7 +196,7 @@ class IBPaperAccount:
         self.send = send
         self.ack_wait = float(ack_wait)
         self.adapter = adapter or IBAdapter(host, int(port), int(client_id), account=account,
-                                            require_paper=True, readonly=not send)
+                                            require_paper=True, readonly=not send, base_fx=base_fx)
         if not self.adapter.require_paper:
             raise AdapterError("IBPaperAccount needs an adapter with require_paper on")
         self.adapter.connect()                  # refuses a live port or a non-paper account
@@ -218,6 +219,11 @@ class IBPaperAccount:
 
     def snapshot(self, closes: dict[str, float] | None = None) -> Snapshot:
         snap = self.adapter.snapshot(full_sync=True)
+        if getattr(self.adapter, "fx_missing", False):
+            base, cur = self.adapter.base_currency, self.adapter.currency
+            raise AdapterError(f"the account's base currency is {base}: IB publishes no {cur} exchange rate "
+                               f"until the account holds {cur}, so its value cannot be read in {cur}; pass "
+                               f"the rate (--base-fx-rate, the price of 1 {base} in {cur})")
         if snap.net_liquidation is None or snap.cash is None:
             raise AdapterError("the account values are not available yet (TWS still synchronising?)")
         positions = {s: q for s, (q, _avg) in snap.position_map().items() if q}

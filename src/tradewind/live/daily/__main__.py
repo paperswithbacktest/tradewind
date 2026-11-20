@@ -61,6 +61,9 @@ def parser() -> argparse.ArgumentParser:
     i.add_argument("--port", type=int, default=7497, help="7497 TWS paper (default), 4002 IB Gateway paper")
     i.add_argument("--client-id", type=int, default=31)
     i.add_argument("--account", default="", help="DU... when the login manages several accounts")
+    i.add_argument("--base-fx-rate", type=float, default=None,
+                   help="an account whose base currency is not USD: the price of 1 unit of it in USD "
+                        "(EURUSD), used until IB publishes its own rate (once the account holds USD)")
     s = p.add_argument_group("simulated account")
     s.add_argument("--sim-cash", type=float, default=110_000.0)
     s.add_argument("--sim-costs", choices=["harness", "none"], default="harness",
@@ -79,7 +82,8 @@ def make_account(args, directory: str, send: bool):
     """The account the command line asks for (an IBKR paper account opens read-only unless
     ``send``)."""
     if args.broker == "ibkr":
-        return IBPaperAccount(args.host, args.port, args.client_id, account=args.account, send=send)
+        return IBPaperAccount(args.host, args.port, args.client_id, account=args.account, send=send,
+                              base_fx=args.base_fx_rate)
     return SimAccount(os.path.join(directory, "sim_account.json"), cash=args.sim_cash,
                       use_book_spreads=args.sim_costs == "harness", commission=args.sim_commission)
 
