@@ -5,15 +5,25 @@ runs. It is never imported by the engine, never a dependency, never redistribute
 
 ## Reference set
 
-* **Source**: the pwb-toolbox 0.1.41 campaign (`campaign_results_0138.jsonl`, NAV paths in
-  `nav_0138/<slug>.json`), 4 202 strategies run on the Hub data pinned by commit hash.
-* **Versioned**: `oracle/v1/` = backtrader 1.9.78 semantics (kept behaviours). Each
-  "corrected" default of `02-semantics.md` that ships regenerates `oracle/v<n+1>/` with a
-  per-strategy delta file.
-* **Stored**: slug, data snapshot hashes, strategy file hash, parameters, daily NAV, final
-  value, order log (date, symbol, size, price, status) for the subset below. On the
-  Tradewind side the first four are `engine.fingerprint` (spec/05 § 12): its digest says
-  whether two runs read the same inputs.
+* **Current**: `v1`, the 2026-11 grand recalcul (pwb-toolbox 0.1.51/0.1.52 on the reference
+  engine, 4 199 strategies, 33.8 M daily NAV values). Provenance: `oracle/v1.md`.
+* **Stored**: on the Hub, private dataset `paperswithbacktest/Tradewind-Oracle`, one folder per
+  version (373 MB for v1: too big for git). The repository pins it by revision and sha256 in
+  `oracle/<version>.lock.json`; `tools/oracle/run.py` downloads, checks and caches it.
+* **Content**: `nav.parquet` (slug, date, value; one row group per strategy) and
+  `manifest.parquet`: per strategy, its role (reference or excluded, and why), the engine
+  distribution, pwb-toolbox version, papers tree and `strategy.py` blob, hash seed, Python,
+  host, UTC start and end, data epoch, the datasets republished during the run, and the
+  earlier Tradewind verdict. `hub_commits.json` gives the revision of every dataset at any
+  epoch. On the Tradewind side `engine.fingerprint` (spec/05 § 12) says whether two runs read
+  the same inputs.
+* **Data revisions**: a replay pins every dataset to its revision at the reference's epoch
+  (`tools/oracle/pinned_hub.py`), price and cost tables alike, online; no frozen cache.
+* **Versioned**: `v1` = the oracle's semantics (kept behaviours). Each "corrected" default of
+  `02-semantics.md` that ships, a new pwb-toolbox or a squashed dataset history makes
+  `v<n+1>`, with a per-strategy delta against the previous version.
+* **Before v1**: the pwb-toolbox 0.1.41 campaign (`nav_0138/`), used by the lots of 50 of
+  chantier 2.
 
 ## Tolerances
 
@@ -25,9 +35,22 @@ runs. It is never imported by the engine, never a dependency, never redistribute
 
 ## Subsets
 
-* **CI (every push)**: 40 strategies, chosen to cover every Tier 1 and Tier 2 idiom at least
-  twice, each running under 10 s on the public sample data shipped with the repo.
-* **Nightly**: the 4 202, on the data host, from the Hub snapshot.
+* **CI (every pull request and push to main)**: `tools/oracle/subsets/ci.txt`, 40 strategies
+  chosen by `tools/oracle/select_subset.py`: references Tradewind already reproduced on the
+  same measurement, at most 12 s each, one papers tree, no dataset republished during the run,
+  no unseeded randomness, no options or intraday data, and every idiom found among such
+  strategies at least twice (target orders of the three kinds, buy/sell, close, `close[-k]`,
+  `notify_order`, indicators and indicator subclasses, limit/stop, `add_cash`, the price
+  families, fundamentals, economic data, point-in-time universes). One process, about two
+  minutes of strategy time (`.github/workflows/oracle-corpus.yml`, which skips while its two
+  secrets are missing). Validated on the Mac on 2026-11-19: 40/40 identical (worst relative
+  difference 3.8e-16).
+* **Nightly**: the whole set, on the data host, a seventh a night by `crc32(slug) % 7`
+  (`tools/oracle/nightly.sh`), each reference in the environment of the pwb-toolbox that made
+  it: about 240 hours of reference compute, so a full pass a week at four jobs.
+* **Verdicts**: identical; divergent or error, *expected* only when the reference set
+  recorded that same verdict for Tradewind on that same measurement; leaked (a backtrader
+  module loaded in a Tradewind run). Any unexpected verdict fails the run.
 * **Speed benchmark**: 5 symbols × 20 years and 4 000 symbols × 20 years, µs per
   security-bar, Tradewind against backtrader **on the same machine**, the same seeded bars
   and the same strategy classes (`tools/bench_reference.sh small|wide`, backtrader in the

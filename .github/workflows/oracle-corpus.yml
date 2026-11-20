@@ -1,0 +1,89 @@
+name: oracle-corpus
+# The corpus oracle (spec/03-oracle.md, tools/oracle/): real catalogue strategies replayed on
+# Tradewind and compared bar by bar with the versioned reference NAVs (oracle/v1.lock.json).
+#
+# Pull requests and main run the CI subset (tools/oracle/subsets/ci.txt: 40 strategies, about
+# two minutes of strategy time, one process). The whole set (4 199 strategies, ~240 h of
+# reference compute) runs on the data host, a seventh a night (tools/oracle/nightly.sh); this
+# workflow can also run any subset or shard by hand.
+#
+# Needs two repository secrets, and skips with a notice while they are missing:
+#   ORACLE_HF_TOKEN     a Hub read token of the organisation (the private reference set and the
+#                       datasets the strategies read)
+#   ORACLE_PAPERS_TOKEN a read token on paperswithbacktest/papers (the strategies' code)
+# The job's environment holds the reference engine (pwb-toolbox depends on it): it is an oracle
+# environment; the Tradewind run checks that no backtrader module is loaded.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      subset:
+        description: "ci, all, or a path of slugs"
+        default: ci
+      shard:
+        description: "K/N (optional): the strategies with crc32(slug) % N == K"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      HAVE_SECRETS: ${{ secrets.ORACLE_HF_TOKEN != '' && secrets.ORACLE_PAPERS_TOKEN != '' }}
+    steps:
+      - name: secrets present?
+        if: env.HAVE_SECRETS != 'true'
+        run: echo "::notice::ORACLE_HF_TOKEN / ORACLE_PAPERS_TOKEN not set; corpus oracle skipped"
+      - uses: actions/checkout@v4
+        if: env.HAVE_SECRETS == 'true'
+      - uses: actions/setup-python@v5
+        if: env.HAVE_SECRETS == 'true'
+        with:
+          python-version: "3.13"   # the reference set's Python (3.13.12)
+      - name: oracle environment (pwb-toolbox 0.1.51, as the reference)
+        if: env.HAVE_SECRETS == 'true'
+        run: |
+          python -m pip install -q -r tools/oracle/env/requirements-0151.txt
+          python -m pip install -q --no-deps -e .
+      - name: papers trees (partial clone, blobs fetched on demand by git archive)
+        if: env.HAVE_SECRETS == 'true'
+        env:
+          TOKEN: ${{ secrets.ORACLE_PAPERS_TOKEN }}
+        run: |
+          git init -q papers
+          git -C papers remote add origin "https://x-access-token:${TOKEN}@github.com/paperswithbacktest/papers"
+          for tree in $(python -c "import json; print(' '.join(json.load(open('oracle/v1.lock.json'))['papers_trees']))"); do
+            git -C papers fetch -q --depth 1 --filter=blob:none origin "$tree"
+          done
+      - uses: actions/cache@v4
+        if: env.HAVE_SECRETS == 'true'
+        with:
+          path: ~/.cache/tradewind-oracle/reference
+          key: oracle-reference-${{ hashFiles('oracle/v1.lock.json') }}
+      - uses: actions/cache@v4
+        if: env.HAVE_SECRETS == 'true'
+        with:
+          path: ~/.cache/huggingface/hub
+          key: oracle-hub-${{ hashFiles('tools/oracle/subsets/ci.txt', 'oracle/v1.lock.json') }}
+      - name: replay
+        if: env.HAVE_SECRETS == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.ORACLE_HF_TOKEN }}
+          HF_ACCESS_TOKEN: ${{ secrets.ORACLE_HF_TOKEN }}
+          SUBSET: ${{ github.event.inputs.subset || 'ci' }}
+          SHARD: ${{ github.event.inputs.shard || '' }}
+        run: |
+          python tools/oracle/run.py --subset "$SUBSET" ${SHARD:+--shard "$SHARD"} --papers papers \
+            --python "$(which python)" --tradewind-src src --min-free-gb 3 --out-dir oracle-out
+      - uses: actions/upload-artifact@v4
+        if: always() && env.HAVE_SECRETS == 'true'
+        with:
+          name: oracle-corpus
+          path: |
+            oracle-out/results.jsonl
+            oracle-out/summary.json
