@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from ..guards import KillSwitch
 from .aggregate import Plan, combine, gross, merged_prices, plan_day
 from .books import SleeveBook
+from .borrow import alert_lines, borrow_report
+from .borrow import markdown as borrow_markdown
 from .brokers import estimated_commission
 from .instruments import FX_CAUTION, fx_pair, is_fx, substitute_books
 from .meta import MetaPortfolio
@@ -58,14 +60,17 @@ class DayReport:
     chart: str | None = None
     warnings: list = field(default_factory=list)
     fx: dict = field(default_factory=dict)      # the account's currency, its origin, the rate and its source
+    borrow: dict = field(default_factory=dict)  # the shorts' fee, availability and cost of carry (borrow.py)
 
 
 class DailyRunner:
     """``meta``: the meta-portfolio; ``provider``: where the books come from; ``account``: a
-    ``SimAccount`` or an ``IBPaperAccount``; ``directory``: state, proposals and journal."""
+    ``SimAccount`` or an ``IBPaperAccount``; ``directory``: state, proposals and journal;
+    ``borrow``: where the shorts' borrow fee and availability come from (``borrow.py``; None:
+    no borrow section)."""
 
     def __init__(self, meta: MetaPortfolio, provider, account, directory: str, *, allow_stale: bool = False,
-                 max_age_days: int = 4, today=None, log=print):
+                 max_age_days: int = 4, today=None, log=print, borrow=None):
         self.meta = meta
         self.provider = provider
         self.account = account
@@ -78,6 +83,7 @@ class DailyRunner:
         self.max_age_days = int(max_age_days)        # calendar days between the data and the last session
         self._today = today
         self.log = log
+        self.borrow = borrow
 
     # -- state -----------------------------------------------------------------------------------
     def _load(self) -> dict:
@@ -213,6 +219,28 @@ class DailyRunner:
                 if missing:
                     out.append("borrow check: no shortable tick for " + ", ".join(missing[:10]))
         return out
+
+    def _borrow(self, plan, held: dict[str, float], closes: dict[str, float], day: str) -> dict:
+        """The shorts' borrow fee, availability and cost of carry ({} without a source)."""
+        if self.borrow is None:
+            return {}
+        meta = self.meta
+        futures = {sub.symbol for sub in meta.substitutes.values() if sub.kind == "future"}
+
+        def skip(s):
+            return is_fx(s) or meta.is_index(s) or s in futures
+
+        shorts = sorted(s for s in set(plan.target) | set(held)
+                        if (plan.target.get(s, 0.0) < 0 or held.get(s, 0.0) < 0) and not skip(s))
+        snap, error = None, ""
+        if shorts:
+            try:
+                snap = self.borrow.quotes(shorts, day, self.account)
+            except Exception as exc:  # noqa: BLE001 - a report, never a reason to stop
+                error = f"borrow data not read: {type(exc).__name__}: {exc}"
+                self.log(f"[borrow] {error}")
+        return borrow_report(plan.target, held, closes, snap, fee_alert=meta.borrow_fee_alert, skip=skip,
+                             error=error)
 
     # -- the account's currency ------------------------------------------------------------------
     def _pwb_rate(self, cur: str, day: str, books: dict[str, SleeveBook]) -> tuple[float, str] | None:
@@ -351,6 +379,10 @@ class DailyRunner:
             warnings.append("not traded: " + "; ".join(
                 f"{s} {plan.excluded.get(s, held.get(s, 0.0)):+.2f} ({why})" for s, why in sorted(plan.refused.items())))
         warnings += self._watch(plan, books, history, held, day)
+        borrow = self._borrow(plan, held, closes, day)
+        for x in alert_lines(borrow):
+            warnings.append(f"borrow: {x['symbol']}: {x['status'].replace('_', ' ')} ({x['why']}), "
+                            f"short {x['short_quantity']:,.0f}")
         for b in books.values():
             for c in b.conditional:
                 warnings.append(f"conditional order not counted in the target: {c}")
@@ -361,7 +393,7 @@ class DailyRunner:
                 raise RuntimeError(f"kill switch: {self.kill.reason}; nothing is sent")
             sent = self.account.place(plan.orders, day)
 
-        report = DayReport(day, plan, row, sent, warnings=warnings, fx=fx)
+        report = DayReport(day, plan, row, sent, warnings=warnings, fx=fx, borrow=borrow)
         self._write_proposal(report, snap, books, capital)
 
         # the state of the day
@@ -431,6 +463,7 @@ class DailyRunner:
               ""]
         if report.warnings:
             md += ["## Warnings", ""] + [f"- {w}" for w in report.warnings] + [""]
+        md += borrow_markdown(report.borrow)
         md += ["## Sleeves", "", "| sleeve | weight | units | strategy NAV | close | gross of the sleeve |",
                "|---|---:|---:|---:|---|---:|"]
         prices = merged_prices(books)

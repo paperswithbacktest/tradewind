@@ -52,3 +52,5 @@ interface may change.
 ::: tradewind.live.daily.tracking
 
 ::: tradewind.live.daily.meta
+
+::: tradewind.live.daily.borrow

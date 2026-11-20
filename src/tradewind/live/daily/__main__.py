@@ -26,6 +26,8 @@ import argparse
 import os
 import sys
 
+from .borrow import SOURCES as BORROW_SOURCES
+from .borrow import borrow_source
 from .brokers import IBPaperAccount, SimAccount
 from .meta import REBALANCE, MetaPortfolio
 from .providers import PwbProvider, ReplayProvider
@@ -56,6 +58,9 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--leverage", type=float)
     g.add_argument("--max-gross", type=float)
     g.add_argument("--rebalance", choices=REBALANCE)
+    g.add_argument("--borrow-source", choices=BORROW_SOURCES,
+                   help="the shorts' borrow fee and availability: auto (the PWB copy of IB's short-stock file, "
+                        "then IB's shortable tick), hub, ib, none (default: auto at IBKR, none on the simulation)")
     g.add_argument("--lot", type=float)
     g.add_argument("--min-order", type=float, dest="min_order_notional")
     g.add_argument("--python", help="the Python that has pwb-toolbox")
@@ -80,13 +85,19 @@ def parser() -> argparse.ArgumentParser:
 
 #: the command-line options that override the meta-portfolio file
 OVERRIDES = ("capital", "capital_currency", "account_currency", "leverage", "max_gross", "rebalance", "lot",
-             "min_order_notional", "python", "papers_dir")
+             "min_order_notional", "python", "papers_dir", "borrow_source")
 
 
 def make_provider(args, meta: MetaPortfolio, directory: str) -> PwbProvider:
     """The catalogue strategies' provider the command line asks for."""
     fresh = None if args.fresh_prices is None else ("" if args.fresh_prices == "none" else args.fresh_prices)
     return PwbProvider(meta, os.path.join(directory, "books"), fresh_prices=fresh)
+
+
+def make_borrow(meta: MetaPortfolio, broker: str):
+    """The shorts' borrow source: the meta-portfolio's ``borrow_source`` (or ``--borrow-source``);
+    unset, ``auto`` on an IBKR account and none on the simulated one."""
+    return borrow_source(meta.borrow_source or ("auto" if broker == "ibkr" else "none"))
 
 
 def make_account(args, directory: str, send: bool):
@@ -118,7 +129,8 @@ def main(argv=None) -> int:
     try:
         if args.replay:
             replay = ReplayProvider(provider, args.as_of, args.replay + 1)
-            runner = DailyRunner(meta, replay, account, directory, allow_stale=args.allow_stale)
+            runner = DailyRunner(meta, replay, account, directory, allow_stale=args.allow_stale,
+                                 borrow=make_borrow(meta, args.broker))
             dates = replay.dates()[-args.replay:]
             reports = runner.replay(dates, send=True)
             last = reports[-1].row if reports else {}
@@ -126,7 +138,8 @@ def main(argv=None) -> int:
                   f"NAV {last.get('nav_real', float('nan')):,.2f} against backtest "
                   f"{last.get('nav_expected', float('nan')):,.2f}; journal {runner.journal.csv}")
             return 0
-        runner = DailyRunner(meta, provider, account, directory, allow_stale=args.allow_stale)
+        runner = DailyRunner(meta, provider, account, directory, allow_stale=args.allow_stale,
+                             borrow=make_borrow(meta, args.broker))
         report = runner.run_day(args.as_of, send=args.send)
     except StaleData as exc:
         print(f"stale data: {exc}", file=sys.stderr)

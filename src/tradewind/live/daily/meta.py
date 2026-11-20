@@ -22,6 +22,8 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     notes:                     # said in the day's warnings while the symbol is held or targeted
       ONDS: hard to borrow (IB shortable 2.0 on 2026-11-20)
     borrow_check: false        # IBKR account: check the shortable tick of every short (read-only)
+    borrow_source: auto        # the shorts' fee and availability: auto (hub, then IB), hub, ib, none
+    borrow_fee_alert: 1.0      # % a year: a fee at or above it flags the short as hard to borrow
     fresh_prices: alphavantage # complete the monthly price datasets up to the last close
     sleeves:
       - {slug: protective_asset_allocation_paa_..., weight: 0.075}
@@ -73,6 +75,8 @@ class MetaPortfolio:
     indices: list[str] = field(default_factory=list)   # more symbols that are indices (not tradable)
     notes: dict = field(default_factory=dict)          # {symbol: text} said while held or targeted
     borrow_check: bool = False          # IBKR: read the shortable tick of the shorts (warnings only)
+    borrow_source: str = ""             # the shorts' fee and availability: auto, hub, ib, none ("": auto at IBKR)
+    borrow_fee_alert: float = 1.0       # % a year: a short whose fee is at or above it is hard to borrow
     fx_odd_lot: float = 25_000.0        # an IDEALPRO order below this USD notional is an odd lot
 
     def __post_init__(self):
@@ -92,6 +96,9 @@ class MetaPortfolio:
             if self.is_index(sub.symbol):
                 raise ValueError(f"the substitute of {idx} is an index itself: {sub.symbol}")
         self.notes = {str(k): str(v) for k, v in (self.notes or {}).items()}
+        self.borrow_source = (self.borrow_source or "").lower()
+        if self.borrow_source not in ("", "auto", "hub", "ib", "none"):
+            raise ValueError(f"borrow_source is auto, hub, ib or none, not {self.borrow_source!r}")
         self.account_currency = (self.account_currency or "").upper()
         self.capital_currency = (self.capital_currency or "").upper()
         for name in ("account_currency", "capital_currency"):
