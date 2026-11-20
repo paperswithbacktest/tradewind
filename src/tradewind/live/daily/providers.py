@@ -9,7 +9,10 @@ after each and a strategy that exits hard does not take the run down; the enviro
 has pwb-toolbox is ``python`` (``pwb_worker.py`` is what it executes). Books are cached per
 day in ``cache_dir``: a second run of the same day (propose, then send) reuses them. With
 ``fresh_prices="alphavantage"`` each strategy's price loads are completed up to the last
-close first (``fresh.py``); a symbol still stale stops the run (``StaleData``).
+close first (``fresh.py``). A symbol still stale is listed per sleeve (``stale``,
+``stale_info``) and the books are kept; the runner decides what to do with it
+(``stale_symbol_policy``). With ``stale_symbol_policy: block`` it stops the run
+(``StaleData``), as before.
 
 ``ReplayProvider`` runs each strategy once up to ``until`` and serves every earlier day from
 that run: a strategy is causal, so its book at a past close is the same whether the run
@@ -115,6 +118,7 @@ class PwbProvider:
         self.seconds: dict[str, float] = {}
         self.errors: dict[str, str] = {}            # the sleeves of the last books() that failed
         self.stale: dict[str, dict[str, str]] = {}  # their live symbols still behind, when stale
+        self.stale_info: dict[str, dict[str, dict]] = {}    # {slug: {symbol: {dataset, last, cause, reason}}}
 
     def _env(self) -> dict:
         env = dict(os.environ)
@@ -130,7 +134,7 @@ class PwbProvider:
         if until:
             cmd += ["--until", until]
         if self.fresh_prices:
-            cmd += ["--fresh-prices", self.fresh_cache]
+            cmd += ["--fresh-prices", self.fresh_cache, "--fresh-config", json.dumps(self.meta.fresh_config())]
         t0 = time.perf_counter()
         proc = subprocess.run(cmd, env=self._env(), capture_output=True, text=True, timeout=self.timeout,
                               check=False)
@@ -152,6 +156,14 @@ class PwbProvider:
             raise RuntimeError(f"{slug}: {payload['error']}")
         return payload
 
+    def _note_stale(self, slug: str, payload: dict) -> None:
+        """A sleeve's books that came with stale symbols (not strict): listed, kept."""
+        if payload.get("stale"):
+            self.stale[slug] = dict(payload["stale"])
+            self.stale_info[slug] = {k: dict(v) for k, v in (payload.get("stale_info") or {}).items()}
+            self.log(f"[prices] {slug}: {len(self.stale[slug])} symbol(s) still stale, left to the "
+                     f"stale-symbol policy ({self.meta.stale_symbol_policy}): " + ", ".join(sorted(self.stale[slug])))
+
     def _note_fresh(self, slug: str, fresh: dict) -> None:
         msg = (f"[prices] {slug}: {fresh['filled']} symbol(s) completed to {fresh['last']} "
                f"({fresh['requests']} AlphaVantage request(s)), largest gap of the chain factor "
@@ -172,7 +184,8 @@ class PwbProvider:
             cmd = [self.python, "-m", "tradewind.live.daily.pwb_prices", out, ",".join(symbols),
                    "--start", start, "--end", end]
             if self.fresh_prices:
-                cmd += ["--fresh-prices", self.fresh_cache, "--session", end]
+                cmd += ["--fresh-prices", self.fresh_cache, "--session", end,
+                        "--fresh-config", json.dumps(self.meta.fresh_config())]
             proc = subprocess.run(cmd, env=self._env(), capture_output=True, text=True, timeout=1800, check=False)
             if not os.path.exists(out):
                 raise RuntimeError(f"prices of {symbols}: nothing written (exit {proc.returncode}): "
@@ -194,7 +207,7 @@ class PwbProvider:
         folder = os.path.join(self.cache_dir, tag)
         os.makedirs(folder, exist_ok=True)
         out: dict[str, dict[str, SleeveBook]] = {}
-        self.errors, self.stale = {}, {}
+        self.errors, self.stale, self.stale_info = {}, {}, {}
         failures: list[BaseException] = []
         for sleeve in self.meta.sleeves:
             try:
@@ -235,6 +248,7 @@ class PwbProvider:
                 os.remove(target)                   # not cached: the next run tries again
         if self.fresh_prices and payload.get("fresh"):
             self._note_fresh(sleeve.slug, payload["fresh"])
+        self._note_stale(sleeve.slug, payload)
         history = {b["date"]: SleeveBook.from_dict(b) for b in payload["books"]}
         last = max(history) if history else "none"
         self.log(f"[signal] {sleeve.slug}: last close {last}"
@@ -259,6 +273,20 @@ class ReplayProvider:
             else:
                 self._history = self.inner.books(self.until, self.last_n)
         return self._history
+
+    @property
+    def stale(self) -> dict:
+        """The inner provider's stale symbols by sleeve (none for one that has no fresh prices)."""
+        return getattr(self.inner, "stale", None) or {}
+
+    @property
+    def stale_info(self) -> dict:
+        return getattr(self.inner, "stale_info", None) or {}
+
+    @property
+    def errors(self) -> dict:
+        errors = getattr(self.inner, "errors", None)
+        return errors if isinstance(errors, dict) else {}
 
     def prices(self, symbols, start, end):
         loader = getattr(self.inner, "prices", None)

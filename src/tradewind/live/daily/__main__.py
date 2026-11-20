@@ -61,6 +61,9 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--borrow-source", choices=BORROW_SOURCES,
                    help="the shorts' borrow fee and availability: auto (the PWB copy of IB's short-stock file, "
                         "then IB's shortable tick), hub, ib, none (default: auto at IBKR, none on the simulation)")
+    g.add_argument("--stale-symbol-policy", choices=["hold", "close", "block"],
+                   help="a symbol still stale after the fresh-price top-up: hold (no order on it), close (sold), "
+                        "block (nothing proposed); default: the meta-portfolio's, hold")
     g.add_argument("--lot", type=float)
     g.add_argument("--min-order", type=float, dest="min_order_notional")
     g.add_argument("--python", help="the Python that has pwb-toolbox")
@@ -85,7 +88,7 @@ def parser() -> argparse.ArgumentParser:
 
 #: the command-line options that override the meta-portfolio file
 OVERRIDES = ("capital", "capital_currency", "account_currency", "leverage", "max_gross", "rebalance", "lot",
-             "min_order_notional", "python", "papers_dir", "borrow_source")
+             "min_order_notional", "python", "papers_dir", "borrow_source", "stale_symbol_policy")
 
 
 def make_provider(args, meta: MetaPortfolio, directory: str) -> PwbProvider:

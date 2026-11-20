@@ -25,6 +25,14 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     borrow_source: auto        # the shorts' fee and availability: auto (hub, then IB), hub, ib, none
     borrow_fee_alert: 1.0      # % a year: a fee at or above it flags the short as hard to borrow
     fresh_prices: alphavantage # complete the monthly price datasets up to the last close
+    fresh_price_tolerance:     # the chain factor's largest move, by kind or symbol (fresh.py)
+      fx_minor: 0.015          # defaults: equity 0.005, fx 0.005 (majors), fx_minor 0.015,
+      CHGG: 0.01               #   crypto 0.005, index 0.01; a number: every kind
+    fresh_index_proxies:       # an index continued with an ETF's returns (default: the ETF
+      SPX: SPY                 #   substitutes); {} for none
+    fresh_index_proxy_approximate: [VIX]   # chained although VIXY does not track the VIX (unchecked)
+    stale_symbol_policy: hold  # a symbol still stale after the top-up: hold (default), close, block
+    stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
     sleeves:
       - {slug: protective_asset_allocation_paa_..., weight: 0.075}
       - {slug: decomposing_the_price_earnings_ratio, weight: 0.109,
@@ -42,6 +50,8 @@ import pandas as pd
 from .instruments import DEFAULT_SUBSTITUTES, Substitute, fx_refusal, is_index
 
 REBALANCE = ("daily", "weekly", "monthly", "never")
+#: what the run does with a symbol still stale after the fresh-price top-up (runner.py)
+STALE_POLICIES = ("hold", "close", "block")
 
 
 @dataclass
@@ -78,6 +88,11 @@ class MetaPortfolio:
     borrow_source: str = ""             # the shorts' fee and availability: auto, hub, ib, none ("": auto at IBKR)
     borrow_fee_alert: float = 1.0       # % a year: a short whose fee is at or above it is hard to borrow
     fx_odd_lot: float = 25_000.0        # an IDEALPRO order below this USD notional is an odd lot
+    fresh_price_tolerance: dict = field(default_factory=dict)   # {kind or symbol: fraction}, or a number
+    fresh_index_proxies: dict | None = None     # {index: ETF}; None: the ETF substitutes
+    fresh_index_proxy_approximate: list[str] = field(default_factory=list)
+    stale_symbol_policy: str = "hold"   # hold: no order on it; close: target 0; block: nothing proposed
+    stale_symbol_max_weight: float = 0.2    # of a sleeve's gross: above it, the sleeve stays in error
 
     def __post_init__(self):
         if self.rebalance not in REBALANCE:
@@ -99,6 +114,23 @@ class MetaPortfolio:
         self.borrow_source = (self.borrow_source or "").lower()
         if self.borrow_source not in ("", "auto", "hub", "ib", "none"):
             raise ValueError(f"borrow_source is auto, hub, ib or none, not {self.borrow_source!r}")
+        self.stale_symbol_policy = str(self.stale_symbol_policy or "hold").lower()
+        if self.stale_symbol_policy not in STALE_POLICIES:
+            raise ValueError(f"stale_symbol_policy is one of {STALE_POLICIES}, not {self.stale_symbol_policy!r}")
+        self.stale_symbol_max_weight = float(self.stale_symbol_max_weight)
+        if not 0.0 <= self.stale_symbol_max_weight <= 1.0:
+            raise ValueError("stale_symbol_max_weight is a fraction of a sleeve's gross, between 0 and 1")
+        tol = self.fresh_price_tolerance
+        if isinstance(tol, (int, float)) and not isinstance(tol, bool):
+            from .fresh import DEFAULT_TOLERANCE
+
+            tol = dict.fromkeys(DEFAULT_TOLERANCE, float(tol))
+        self.fresh_price_tolerance = {str(k): float(v) for k, v in dict(tol or {}).items()}
+        if any(not 0.0 < v < 0.5 for v in self.fresh_price_tolerance.values()):
+            raise ValueError("fresh_price_tolerance: fractions between 0 and 0.5 (0.005 is 0.5 %)")
+        if self.fresh_index_proxies is not None:
+            self.fresh_index_proxies = {str(k): str(v) for k, v in dict(self.fresh_index_proxies).items() if v}
+        self.fresh_index_proxy_approximate = [str(x) for x in (self.fresh_index_proxy_approximate or [])]
         self.account_currency = (self.account_currency or "").upper()
         self.capital_currency = (self.capital_currency or "").upper()
         for name in ("account_currency", "capital_currency"):
@@ -109,6 +141,19 @@ class MetaPortfolio:
     @property
     def weights(self) -> dict[str, float]:
         return {s.slug: s.weight for s in self.sleeves}
+
+    @property
+    def index_proxies(self) -> dict[str, str]:
+        """``{index: ETF}`` whose returns continue an index behind (``fresh_index_proxies``, by
+        default the ETF substitutes)."""
+        if self.fresh_index_proxies is not None:
+            return dict(self.fresh_index_proxies)
+        return {i: s.symbol for i, s in self.substitutes.items() if s.kind == "etf"}
+
+    def fresh_config(self) -> dict:
+        """What the strategies' workers need to complete their prices (``pwb_worker.py``)."""
+        return {"strict": self.stale_symbol_policy == "block", "tolerance": dict(self.fresh_price_tolerance),
+                "proxies": self.index_proxies, "approximate": list(self.fresh_index_proxy_approximate)}
 
     def is_index(self, symbol: str) -> bool:
         return is_index(symbol, self.indices)
@@ -166,4 +211,4 @@ class MetaPortfolio:
         return cls.from_dict(d)
 
 
-__all__ = ["REBALANCE", "MetaPortfolio", "Sleeve"]
+__all__ = ["REBALANCE", "STALE_POLICIES", "MetaPortfolio", "Sleeve"]

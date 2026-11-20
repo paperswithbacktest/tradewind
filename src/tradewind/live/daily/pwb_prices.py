@@ -1,7 +1,7 @@
 """Daily opens and closes of a few symbols from the PWB datasets (executed by ``PwbProvider.prices``).
 
     python -m tradewind.live.daily.pwb_prices OUT.json SYM[,SYM...] --start D --end D
-        [--fresh-prices CACHE [--session D]]
+        [--fresh-prices CACHE [--session D] [--fresh-config JSON]]
 
 In the environment that has pwb-toolbox: ``pwb_toolbox.datasets.get_pricing`` (completed with
 AlphaVantage's bars with ``--fresh-prices``, as the strategies' loads are). Used for the
@@ -45,6 +45,7 @@ def main(argv=None) -> None:
     p.add_argument("--end", required=True)
     p.add_argument("--fresh-prices", default=None, metavar="CACHE")
     p.add_argument("--session", default=None)
+    p.add_argument("--fresh-config", default=None)
     args = p.parse_args(argv)
     os.environ.setdefault("TQDM_DISABLE", "1")
     payload: dict = {}
@@ -53,9 +54,11 @@ def main(argv=None) -> None:
             import pwb_toolbox.datasets as pwb_ds
 
             from tradewind.live.daily.fresh import FreshPrices, install
+            from tradewind.live.daily.pwb_worker import fresh_options
 
             fresh = FreshPrices.from_env(args.fresh_prices, args.session or args.end,
-                                         log=lambda *a: print(*a, file=sys.stderr))
+                                         log=lambda *a: print(*a, file=sys.stderr),
+                                         **fresh_options(args.fresh_config))
             install(fresh, pwb_ds)
         payload["prices"] = load([s for s in args.symbols.split(",") if s], args.start, args.end)
     except Exception as exc:  # noqa: BLE001 - the caller reads the error from the file
