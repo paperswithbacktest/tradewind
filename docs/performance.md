@@ -85,6 +85,36 @@ checkouts are compared with
 
 `tests/test_hot_paths.py` checks each shortcut against the path it skips, bit for bit.
 
+## Against backtrader
+
+The reference benchmark runs the same five scenarios, on the same seeded bars, with the same
+strategy classes, on both engines and on the same machine; backtrader runs in its own
+environment. Each scenario must end at the same final value on both engines before its
+times are compared.
+
+    TW_PY=<python> BT_PY=<python of an environment with backtrader> tools/bench_reference.sh small
+    TW_PY=<python> BT_PY=<python of an environment with backtrader> tools/bench_reference.sh wide
+
+**5 securities × 20 years** (5 040 daily bars), Apple M4, Python 3.13.12, numpy 2.2.4 and
+pandas 2.3.1 in both environments, backtrader 1.9.78.125 (best of 3) against Tradewind 0.0.2
+`main` (best of 9), 19 Nov 2026 (`bench/small-mac-mini-20261119/`):
+
+| scenario | backtrader | Tradewind | speed-up | same final value |
+|---|---|---|---|---|
+| `idle` | 32.8 µs | 0.41 µs | ×80 | yes |
+| `reader` | 33.4 µs | 0.57 µs | ×59 | yes |
+| `rebalance` | 37.4 µs | 3.03 µs | ×12 | yes |
+| `notified` | 37.0 µs | 3.23 µs | ×11 | yes |
+| `indicators` | 38.8 µs | 3.10 µs | ×13 | yes |
+
+With five names, Tradewind's fixed cost per bar is spread over few securities, so its
+figure is higher than on a wide universe. backtrader's stays near 35 µs whatever the width.
+
+**4 000 securities × 20 years**: pending. backtrader needs about an hour per scenario on this
+case, so it runs once on an idle machine (the data host, Intel Xeon E-2386G, 62 GB) and its
+results are committed under `bench/wide-*` and copied here. The small case also runs in CI on
+every push; times on shared runners are informational only.
+
 ## Where the time goes in real strategies
 
 On the slowest strategies of a 4 200-strategy corpus, profiled with a stack sampler, the

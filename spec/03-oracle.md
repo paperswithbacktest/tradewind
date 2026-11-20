@@ -51,9 +51,13 @@ runs. It is never imported by the engine, never a dependency, never redistribute
 * **Verdicts**: identical; divergent or error, *expected* only when the reference set
   recorded that same verdict for Tradewind on that same measurement; leaked (a backtrader
   module loaded in a Tradewind run). Any unexpected verdict fails the run.
-* **Speed benchmark** (CI, informational; nightly, gating): 5 symbols × 20 years and
-  4 000 symbols × 20 years, µs per symbol-bar, against the backtrader reference measured
-  in pwb-toolbox 0.1.41 (35 µs).
+* **Speed benchmark**: 5 symbols × 20 years and 4 000 symbols × 20 years, µs per
+  security-bar, Tradewind against backtrader **on the same machine**, the same seeded bars
+  and the same strategy classes (`tools/bench_reference.sh small|wide`, backtrader in the
+  oracle's environment only); each scenario's final value must be equal on both engines. The
+  small case runs in CI on every push (times informational); the wide case (about an hour per
+  scenario on backtrader) runs on an idle machine, results committed under `bench/` and
+  published in `docs/performance.md`.
 
 ## Second oracle
 

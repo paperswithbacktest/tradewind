@@ -23,6 +23,12 @@ Scenarios, all on the same seeded bars (``--scenarios`` picks some):
 The figure is the wall time of ``Engine.run`` (feed start included, DataFrame building
 excluded) divided by symbols × bars, best of ``--repeat``. The spec's budget is 3 µs per
 security-bar on 4 000 names, about 0.6 µs of it for the engine.
+
+``--engine backtrader`` times the reference engine on the same bars and the same strategy
+classes, written against the compatible API (``Cerebro``, ``setcash``): run it **in the
+oracle's own environment** (backtrader installed there, never in Tradewind's), for the
+reference benchmark of spec/03 (``tools/bench_reference.sh``). Each scenario's final value
+is recorded, so the two engines' runs can be checked equal as well as timed.
 """
 
 from __future__ import annotations
@@ -39,10 +45,15 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# TRADEWIND_SRC points at another checkout's ``src`` to time it on the same bars
-sys.path.insert(0, os.environ.get("TRADEWIND_SRC") or os.path.join(os.path.dirname(HERE), "src"))
-
-import tradewind as tw
+ENGINE = "backtrader" if "--engine=backtrader" in sys.argv or (
+    "--engine" in sys.argv[:-1] and sys.argv[sys.argv.index("--engine") + 1] == "backtrader") else "tradewind"
+if ENGINE == "backtrader":
+    # the reference engine, as a black box, in its own environment (clean-room rule 2)
+    import backtrader as tw
+else:
+    # TRADEWIND_SRC points at another checkout's ``src`` to time it on the same bars
+    sys.path.insert(0, os.environ.get("TRADEWIND_SRC") or os.path.join(os.path.dirname(HERE), "src"))
+    import tradewind as tw
 
 
 def frames(n_sym: int, n_bars: int, seed: int = 5):
@@ -144,11 +155,12 @@ SCENARIOS = {"idle": Idle, "rebalance": Rebalance, "daily": Daily, "notified": N
 
 
 def run_once(strategy, fr, profile=None):
-    engine = tw.Engine(stdstats=False)
+    engine = getattr(tw, "Engine", None) or tw.Cerebro
+    engine = engine(stdstats=False)
     for i, f in enumerate(fr):
         engine.adddata(tw.feeds.PandasData(dataname=f), name=f"S{i}")
     engine.addstrategy(strategy)
-    engine.broker.set_cash(10_000_000)
+    engine.broker.setcash(10_000_000)
     if profile is not None:
         engine.broker.set_profile(profile)
     gc.collect()
@@ -156,6 +168,29 @@ def run_once(strategy, fr, profile=None):
     engine.run()
     elapsed = time.perf_counter() - t0
     return elapsed, engine.broker.getvalue()
+
+
+def machine():
+    """What the figures were measured on: they only compare within one machine."""
+    import platform
+    import subprocess
+
+    cpu = platform.processor() or platform.machine()
+    try:
+        if sys.platform == "darwin":
+            cpu = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True,
+                                 text=True, check=False).stdout.strip() or cpu
+        elif os.path.exists("/proc/cpuinfo"):
+            with open("/proc/cpuinfo") as fh:
+                cpu = next((ln.split(":", 1)[1].strip() for ln in fh if ln.startswith("model name")), cpu)
+    except OSError:
+        pass
+    try:
+        version = tw.__version__
+    except AttributeError:
+        version = "?"
+    return {"cpu": cpu, "cores": os.cpu_count(), "os": platform.platform(), "python": platform.python_version(),
+            "numpy": np.__version__, "pandas": pd.__version__, "engine_version": str(version)}
 
 
 def main():
@@ -169,11 +204,14 @@ def main():
     p.add_argument("--json", default=None, help="write the figures there")
     p.add_argument("--profile", default=None, help="a model profile for the broker (``realistic``); "
                    "the default is the oracle's")
+    p.add_argument("--engine", choices=("tradewind", "backtrader"), default="tradewind",
+                   help="backtrader: the reference engine, in the oracle's environment only")
     args = p.parse_args()
     n_bars = args.bars or round(252 * args.years)
     fr = frames(args.symbols, n_bars)
     cells = args.symbols * n_bars
-    out = {"symbols": args.symbols, "bars": n_bars}
+    out = {"symbols": args.symbols, "bars": n_bars, "engine": ENGINE, "repeat": args.repeat,
+           "machine": machine()}
     for name in args.scenarios.split(","):
         cls = SCENARIOS[name]
         times, value = [], None

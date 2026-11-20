@@ -1,0 +1,40 @@
+{
+ "symbols": 5,
+ "bars": 5040,
+ "engine": "backtrader",
+ "repeat": 3,
+ "machine": {
+  "cpu": "Apple M4",
+  "cores": 10,
+  "os": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "python": "3.13.12",
+  "numpy": "2.2.4",
+  "pandas": "2.3.1",
+  "engine_version": "1.9.78.125"
+ },
+ "idle": {
+  "seconds": 0.8264244999736547,
+  "us_per_security_bar": 32.79462301482757,
+  "final_value": 10000000.0
+ },
+ "rebalance": {
+  "seconds": 0.9429927077144384,
+  "us_per_security_bar": 37.42034554422374,
+  "final_value": 219073793.4300662
+ },
+ "notified": {
+  "seconds": 0.9318772503174841,
+  "us_per_security_bar": 36.97925596497953,
+  "final_value": 219073793.4300662
+ },
+ "reader": {
+  "seconds": 0.8426379999145865,
+  "us_per_security_bar": 33.43801586962645,
+  "final_value": 10000000.0
+ },
+ "indicators": {
+  "seconds": 0.9782906658947468,
+  "us_per_security_bar": 38.821058170426454,
+  "final_value": 30105481.90338345
+ }
+}
