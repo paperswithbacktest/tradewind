@@ -33,6 +33,9 @@ from .events import CorporateActionEvent, EventBus, OrderEvent, TradeEvent
 from .market import MarketState, PortfolioState
 from .models import (
     BatchState,
+    CommInfoFeeModel,
+    CompatCashBuyingPower,
+    CompatSlippage,
     FillParameters,
     FillProposal,
     ImmediateSettlement,
@@ -49,6 +52,38 @@ from .securities import ACCOUNT_CURRENCY, Bar, CashAmount, Security, SecurityHol
 from .trade import Trade
 
 _MARKET = Order.Market
+_CLOSE = Order.Close
+
+# what ``_scheme_kind`` answers for each commission class: 0 the per-order path only, 1 the
+# base formulas (vectorised), 2 a scheme of its own ``_getcommission`` (called per order)
+_SCHEME_KIND: dict = {}
+
+
+def _scheme_kind(cls) -> int:
+    kind = _SCHEME_KIND.get(cls)
+    if kind is None:
+        base = CommInfoBase
+        if (cls.getcommission is not base.getcommission or cls.confirmexec is not base.confirmexec
+                or cls.profitandloss is not base.profitandloss or cls.get_leverage is not base.get_leverage
+                or cls.stocklike is not base.stocklike):
+            kind = 0
+        else:
+            kind = 1 if cls._getcommission is base._getcommission else 2
+        _SCHEME_KIND[cls] = kind
+    return kind
+
+
+def _vector_fees(kind, comm, perc, schemes, sizes, qty, price, plist, pseudoexec=True):
+    """The fee of trading ``qty`` (float array; ``sizes`` the same as Python numbers) at
+    ``price`` (``plist`` the same as Python floats) for each order: the base formula on the
+    whole array (``abs(q) * commission * price``, or ``abs(q) * commission`` per unit), a
+    scheme's own ``_getcommission`` called once per order otherwise."""
+    a = np.abs(qty) * comm
+    fees = np.where(perc, a * price, a)
+    if (kind == 2).any():
+        for k in np.flatnonzero(kind == 2).tolist():
+            fees[k] = schemes[k]._getcommission(sizes[k], plist[k], pseudoexec=pseudoexec)
+    return fees
 
 
 @runtime_checkable
@@ -881,6 +916,8 @@ class BackBroker(BrokerBase):
         submitted = self.submitted
         if not submitted:
             return
+        if len(submitted) >= self._tw_vector_min and self._tw_accept_vector():
+            return
         state = BatchState(self.cash, {}, self._now)
         pending = self.pending
         while submitted:
@@ -918,6 +955,246 @@ class BackBroker(BrokerBase):
             return data.close[0]
         return None
 
+    # -- phases 5 and 6 across the securities of a slice (spec/05 § 7.3) ---------------------
+    #
+    # A batch of at least ``_tw_vector_min`` orders whose securities all carry the default
+    # models (``ModelSet.oracle()`` without slippage at the open, a stock-like scheme
+    # without leverage, the account currency) is processed as arrays: the prices gathered
+    # from ``MarketState``, the fees and cash flows computed on the whole batch, the running
+    # cash summed left to right by ``np.add.accumulate`` -- the same float operations, in
+    # the same order, as the per-order path, so the results are identical bit for bit. The
+    # order stays the batch's: submission order at acceptance, the queue's at the fills
+    # (deterministic; it is the oracle's, which a sort by symbol would break). The order
+    # objects, positions and trades are then updated one by one, as before. Any other
+    # batch, and any order whose cash check fails at a fill, takes the per-order path.
+    _tw_vector_min = 32
+
+    def _tw_accept_vector(self) -> bool:
+        """Phase 5 on arrays; False (nothing touched) when the batch does not qualify."""
+        market = self.market
+        if market is None or self._foreign:
+            return False
+        orders = list(self.submitted)
+        n_sec = len(market.length)
+        sids, sizes, schemes, checks = [], [], [], []
+        for o in orders:
+            et = o.exectype
+            if o._tw_bracket is not None or (et != _MARKET and et != _CLOSE):
+                return False
+            security = o.data.security
+            if security._broker is not self or security.id >= n_sec:
+                return False
+            models = security.models
+            bp = models.buying_power
+            if type(bp) is not CompatCashBuyingPower or type(models.fee) is not CommInfoFeeModel:
+                return False
+            ci = o.comminfo
+            if (not _scheme_kind(type(ci)) or not ci._stocklike or ci.p.leverage != 1.0
+                    or security.properties.contract_multiplier != 1.0):
+                return False
+            sids.append(security.id)
+            sizes.append(o.size)
+            schemes.append(ci)
+            checks.append(bool(o._check and bp.checksubmit))
+        # the pre-check reads the position of each order's security (registering it, in
+        # batch order, as ``check_order`` does)
+        positions = self.positions
+        for o in orders:
+            positions[o.data.security.feed]
+        ids = np.array(sids, dtype=np.int64)
+        length = market.length[ids]
+        priced = length >= 1
+        # the submission bar's close: ``close[-1]`` once the feed has two bars, ``close[0]``
+        # with one, no price (accepted, no cash) before the first
+        row = market.offsets[ids] + np.where(length >= 2, length - 2, length - 1)
+        price = np.where(priced, market.flat["close"][np.where(priced, row, 0)], 0.0)
+        qty = np.array(sizes, dtype=np.float64)
+        kind = np.array([_scheme_kind(type(ci)) for ci in schemes])
+        comm = np.array([ci._commission for ci in schemes], dtype=np.float64)
+        perc = np.array([ci._commtype == CommInfoBase.COMM_PERC for ci in schemes])
+        with np.errstate(all="ignore"):
+            # no fee is asked for an order without a price (``np.where(priced, kind, 1)``)
+            fees = _vector_fees(np.where(priced, kind, 1), comm, perc, schemes, sizes, qty, price,
+                                price.tolist())
+            delta = np.where(priced, -qty * price - fees, 0.0)
+            # running cash after each order: ``running -= cash_consumed`` (= ``-delta``), left
+            # to right; an order is refused when it leaves the running cash below zero
+            running = np.add.accumulate(np.concatenate(((self.cash,), delta)))[1:]
+            refused = (running < 0) & np.array(checks, dtype=bool) & priced
+        self.submitted.clear()
+        pending = self.pending
+        notify = None if self._tw_quiet_orders else self.notify
+        for o, bad in zip(orders, refused.tolist()):
+            if bad:
+                o.margin()
+            else:
+                o.accept(self)
+                pending.append(o)
+            if notify is not None:
+                notify(o)
+        return True
+
+    def _tw_fill_vector(self, has_bar) -> bool:
+        """Phase 6 on arrays; False (nothing touched) when the pass does not qualify."""
+        market = self.market
+        if market is None or self._foreign:
+            return False
+        orders = list(self.pending)
+        n_bar = len(has_bar)
+        account = self.cashbook.account_currency
+        seen = set()
+        live = []
+        for o in orders:
+            if o._tw_bracket is not None or o.exectype != _MARKET or o.valid is not None or not o.size:
+                return False
+            security = o.data.security
+            sid = security.id
+            if security._broker is not self or sid in seen or sid >= len(market.length):
+                return False       # two orders on one security: the per-order path
+            seen.add(sid)
+            models = security.models
+            fill = models.fill
+            slip = models.slippage
+            if (type(fill) is not NextBarFillModel or fill.coc or type(slip) is not CompatSlippage
+                    or ((slip.perc or slip.fixed) and slip.slip_open)
+                    or type(models.settlement) is not ImmediateSettlement
+                    or type(models.fee) is not CommInfoFeeModel
+                    or type(models.buying_power) is not CompatCashBuyingPower):
+                return False
+            props = security.properties
+            ci = o.comminfo
+            if (props.contract_multiplier != 1.0 or props.quote_currency != account
+                    or not _scheme_kind(type(ci)) or not ci._stocklike or ci.p.leverage != 1.0):
+                return False
+            if sid < n_bar and has_bar[sid]:
+                live.append(o)
+        if live:
+            self._tw_fill_live(live)
+        # the orders without a bar now wait, in queue order (a default fill is whole: none
+        # of the others stays open)
+        live_ids = {id(o) for o in live}
+        self.pending = collections.deque(o for o in orders if id(o) not in live_ids or o.alive())
+        return True
+
+    def _tw_fill_live(self, live) -> None:
+        positions = self.positions
+        pos = [positions[o.data] for o in live]
+        ids = np.array([o.data.security.id for o in live], dtype=np.int64)
+        sizes = [o.size for o in live]
+        schemes = [o.comminfo for o in live]
+        n = len(live)
+        # positions, sizes, entry prices and opens as arrays (one order per security)
+        S = np.array(sizes, dtype=np.float64)
+        P = np.array([p.size for p in pos], dtype=np.float64)
+        PP = np.array([p.price for p in pos], dtype=np.float64)
+        market = self.market
+        O = market.flat["open"][market.offsets[ids] + market.length[ids] - 1]   # this bar's open
+        olist = O.tolist()
+        kind = np.array([_scheme_kind(type(ci)) for ci in schemes])
+        comm = np.array([ci._commission for ci in schemes], dtype=np.float64)
+        perc = np.array([ci._commtype == CommInfoBase.COMM_PERC for ci in schemes])
+        mult = np.array([ci.p.mult for ci in schemes], dtype=np.float64)
+        opening = (P == 0) | ((P > 0) == (S > 0))
+        reversing = ~opening & (np.abs(S) > np.abs(P))
+        # the two parts of a reversal: close the old position, open the rest
+        closed_r = [-p.size if r else 0 for p, r in zip(pos, reversing.tolist())]
+        opened_r = [p.size + s if r else 0 for p, s, r in zip(pos, sizes, reversing.tolist())]
+        Cr = np.array(closed_r, dtype=np.float64)
+        Or = np.array(opened_r, dtype=np.float64)
+        with np.errstate(all="ignore"):
+            fee = _vector_fees(kind, comm, perc, schemes, sizes, S, O, olist)
+            fee_c = _vector_fees(kind * reversing, comm, perc, schemes, closed_r, Cr, O, olist)
+            fee_o = _vector_fees(kind * reversing, comm, perc, schemes, opened_r, Or, O, olist)
+            # the closing part (a reduction, or the first part of a reversal): the entry
+            # value given back plus the P&L, ``(-closed * entry) + (-closed * (price - entry)
+            # * mult)``; ``closed`` is the order's size for a reduction, ``-position`` for a
+            # reversal
+            closed = np.where(reversing, Cr, S)
+            pnl = np.where(opening, 0.0, -closed * (O - PP) * mult)
+            back = -closed * PP + pnl
+            # the cash steps of each order, in the order ``_execute`` adds them
+            step1 = np.where(opening, -(S * O), back)
+            step2 = -np.where(reversing, fee_c, fee)
+            step3 = -(Or * O)
+            step4 = -fee_o
+            # the checks of ``check_fill`` (opening: the whole order's cash; reversal: the
+            # opening part against the cash left after closing)
+            delta_open = -S * O - fee
+        nsteps = np.where(reversing, 4, 2)
+        start = np.concatenate(((0,), np.cumsum(nsteps)[:-1]))
+        flat = np.empty(int(nsteps.sum()))
+        flat[start] = step1
+        flat[start + 1] = step2
+        rev_idx = np.flatnonzero(reversing)
+        flat[start[rev_idx] + 2] = step3[rev_idx]
+        flat[start[rev_idx] + 3] = step4[rev_idx]
+        pnl_l = pnl.tolist()
+        fee_l = fee.tolist()
+        fee_c_l = fee_c.tolist()
+        fee_o_l = fee_o.tolist()
+        k0 = 0
+        cash = self.cash
+        restarts = 0
+        while k0 < n:
+            if restarts > 16:
+                # many refusals in one pass: the rest order by order
+                for k in range(k0, n):
+                    o = live[k]
+                    self._execute(o.data.security, o, FillProposal(o.size, olist[k]), self._dtnum)
+                return
+            base = int(start[k0])
+            with np.errstate(all="ignore"):
+                run = np.add.accumulate(np.concatenate(((cash,), flat[base:])))
+                before = run[start[k0:] - base]
+                ok = np.where(opening[k0:], before + delta_open[k0:] >= 0,
+                              ~(np.where(reversing[k0:],
+                                         before - Cr[k0:] * O[k0:] - fee_c[k0:] - Or[k0:] * O[k0:] - fee_o[k0:],
+                                         0.0) < 0))
+            bad = np.flatnonzero(~ok)
+            j = k0 + int(bad[0]) if bad.size else n
+            for k in range(k0, j):
+                self._tw_fill_done(live[k], pos[k], olist[k], pnl_l[k], fee_l[k], fee_c_l[k], fee_o_l[k],
+                                   schemes[k], int(kind[k]))
+            cash = float(run[int(start[j]) - base]) if j < n else float(run[-1])
+            self.cash = cash
+            if j < n:
+                # a refusal or a partial reversal: the per-order path, from the exact cash
+                o = live[j]
+                self._execute(o.data.security, o, FillProposal(o.size, olist[j]), self._dtnum)
+                cash = self.cash
+                restarts += 1
+            k0 = j + 1
+
+    def _tw_fill_done(self, order, pos, price, pnl, fee, fee_c, fee_o, ci, kind) -> None:
+        """The bookkeeping of ``_execute`` for a whole fill whose cash the batch has moved."""
+        size = order.size
+        oldprice = pos.price
+        newsize, _newprice, opened, closed = pos.update(size, price)
+        if not closed:
+            pnl = 0.0
+        if closed and opened:
+            fc, fo = fee_c, fee_o
+            if kind == 2:
+                fc, fo = ci.confirmexec(closed, price), ci.confirmexec(opened, price)
+            closedcomm, openedcomm = fc, fo
+            comm_final = closedcomm + openedcomm
+            trade_parts = (closedcomm, openedcomm)
+        else:
+            f = ci.confirmexec(size, price) if kind == 2 else fee
+            closedcomm = f if closed else 0.0
+            openedcomm = f if opened else 0.0
+            comm_final = f
+            trade_parts = None
+        dt = self._dtnum
+        order.execute(dt, size, price, closed, -closed * oldprice, closedcomm, opened, opened * price,
+                      openedcomm, 0.0, pnl)
+        security = order.data.security
+        self._account(security, comm_final, pnl)
+        order.completed()
+        self.notify(order)
+        self._update_trade(order, order.data, size, price, opened, closed, pnl, comm_final, dt, newsize,
+                           parts=trade_parts)
+
     # phase 6
     def fills(self, s: TimeSlice | None) -> None:
         """Each accepted, still-open order whose feed has a bar now: the fill model
@@ -928,6 +1205,8 @@ class BackBroker(BrokerBase):
             return
         has_bar = self.market.has_bar if (s is None and self.market is not None) else (
             s.has_bar if s is not None else None)
+        if len(pending) >= self._tw_vector_min and has_bar is not None and self._tw_fill_vector(has_bar):
+            return
         remaining = collections.deque()
         activate: list = []
         while pending:
