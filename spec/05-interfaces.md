@@ -748,6 +748,37 @@ directly. Acceptance and fills stay one order at a time in `ref` order: the runn
 the batch and the cash re-check at the fill are sequential, and the fee is whatever the
 scheme computes. `tools/nav_parity.py` compares two checkouts mark by mark as hex floats.
 
+Chantier 3, batch broker (2026-11-19): phases 5 and 6 run on arrays when a batch of at least
+`BackBroker._tw_vector_min` (32) orders qualifies -- every order a market order (`Close` too
+at acceptance) without bracket or validity, every security under the exact default models
+(`CompatCashBuyingPower`, `CommInfoFeeModel`, `NextBarFillModel` without cheat-on-close,
+`CompatSlippage` that leaves the open untouched, `ImmediateSettlement`), multiplier 1, the
+account currency, a stock-like scheme with leverage 1 whose `getcommission`, `confirmexec`
+and `profitandloss` are the base ones; at the fills, one order per security. Phase 5: the
+check prices (`close[-1]`, or `close[0]` on a feed's first bar) gathered from
+`MarketState`, the fees `abs(q) * commission * price` on the array (a scheme with its own
+`_getcommission` is called once per order, which assumes the scheme is a function of its
+arguments and of the bar, as `SpreadImpactCommission` is), the deltas `-q * price - fee`,
+the running cash `np.add.accumulate` from the cash (§ 7.3), refusals where it goes below
+zero. Phase 6: the cash steps of every order (closing part `-closed * entry + P&L`, its fee;
+opening part `-(opened * price)`, its fee) in `_execute`'s order, accumulated from the cash;
+the first order whose re-check fails (an opening order the cash cannot cover, a reversal
+whose opening part it cannot cover, a NaN) is executed by `_execute` from the exact cash
+and the accumulation restarts after it (after 16 restarts in one pass, the rest go one by
+one). The bookkeeping (status, `executed`, position, trade, notifications) stays per order.
+The order is the batch's (submission order, then the queue's), deterministic and the
+oracle's; a sort by symbol is not applied because it would change which order a short cash
+refuses. Parity: `tests/test_vector_broker.py` runs nine scenarios (reductions, reversals,
+partial reversals, refusals at both phases, the restart cap, missing bars, a late listing,
+percentage / fixed / custom schemes, `checksubmit` off) and the 61 oracle strategies on both
+paths and compares every notification, mark, position and portfolio array bit for bit.
+`tools/nav_parity.py` with the batch path forced on every batch: 73 runs, 10 928 marks,
+39 359 orders identical to `main`. Speed (`tools/bench_engine.py`, 4 000 names × 63 bars,
+best of three, interleaved with `main`): `daily` 8.2-8.6 → 7.3-7.4 µs per security-bar
+(acceptance 0.93 → 0.46, fills 2.96 → 2.29 µs per security-bar); the budget scenarios
+unchanged (rebalance 0.93-1.04 → 0.91-0.94 µs); 5 names × 2 520 bars unchanged (the
+threshold keeps the per-order path).
+
 ## 12. As built, chantier 4: calendars and the run fingerprint (2026-11-15)
 
 **Calendars (§ 6.1).** `calendars.py`: `ExchangeCalendar` implements `ExchangeHours`
