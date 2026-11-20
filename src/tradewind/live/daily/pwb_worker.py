@@ -18,6 +18,10 @@ close (``fresh.py``). ``--fresh-config`` (JSON: ``strict``, ``tolerance``, ``pro
 in the file (``stale``, ``stale_info``); with ``strict`` (``stale_symbol_policy: block``) it
 stops the strategy and the file carries the list instead of books, otherwise the strategy runs
 on its rows as they are and the books are written with the list.
+
+``universe_last`` is the last date of the point-in-time universe the strategy loaded
+(``Stocks-Daily-LiquidUniverse``, through pwb-toolbox's ``load_pit_universe``), None for a
+strategy that loaded none: read off the table already in memory, no second load.
 """
 
 from __future__ import annotations
@@ -59,6 +63,26 @@ def cut_pricing(until: str) -> None:
         return original(*args, **kwargs)
 
     pwb_ds.get_pricing = get_pricing
+
+
+def universe_last() -> str | None:
+    """The last date of the point-in-time universe this process loaded, or None.
+
+    pwb-toolbox keeps every table it loads in ``pit_universe._cache`` (one per ``top_n`` and
+    tenure floor); every route to the universe (``get_pricing``'s cut, the harness's membership
+    flags, ``get_most_liquid_symbols``) goes through it. The worker runs one strategy, so what
+    is cached is what that strategy used. A table read from ``PWB_PIT_UNIVERSE_DIR`` counts the
+    same."""
+    module = sys.modules.get("pwb_toolbox.datasets.pit_universe")
+    cache = getattr(module, "_cache", None)
+    if not isinstance(cache, dict):
+        return None
+    lasts = []
+    for frame in cache.values():
+        with contextlib.suppress(Exception):     # not a table: nothing to say
+            if len(frame):
+                lasts.append(str(frame["date"].max())[:10])
+    return max(lasts) if lasts else None
 
 
 def fresh_options(text: str | None) -> dict:
@@ -128,6 +152,8 @@ def main(argv=None) -> None:
                                       if ln.lstrip().startswith(("Exposure:", "Underfunded", "Out of universe:"))][:10])
     except BaseException as exc:  # noqa: BLE001 - the caller reads the error from the file
         payload.update(books=[], error=f"{type(exc).__name__}: {str(exc)[:4000]}")
+    with contextlib.suppress(Exception):
+        payload["universe_last"] = universe_last()
     if fresh is not None:
         payload["fresh"] = fresh.summary()
         if fresh.stale:

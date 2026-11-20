@@ -26,8 +26,8 @@ One call does the whole day, in this order, and writes the report of the day:
    positions plus the orders sent then, and the orders still working at the broker.
 6. **Report and alerts** -- ``reports/SESSION.md`` and ``reports/SESSION.json`` (and
    ``reports/latest.*``): the portfolio's value, the orders proposed, sent and filled, the gap
-   to the backtest and its terms, the sleeves in error, the stale symbols, the alerts, and a
-   one-line summary. The exit code says what happened (``EXIT_*`` below); an optional command
+   to the backtest and its terms, the sleeves in error, the stale symbols, the age of the
+   point-in-time universe the sleeves use, the alerts, and a one-line summary. The exit code says what happened (``EXIT_*`` below); an optional command
    (``--notify-cmd``) is run with the summary when there is an alert.
 
 Exit codes: 0 done (or nothing to do), 2 usage, 3 stale prices (nothing proposed), 4 done
@@ -125,7 +125,7 @@ class Alert:
     code: str           # stale_prices, run_failed, broker_unreachable, tracking_gap, daily_loss,
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
     #                     fills_mismatch, orders_working, notify_failed, symbol_watch, short_borrow,
-    #                     stale_symbol, out_of_universe
+    #                     stale_symbol, out_of_universe, universe_age
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -324,8 +324,13 @@ class DailySession:
                 account.close()
         errors = dict(getattr(provider, "errors", {}) or {})
         stale = {k: dict(v) for k, v in (getattr(provider, "stale", {}) or {}).items()}
+        universe = universe_status(getattr(provider, "universe_last", None), session,
+                                   self.meta.universe_max_age_days)
+        if universe is not None and universe["old"]:
+            alerts.append(Alert("universe_age", universe_message(universe)))
         if report is None:
-            return self._finish(session, None, alerts, code, status, errors=errors, stale=stale)
+            return self._finish(session, None, alerts, code, status, errors=errors, stale=stale,
+                                extra={"universe": universe})
 
         alerts += check_day(report.row, report.sent, self.cfg)
         if report.stale:
@@ -353,6 +358,7 @@ class DailySession:
             code, status = EXIT_ALERT, "alert"
         return self._finish(session, report, alerts, code, status, errors=errors, stale=stale,
                             extra={"reconciliation": recon, "fills": seen.get("fills", []), "cash": seen.get("cash"),
+                                   "universe": universe,
                                    "sent_requested": self.send, "sent": bool(send) and report is not None},
                             phase="sent" if send else "proposed")
 
@@ -499,6 +505,7 @@ class DailySession:
             "stale_symbols": stale_symbols,
             "stale_detail": stale_detail,
             "out_of_universe": list(report.out_of_universe) if report is not None else [],
+            "universe": extra.get("universe"),
             "warnings": list(report.warnings) if report is not None else [],
             "borrow": dict(report.borrow) if report is not None else {},
             "reconciliation": extra.get("reconciliation", {}),
@@ -524,6 +531,37 @@ def stale_message(rows: list[dict]) -> str:
     head = f"{len(rows)} symbol(s) still stale after the fresh-price top-up, set aside ({rows[0].get('policy', '')}):"
     return "\n".join([head] + [f"{x['symbol']}: last bar {x.get('last') or '?'}, {x.get('cause') or 'stale'} "
                                 f"({x.get('reason', '')}); {x.get('action', '')}" for x in rows])
+
+
+def universe_status(lasts: dict | None, session: str, max_age_days: float) -> dict | None:
+    """The point-in-time universe the sleeves use, seen from ``session``: ``last`` (its last
+    published date; the oldest when the sleeves' runs saw different ones), ``age_days``
+    (calendar days from it to the session), ``max_age_days``, ``old`` (the age is above it) and
+    the ``sleeves`` that use one. None when no sleeve does: no line, no alert.
+
+    The harness carries the last known composition forward past the end of the table, so
+    nothing breaks when it ages; the names that entered or left since are just not seen. The
+    table is rebuilt once a month, so a month and a few days is its normal age at worst."""
+    lasts = {str(k): str(v)[:10] for k, v in (lasts or {}).items() if v}
+    if not lasts:
+        return None
+    last = min(lasts.values())
+    age = (_dt.date.fromisoformat(session[:10]) - _dt.date.fromisoformat(last)).days
+    return {"last": last, "age_days": age, "max_age_days": max_age_days, "old": age > max_age_days,
+            "sleeves": sorted(lasts)}
+
+
+def universe_line(u: dict) -> str:
+    """``universe as of DD/MM (N days)``, the report's line."""
+    day = _dt.date.fromisoformat(u["last"])
+    return f"universe as of {day:%d/%m} ({u['age_days']} days)"
+
+
+def universe_message(u: dict) -> str:
+    """The ``universe_age`` alert."""
+    return (f"the point-in-time universe (Stocks-Daily-LiquidUniverse) ends on {u['last']}, {u['age_days']} days "
+            f"before the session (above {u['max_age_days']:g}, universe_max_age_days): its last composition is "
+            f"carried forward, names that entered or left since are not seen; sleeves: " + ", ".join(u["sleeves"]))
 
 
 def out_of_universe_message(rows: list[dict]) -> str:
@@ -562,6 +600,10 @@ def render_markdown(d: dict) -> str:
                (f"- orders: {len(o['proposed'])} proposed, {len(o['sent'])} sent, {len(o['filled'])} filled at "
                 f"today's open, {o['skipped']} under the minimum"),
                f"- proposal: `{d['proposal']}`"]
+    if d.get("universe"):
+        md.append(f"- {universe_line(d['universe'])}, {len(d['universe']['sleeves'])} sleeve(s) on a "
+                  f"point-in-time universe" + (f", **older than {d['universe']['max_age_days']:g} days**"
+                                               if d["universe"]["old"] else ""))
     md.append("")
     md += ["## Alerts", ""]
     md += [f"- **{a['code']}**: " + a["message"].replace("\n", "\n  ") for a in d["alerts"]] or ["- none"]
@@ -667,4 +709,5 @@ if __name__ == "__main__":
 
 __all__ = ["EXIT_ALERT", "EXIT_BROKER", "EXIT_BUSY", "EXIT_FAILED", "EXIT_OK", "EXIT_STALE", "EXIT_USAGE", "Alert",
            "AlertConfig", "DailySession", "SessionResult", "check_day", "closed_session", "next_open",
-           "out_of_universe_message", "render_markdown", "stale_message"]
+           "out_of_universe_message", "render_markdown", "stale_message", "universe_line", "universe_message",
+           "universe_status"]
