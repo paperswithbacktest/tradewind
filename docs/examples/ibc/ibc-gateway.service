@@ -1,0 +1,26 @@
+# IB Gateway (paper) through IBC on a Linux server without a screen (an example, user unit).
+# Gateway is a desktop program: xvfb-run gives it a virtual display (apt install xvfb).
+# IBC restarts Gateway every day (AutoRestartTime) and logs in again on Sundays
+# (ColdRestartTime); systemd only starts it and restarts it if it stops.
+#
+# Install (by hand) ONLY once ~/ibc/config.ini holds the login:
+#   cp ibc-gateway.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now ibc-gateway.service
+#   loginctl enable-linger $USER          # so that it runs without a session open
+[Unit]
+Description=IB Gateway (paper) through IBC
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/xvfb-run -a %h/ibc/start-gateway-if-needed.sh
+# 78: config.ini has no login yet; do not retry until it is fixed
+RestartPreventExitStatus=78
+Restart=always
+# also a watchdog: if Gateway stops, it is started again 10 minutes later; a wrong
+# password does not hammer IB's login servers
+RestartSec=600
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

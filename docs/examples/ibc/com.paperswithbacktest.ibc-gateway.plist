@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  IB Gateway (paper) through IBC on a Mac (an example, not installed by Tradewind): at login
+  (RunAtLoad) and on weekdays at 22:15, half an hour before the daily run of 22:45 (Paris time
+  here: launchd reads the Mac's clock). The script starts nothing if Gateway is already running
+  or if config.ini has no login yet.
+
+  Install (by hand) ONLY once ~/ibc/config.ini holds the login: edit the paths below, then
+    cp com.paperswithbacktest.ibc-gateway.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.paperswithbacktest.ibc-gateway.plist
+  A file in ~/Library/LaunchAgents is loaded again at every login.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.paperswithbacktest.ibc-gateway</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/YOU/ibc/start-gateway-if-needed.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>15</integer></dict>
+  </array>
+  <!-- Gateway has windows: run it in the logged-in graphical session only -->
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/ibc/logs/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/ibc/logs/launchd.log</string>
+</dict>
+</plist>

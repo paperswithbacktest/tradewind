@@ -289,7 +289,8 @@ others (`books/latest-DATE-fresh/`).
 
 **Every trading day, evening:**
 
-1. TWS paper is open and logged in (it logs out once a day: log in again if needed).
+1. TWS paper is open and logged in (it logs out once a day: log in again if needed, or let
+   [IBC](keeping-ib-gateway-running.md) do it).
 2. `--propose`, then read `orders/DATE.md`: the data's date, the NAV, the gross and net
    exposure, each sleeve's units, the orders, the warnings.
 3. `--send` if it looks right. Market-on-open orders are accepted until shortly before the
@@ -409,7 +410,9 @@ sudo pmset repeat wakeorpoweron MTWRF 22:40:00     # optional: wake the Mac for 
 
 For an IBKR paper account, TWS or IB Gateway must be running and logged in at the time of the
 run (`BROKER=ibkr` in the wrapper); IB Gateway with its daily auto-restart is the usual choice
-on a machine without a screen.
+on a machine without a screen. [Keeping IB Gateway running](keeping-ib-gateway-running.md)
+starts and logs it in unattended with IBC (launchd and systemd examples), and handles the
+daily restart and the Sunday logout.
 
 ## Files
 
