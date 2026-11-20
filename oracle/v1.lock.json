@@ -1,0 +1,32 @@
+{
+ "version": "v1",
+ "label": "grand recalcul du 18 nov. 2026",
+ "repo": "paperswithbacktest/Tradewind-Oracle",
+ "revision": "4e70fed179f668462f7bdfb11c75a80e7ee61013",
+ "provenance": "oracle/v1.md",
+ "n_reference": 4199,
+ "n_bars": 33795798,
+ "files": {
+  "nav.parquet": {
+   "sha256": "de97270c89ed8f9cb7295858ed2aa984dbd1680a858c528e9421554a210c365d",
+   "bytes": 373392032
+  },
+  "manifest.parquet": {
+   "sha256": "40b7578a0ff80e1457f5b3abc81fa1f6de5da593f4219c9538ae7c96399af0c2",
+   "bytes": 401756
+  },
+  "hub_commits.json": {
+   "sha256": "ae4ebc5e543121dc8943e8831e6c523eb5ea21ff2f05853733931d9c1712fbf8",
+   "bytes": 1731825
+  },
+  "stats.json": {
+   "sha256": "34b7b2d583baac4cad72beb8fe5483812c9cf3e3321dc047e0403aad362f57a3",
+   "bytes": 1015
+  }
+ },
+ "papers_trees": {
+  "51945b907e5c6f34a0bcab3708141a17ebca83e8": 3519,
+  "fe89474c75ec386ec2340c1d2c4cfcda043eef60": 680
+ },
+ "papers_repo": "paperswithbacktest/papers"
+}
