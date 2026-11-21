@@ -333,9 +333,13 @@ class DailySession:
                                    self.meta.universe_max_age_days)
         if universe is not None and universe["old"]:
             alerts.append(Alert("universe_age", universe_message(universe)))
+        prices = None
+        if callable(getattr(provider, "price_report", None)) and getattr(provider, "fresh_prices", None):
+            with contextlib.suppress(Exception):    # a report line, never a reason to fail
+                prices = provider.price_report()
         if report is None:
             return self._finish(session, None, alerts, code, status, errors=errors, stale=stale,
-                                extra={"universe": universe})
+                                extra={"universe": universe, "prices": prices})
 
         alerts += check_day(report.row, report.sent, self.cfg)
         for x in report.skipped:
@@ -365,7 +369,7 @@ class DailySession:
             code, status = EXIT_ALERT, "alert"
         return self._finish(session, report, alerts, code, status, errors=errors, stale=stale,
                             extra={"reconciliation": recon, "fills": seen.get("fills", []), "cash": seen.get("cash"),
-                                   "universe": universe,
+                                   "universe": universe, "prices": prices,
                                    "sent_requested": self.send, "sent": bool(send) and report is not None},
                             phase="sent" if send else "proposed")
 
@@ -519,6 +523,7 @@ class DailySession:
             "stale_detail": stale_detail,
             "out_of_universe": list(report.out_of_universe) if report is not None else [],
             "universe": extra.get("universe"),
+            "prices": extra.get("prices"),
             "warnings": list(report.warnings) if report is not None else [],
             "borrow": dict(report.borrow) if report is not None else {},
             "reconciliation": extra.get("reconciliation", {}),
@@ -594,6 +599,28 @@ def out_of_universe_message(rows: list[dict]) -> str:
         + f"; books want {x['wanted_total']:+.4g}, held {x['held']:+g}, target {x['target']:+g}" for x in rows])
 
 
+def prices_line(p: dict) -> str:
+    """Who served the fresh prices: ``fresh prices (ibkr,alphavantage): 1 224 symbols, IB 1 199
+    (98.0%), AlphaVantage 21 (1.7%), stale 4 (0.3%); IB collection 41 s``."""
+    sh = p.get("shares") or {}
+
+    def pct(k):
+        v = sh.get(k)
+        return f" ({v:.1%})" if isinstance(v, float) and math.isfinite(v) else ""
+
+    ib = p.get("ib") or {}
+    if ib.get("error"):
+        tail = f"; IB not reached: {ib['error']}"
+    elif ib:
+        tail = (f"; IB collection {ib.get('seconds', 0):.0f} s ({ib.get('served', 0)}/{ib.get('asked', 0)} asked"
+                + (f", {ib.get('kept')} already cached" if ib.get("kept") else "") + ")")
+    else:
+        tail = ""
+    return (f"fresh prices ({','.join(p.get('sources') or [])}): {p.get('n', 0)} symbol(s), IB {p.get('ibkr', 0)}"
+            f"{pct('ibkr')}, AlphaVantage {p.get('alphavantage', 0)}{pct('alphavantage')}, stale {p.get('stale', 0)}"
+            f"{pct('stale')}{tail}")
+
+
 def render_markdown(d: dict) -> str:
     """The report of the day as Markdown."""
     p, t, o = d["portfolio"], d["tracking"], d["orders"]
@@ -624,6 +651,8 @@ def render_markdown(d: dict) -> str:
         md.append(f"- {universe_line(d['universe'])}, {len(d['universe']['sleeves'])} sleeve(s) on a "
                   f"point-in-time universe" + (f", **older than {d['universe']['max_age_days']:g} days**"
                                                if d["universe"]["old"] else ""))
+    if d.get("prices"):
+        md.append(f"- {prices_line(d['prices'])}")
     md.append("")
     md += ["## Alerts", ""]
     md += [f"- **{a['code']}**: " + a["message"].replace("\n", "\n  ") for a in d["alerts"]] or ["- none"]
@@ -734,5 +763,5 @@ if __name__ == "__main__":
 
 __all__ = ["EXIT_ALERT", "EXIT_BROKER", "EXIT_BUSY", "EXIT_FAILED", "EXIT_OK", "EXIT_STALE", "EXIT_USAGE", "Alert",
            "AlertConfig", "DailySession", "SessionResult", "check_day", "closed_session", "next_open",
-           "out_of_universe_message", "render_markdown", "skipped_message", "stale_message", "universe_line", "universe_message",
+           "out_of_universe_message", "prices_line", "render_markdown", "skipped_message", "stale_message", "universe_line", "universe_message",
            "universe_status"]

@@ -209,7 +209,7 @@ class AlphaVantage:
                  equity_function: str | None = None, get: Callable[[str], str] | None = None,
                  sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
                  retries: int = 4, throttle_rounds: int = 5, empty_retries: int = 3, empty_backoff: float = 5.0,
-                 log=print):
+                 log=print, grace: dict | None = None, wall: Callable[[], float] = time.time):
         self.key = key if key is not None else os.environ.get(KEY_ENV, "")
         self.rpm = float(rpm or os.environ.get(RPM_ENV) or 75)
         self.equity_function = equity_function or os.environ.get(FUNCTION_ENV) or "TIME_SERIES_DAILY_ADJUSTED"
@@ -221,6 +221,9 @@ class AlphaVantage:
         self.log = log
         self.calls = 0
         self._last_call: float | None = None
+        self.session = session
+        self.grace = dict(grace or {})          # minutes after the close before the day's bar is final
+        self.wall = wall                        # the time a file is written at (epoch seconds)
 
     # -- plumbing ----------------------------------------------------------------------------
     def _redact(self, text: str) -> str:
@@ -294,16 +297,49 @@ class AlphaVantage:
         return None
 
     # -- the bars ----------------------------------------------------------------------------
+    def _path(self, kind: str, symbol: str) -> str | None:
+        params = self._params(kind, symbol)
+        if params is None:
+            return None
+        return os.path.join(self.cache_dir, params["function"], re.sub(r"[^A-Za-z0-9._-]", "_", symbol) + ".json")
+
+    def _final(self, kind: str, frame: pd.DataFrame | None, fetched: float) -> pd.DataFrame | None:
+        """``frame`` without the session's bar when it was read before that bar is final
+        (``ib_prices.bar_complete_at``: the close plus the grace)."""
+        from .ib_prices import drop_unfinished
+
+        return drop_unfinished(frame, "equity" if kind == "equity" else kind, self.session, fetched, self.grace)
+
+    def cached(self, kind: str, symbol: str) -> pd.DataFrame | None:
+        """The bars already in the cache for ``symbol``, or None; never asks the API."""
+        path = self._path(kind, symbol)
+        if path is None or not os.path.exists(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        return None if "Error Message" in payload else self._final(kind, parse_daily(kind, payload),
+                                                                    os.path.getmtime(path))
+
     def daily(self, kind: str, symbol: str) -> pd.DataFrame | None:
         """The symbol's recent daily bars, or None when AlphaVantage does not know it.
         Raises ``FetchError`` when it could not be read (nothing is cached then). A share
         class written with a dot (``PBR.A``) is asked as ``PBR-A`` first (AlphaVantage's
-        way), then as it is."""
+        way), then as it is. The session's bar is kept only when the answer was read after
+        it is final (the close plus the grace); a cached answer read before is asked again
+        once that time has passed."""
+        from .ib_prices import bar_complete_at
+
         params = self._params(kind, symbol)
         if params is None:
             return None
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", symbol)
         path = os.path.join(self.cache_dir, params["function"], safe + ".json")
+        done = bar_complete_at(kind, self.session, self.grace) if kind in ("equity", "fx") else None
+        if done is not None and os.path.exists(path) and os.path.getmtime(path) < done <= self.wall():
+            os.remove(path)                         # read before the bar was final: ask again
         if os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 payload = json.load(fh)
@@ -323,9 +359,11 @@ class AlphaVantage:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
             os.replace(tmp, path)
+            stamp = self.wall()
+            os.utime(path, (stamp, stamp))          # the time it was read: the day's bar rule
         if "Error Message" in payload:
             return None
-        return parse_daily(kind, payload)
+        return self._final(kind, parse_daily(kind, payload), os.path.getmtime(path))
 
     def listing(self) -> dict[str, dict]:
         """AlphaVantage's ``LISTING_STATUS``, active and delisted, ``{symbol: row}`` (a delisted
@@ -557,7 +595,9 @@ class FreshPrices:
     are left as they are and it is listed (``stale``, ``stale_info``). ``tolerance``: by kind
     or symbol (``tolerance_for``). ``proxies``: ``{index: ETF}`` continued with the ETF's
     returns; ``approximate``: the indices whose proxy is chained although it does not track
-    them (``TRACKING_PROXIES``)."""
+    them (``TRACKING_PROXIES``). ``ib``: the bars the run collected from IB
+    (``ib_prices.IBPriceCache``), asked first for stocks, ETFs, forex and the indices it has;
+    ``av``: AlphaVantage is asked for what IB does not give (``False``: nothing else)."""
 
     client: AlphaVantage
     session: str
@@ -571,6 +611,11 @@ class FreshPrices:
     stale_info: dict = field(default_factory=dict)     # symbol -> {dataset, last, cause, reason}
     not_covered: dict = field(default_factory=dict)    # symbol -> dataset
     inactive: set = field(default_factory=set)
+    ib: object | None = None                           # ib_prices.IBPriceCache
+    av: bool = True
+    served: dict = field(default_factory=dict)         # symbol -> "ibkr" | "alphavantage"
+    ib_fallbacks: dict = field(default_factory=dict)   # symbol -> why IB did not serve it
+    crosscheck: dict = field(default_factory=dict)     # symbol -> {date, ib, av, gap}: both sources at hand
     _market: str | None = None
     _memo: dict = field(default_factory=dict)
     _listing: dict | None = None
@@ -578,14 +623,60 @@ class FreshPrices:
     @classmethod
     def from_env(cls, cache_dir: str, session: str | None = None, log=print, *, strict: bool = True,
                  tolerance: dict | None = None, proxies: dict | None = None, approximate=(),
-                 **client_kwargs) -> FreshPrices:
+                 sources=("alphavantage",), grace: dict | None = None, **client_kwargs) -> FreshPrices:
+        from .ib_prices import IBPriceCache
+
         session = session or last_close_session()
-        return cls(AlphaVantage(cache_dir, session, log=log, **client_kwargs), session, log=log, strict=strict,
-                   tolerance=dict(tolerance or {}), proxies=dict(proxies or {}), approximate=set(approximate))
+        sources = tuple(sources or ("alphavantage",))
+        ib = IBPriceCache(cache_dir, session, grace) if "ibkr" in sources else None
+        av_grace = {k: v for k, v in (grace or {}).items() if not k.startswith("av_")}
+        av_grace.update({k[3:]: v for k, v in (grace or {}).items() if k.startswith("av_")})
+        return cls(AlphaVantage(cache_dir, session, log=log, grace=av_grace, **client_kwargs), session, log=log,
+                   strict=strict, tolerance=dict(tolerance or {}), proxies=dict(proxies or {}),
+                   approximate=set(approximate), ib=ib, av="alphavantage" in sources)
+
+    def _ib(self, kind: str, symbol: str) -> pd.DataFrame | None:
+        """IB's bars for ``symbol`` when the run collected them and they reach the session."""
+        if self.ib is None:
+            return None
+        frame, why = self.ib.bars(kind, symbol)  # type: ignore[attr-defined]
+        if frame is None:
+            self.ib_fallbacks[symbol] = why
+        return frame
+
+    def _cross(self, kind: str, symbol: str, ib: pd.DataFrame) -> None:
+        """IB's last close against AlphaVantage's when AlphaVantage's answer is already in the
+        cache (never asked for it): logged, kept in the summary."""
+        av = self.client.cached(kind, symbol) if kind in ("equity", "fx") else None
+        if av is None or av.empty:
+            return
+        common = sorted(set(ib["date"]) & set(av["date"]))
+        if not common:
+            return
+        day = common[-1]
+        a = float(av.loc[av["date"] == day, "close"].iloc[-1])
+        b = float(ib.loc[ib["date"] == day, "close"].iloc[-1])
+        if not (a > 0 and b > 0):
+            return
+        gap = b / a - 1.0
+        self.crosscheck[symbol] = {"date": day, "ib": b, "av": a, "gap": gap}
+        if abs(gap) > TOLERANCE:
+            self.log(f"[prices] {symbol}: IB {b:g} against AlphaVantage {a:g} on {day} ({gap:+.2%})")
 
     def _bars(self, kind: str, symbol: str) -> pd.DataFrame | None:
         if (kind, symbol) not in self._memo:
-            self._memo[(kind, symbol)] = self.client.daily(kind, symbol)
+            bars = self._ib(kind, symbol) if kind in ("equity", "fx") else None
+            if bars is not None:
+                self.served[symbol] = "ibkr"
+                self._cross(kind, symbol, bars)
+            elif not self.av:
+                raise FetchError(f"IB did not serve it ({self.ib_fallbacks.get(symbol, 'not asked')}) and "
+                                 "alphavantage is not in --fresh-prices")
+            else:
+                bars = self.client.daily(kind, symbol)
+                if bars is not None:
+                    self.served[symbol] = "alphavantage"
+            self._memo[(kind, symbol)] = bars
         return self._memo[(kind, symbol)]
 
     def market_close(self) -> str:
@@ -633,6 +724,21 @@ class FreshPrices:
         """The indices behind, continued through their proxy ETF when they have one."""
         parts, replaced = [], set()
         for s in behind:
+            levels = self._ib("index", s) if repo == INDEX_REPO else None
+            if levels is not None:                  # IB's own levels (SPX, VIX): no proxy needed
+                new_rows, done = splice(frame[frame["symbol"] == s], levels, self.session,
+                                        tolerance=tolerance_for("index", s, self.tolerance))
+                done.source = "IB index"
+                self.splices[s] = done
+                if done.status == "filled":
+                    parts.append(new_rows)
+                    replaced.add(s)
+                    self.served[s] = "ibkr"
+                if done.last_after >= self.market_close():
+                    continue
+                if done.status == "refused":        # the levels disagree with the dataset's
+                    self._mark_stale(s, repo, done.last_after, "diverged", f"IB index levels: {done.reason}")
+                    continue
             proxy = self.proxies.get(s) if repo == INDEX_REPO else None
             if not proxy:
                 self.not_covered[s] = repo
@@ -745,6 +851,9 @@ class FreshPrices:
             "stale_info": dict(sorted(self.stale_info.items())),
             "not_covered": dict(sorted(self.not_covered.items())),
             "inactive": len(self.inactive),
+            "served": {src: sorted(s for s, v in self.served.items() if v == src) for src in ("ibkr", "alphavantage")},
+            "ib_fallbacks": dict(sorted(self.ib_fallbacks.items())),
+            "crosscheck": dict(sorted(self.crosscheck.items())),
             "splices": {name: asdict(done) for name, done in self.splices.items()},
         }
 
