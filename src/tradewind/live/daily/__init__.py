@@ -7,7 +7,8 @@ account (``aggregate``); the orders are proposed, and placed only on request
 (``runner``) on a simulated account or an IBKR **paper** account (``brokers``); the day is
 tracked against the backtest (``tracking``), and the shorts' borrow fee and availability are
 reported (``borrow``). The monthly price datasets can be completed up
-to the last close from AlphaVantage (``fresh``). Guide: ``docs/live-paper.md``.
+to the last close from IB (``ib_prices``, one read-only connection of the run's own) and from
+AlphaVantage (``fresh``). Guide: ``docs/live-paper.md``.
 
 Nothing here is imported by the backtest engine, and nothing needs more than numpy and
 pandas until an IBKR account (``ib_async``), a plot (matplotlib), a YAML file (PyYAML) or a

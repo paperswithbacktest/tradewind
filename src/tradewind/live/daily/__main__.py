@@ -8,10 +8,10 @@
     python -m tradewind.live.daily --meta meta.yaml --dir /tmp/sim --broker sim --send
     python -m tradewind.live.daily --meta meta.yaml --dir /tmp/replay --broker sim --replay 20
 
-    # the PWB price datasets are monthly: complete them up to the last close (AlphaVantage,
-    # key in ALPHAVANTAGE_API_KEY)
+    # the PWB price datasets are monthly: complete them up to the last close (IB first, on a
+    # read-only connection of its own; AlphaVantage for the rest, key in ALPHAVANTAGE_API_KEY)
     python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --propose \
-        --fresh-prices alphavantage
+        --fresh-prices ibkr,alphavantage
 
     # the whole day in one command, safe to repeat, for a scheduler (report, alerts, exit code)
     python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --broker sim --send
@@ -47,8 +47,10 @@ def parser() -> argparse.ArgumentParser:
                       help="simulated account only: run the last N closes, orders sent on the simulation")
     p.add_argument("--as-of", default=None, help="the close to trade from (default: the data's last close)")
     p.add_argument("--allow-stale", action="store_true", help="trade a sleeve whose last close is older")
-    p.add_argument("--fresh-prices", choices=["alphavantage", "none"], default=None,
-                   help="complete the monthly price datasets up to the last close (key in ALPHAVANTAGE_API_KEY)")
+    p.add_argument("--fresh-prices", default=None, metavar="SOURCES",
+                   help="complete the monthly price datasets up to the last close: ibkr,alphavantage (IB first, "
+                        "AlphaVantage for the rest), alphavantage, ibkr, or none (AlphaVantage's key in "
+                        "ALPHAVANTAGE_API_KEY)")
     g = p.add_argument_group("meta-portfolio overrides")
     g.add_argument("--capital", type=float)
     g.add_argument("--capital-currency", help="the currency of --capital / capital: USD, or the account's (default)")
@@ -76,6 +78,9 @@ def parser() -> argparse.ArgumentParser:
     i.add_argument("--port", type=int, default=7497, help="7497 TWS paper (default), 4002 IB Gateway paper")
     i.add_argument("--client-id", type=int, default=31)
     i.add_argument("--account", default="", help="DU... when the login manages several accounts")
+    i.add_argument("--ib-data-client-id", type=int, default=None,
+                   help="--fresh-prices ibkr: the client id of the read-only price connection (default the "
+                        "meta-portfolio's fresh_ib client_id, 957); never the account's --client-id")
     i.add_argument("--base-fx-rate", type=float, default=None,
                    help="an account whose currency is not USD: the price of 1 unit of it in USD (EURUSD), "
                         "the last resort after IB's own rate and PWB's forex series")
@@ -96,9 +101,12 @@ OVERRIDES = ("capital", "capital_currency", "account_currency", "leverage", "max
 
 
 def make_provider(args, meta: MetaPortfolio, directory: str) -> PwbProvider:
-    """The catalogue strategies' provider the command line asks for."""
+    """The catalogue strategies' provider the command line asks for (the IB price connection
+    on the account's host and port, its own client id)."""
     fresh = None if args.fresh_prices is None else ("" if args.fresh_prices == "none" else args.fresh_prices)
-    return PwbProvider(meta, os.path.join(directory, "books"), fresh_prices=fresh)
+    ib = {"host": args.host, "port": args.port, "client_id": args.ib_data_client_id,
+          "account_client_id": args.client_id if args.broker == "ibkr" else None}
+    return PwbProvider(meta, os.path.join(directory, "books"), fresh_prices=fresh, ib=ib)
 
 
 def make_borrow(meta: MetaPortfolio, broker: str):
@@ -164,6 +172,10 @@ def main(argv=None) -> int:
         print(f"account in {fx['currency']} ({fx['origin']}), {fx['rate']:.6g} USD per {fx['currency']} "
               f"({fx['source']}): NAV {r['nav_base']:,.2f} {fx['currency']}, gap {r['gap_cum_base']:+,.2f} "
               f"{fx['currency']}")
+    if callable(getattr(provider, "price_report", None)) and provider.fresh_prices:
+        from .session import prices_line
+
+        print(prices_line(provider.price_report()))
     for w in report.warnings:
         print("warning:", w)
     print("proposal:", report.proposal_md)

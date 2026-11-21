@@ -9,7 +9,10 @@ after each and a strategy that exits hard does not take the run down; the enviro
 has pwb-toolbox is ``python`` (``pwb_worker.py`` is what it executes). Books are cached per
 day in ``cache_dir``: a second run of the same day (propose, then send) reuses them. With
 ``fresh_prices="alphavantage"`` each strategy's price loads are completed up to the last
-close first (``fresh.py``). A symbol still stale is listed per sleeve (``stale``,
+close first (``fresh.py``); with ``"ibkr,alphavantage"`` the provider first collects the daily
+bars of every symbol the strategies are expected to load from IB, on one read-only connection
+of its own (``ib_prices.py``), and the strategies' workers read them from the session's cache,
+AlphaVantage giving the rest. A symbol still stale is listed per sleeve (``stale``,
 ``stale_info``) and the books are kept; the runner decides what to do with it
 (``stale_symbol_policy``). With ``stale_symbol_policy: block`` it stops the run
 (``StaleData``), as before. The last date of the point-in-time universe each sleeve loaded is
@@ -38,7 +41,17 @@ from .books import SleeveBook, record_books
 from .meta import MetaPortfolio
 from .runner import StaleData
 
-FRESH_SOURCES = ("alphavantage",)
+FRESH_SOURCES = ("alphavantage", "ibkr")
+
+
+def parse_sources(text: str | None) -> tuple[str, ...]:
+    """``"ibkr,alphavantage"`` -> ``("ibkr", "alphavantage")``: the fresh-price sources in the
+    order they are asked; ``""`` / ``"none"``: none. Raises ``ValueError`` on an unknown one."""
+    items = tuple(x.strip().lower() for x in str(text or "").split(",") if x.strip() and x.strip().lower() != "none")
+    bad = [x for x in items if x not in FRESH_SOURCES]
+    if bad or len(set(items)) != len(items):
+        raise ValueError(f"fresh_prices is a list of {FRESH_SOURCES} (in the order they are asked), not {text!r}")
+    return items
 
 
 def since_for(as_of: str | None, last_n: int) -> str:
@@ -98,16 +111,33 @@ class PwbProvider:
 
     def __init__(self, meta: MetaPortfolio, cache_dir: str, *, python: str | None = None,
                  papers_dir: str | None = None, timeout: float = 4 * 3600, log=print,
-                 fresh_prices: str | None = None, fresh_cache: str | None = None):
+                 fresh_prices: str | None = None, fresh_cache: str | None = None, ib: dict | None = None,
+                 ib_factory=None):
         self.meta = meta
-        self.fresh_prices = (fresh_prices if fresh_prices is not None else meta.fresh_prices) or None
-        if self.fresh_prices and self.fresh_prices not in FRESH_SOURCES:
-            raise ValueError(f"fresh_prices must be one of {FRESH_SOURCES}, not {self.fresh_prices!r}")
-        if self.fresh_prices:
+        self.fresh_sources = parse_sources(fresh_prices if fresh_prices is not None else meta.fresh_prices)
+        self.fresh_prices = ",".join(self.fresh_sources) or None
+        if "alphavantage" in self.fresh_sources:
             from .fresh import KEY_ENV
 
             if not os.environ.get(KEY_ENV):
                 raise RuntimeError(f"fresh prices from AlphaVantage need the key in {KEY_ENV}")
+        # the IB price connection: {host, port, client_id, account_client_id}; ib_factory(session,
+        # cache, **ib) -> an object with collect({symbol: kind}) (tests); default IBDailyPrices
+        self.ib = dict(ib or {})
+        self.ib_factory = ib_factory
+        self.ib_stats: dict = {}
+        self._ib_session: str | None = None
+        if "ibkr" in self.fresh_sources:
+            from .ib_prices import IBDataConfig
+
+            conf = IBDataConfig.from_dict(meta.fresh_ib)
+            if self.ib.get("client_id") is not None:
+                conf.client_id = int(self.ib["client_id"])
+            acct = self.ib.get("account_client_id")
+            if acct is not None and int(acct) == conf.client_id:
+                raise ValueError(f"the IB price connection's client id {conf.client_id} is the account's: give it "
+                                 "its own (--ib-data-client-id, fresh_ib client_id)")
+            self.ib_config = conf
         self.fresh_cache = fresh_cache or os.path.join(os.path.dirname(os.path.abspath(cache_dir)), "prices")
         self.fresh: dict[str, dict] = {}
         self.warnings: list[str] = []
@@ -136,7 +166,9 @@ class PwbProvider:
         if until:
             cmd += ["--until", until]
         if self.fresh_prices:
-            cmd += ["--fresh-prices", self.fresh_cache, "--fresh-config", json.dumps(self.meta.fresh_config())]
+            cmd += ["--fresh-prices", self.fresh_cache, "--fresh-config", json.dumps(self._fresh_config())]
+            if not until and self._ib_session:      # the session the IB bars were collected for
+                cmd += ["--session", self._ib_session]
         t0 = time.perf_counter()
         proc = subprocess.run(cmd, env=self._env(), capture_output=True, text=True, timeout=self.timeout,
                               check=False)
@@ -158,6 +190,67 @@ class PwbProvider:
             raise RuntimeError(f"{slug}: {payload['error']}")
         return payload
 
+    def _fresh_config(self) -> dict:
+        return dict(self.meta.fresh_config(), sources=list(self.fresh_sources))
+
+    def collect_ib(self, session: str | None) -> dict:
+        """The IB pre-collection of ``session`` (once per session and provider): the union of
+        the symbols the strategies are expected to load (``ib_prices.universe``) asked on one
+        read-only connection, written to the session's cache. An IB that cannot be reached is
+        a warning: AlphaVantage then serves every symbol."""
+        if "ibkr" not in self.fresh_sources:
+            return {}
+        from .fresh import last_close_session
+        from .ib_prices import IBDailyPrices, universe
+
+        session = session or last_close_session()
+        if self._ib_session == session:
+            return self.ib_stats
+        self._ib_session = session
+        extra = sorted({"SPY"} | {sub.symbol for sub in self.meta.substitutes.values() if sub.kind == "etf"}
+                       | set(self.meta.index_proxies.values()))
+        wanted = universe(self.fresh_cache, session, self.cache_dir, [s.slug for s in self.meta.sleeves], extra)
+        t0 = time.perf_counter()
+        try:
+            if self.ib_factory is not None:
+                collector = self.ib_factory(session, self.fresh_cache, config=self.ib_config, **self.ib)
+            else:
+                collector = IBDailyPrices(self.fresh_cache, session, host=self.ib.get("host", "127.0.0.1"),
+                                          port=int(self.ib.get("port", 4002)), config=self.ib_config,
+                                          account_client_id=self.ib.get("account_client_id"), log=self.log)
+            self.ib_stats = dict(collector.collect(wanted))
+        except Exception as exc:  # noqa: BLE001 - AlphaVantage takes over, said in the warnings
+            msg = f"IB prices not collected ({type(exc).__name__}: {exc}): AlphaVantage serves every symbol"
+            self.log(f"[prices] {msg}")
+            self.warnings.append(msg)
+            self.ib_stats = {"error": f"{type(exc).__name__}: {exc}"}
+        self.ib_stats.setdefault("seconds", round(time.perf_counter() - t0, 1))
+        self.ib_stats["candidates"] = len(wanted)
+        return self.ib_stats
+
+    def price_report(self) -> dict:
+        """Who served the fresh prices of the last ``books()`` (unique symbols over the
+        sleeves): IB, AlphaVantage, stale; and the IB collection's statistics."""
+        from .ib_prices import summarize
+
+        served: dict[str, set] = {"ibkr": set(), "alphavantage": set()}
+        stale: set = set()
+        fallbacks: dict[str, str] = {}
+        cross: dict[str, dict] = {}
+        for fresh in self.fresh.values():
+            for src, syms in (fresh.get("served") or {}).items():
+                served.setdefault(src, set()).update(syms)
+            stale.update(fresh.get("stale") or {})
+            fallbacks.update(fresh.get("ib_fallbacks") or {})
+            cross.update(fresh.get("crosscheck") or {})
+        out = summarize(served, stale)
+        gaps = sorted((abs(v["gap"]), s) for s, v in cross.items() if isinstance(v.get("gap"), (int, float)))
+        out.update(sources=list(self.fresh_sources), ib=dict(self.ib_stats),
+                   ib_fallbacks=len([s for s in fallbacks if s in served.get("alphavantage", set()) | stale]),
+                   crosscheck={"n": len(gaps), "max": (gaps[-1][1], gaps[-1][0]) if gaps else None,
+                               "over_0.5%": [s for g, s in gaps if g > 0.005]})
+        return out
+
     def _note_stale(self, slug: str, payload: dict) -> None:
         """A sleeve's books that came with stale symbols (not strict): listed, kept."""
         if payload.get("stale"):
@@ -167,8 +260,11 @@ class PwbProvider:
                      f"stale-symbol policy ({self.meta.stale_symbol_policy}): " + ", ".join(sorted(self.stale[slug])))
 
     def _note_fresh(self, slug: str, fresh: dict) -> None:
+        served = fresh.get("served") or {}
+        by = (f", {len(served.get('ibkr', []))} from IB, {len(served.get('alphavantage', []))} from AlphaVantage"
+              if served.get("ibkr") else "")
         msg = (f"[prices] {slug}: {fresh['filled']} symbol(s) completed to {fresh['last']} "
-               f"({fresh['requests']} AlphaVantage request(s)), largest gap of the chain factor "
+               f"({fresh['requests']} AlphaVantage request(s){by}), largest gap of the chain factor "
                f"{(fresh['max_spread'] or 0.0):.3%}")
         self.log(msg)
         if fresh.get("partial_last_bars"):
@@ -187,7 +283,7 @@ class PwbProvider:
                    "--start", start, "--end", end]
             if self.fresh_prices:
                 cmd += ["--fresh-prices", self.fresh_cache, "--session", end,
-                        "--fresh-config", json.dumps(self.meta.fresh_config())]
+                        "--fresh-config", json.dumps(self._fresh_config())]
             proc = subprocess.run(cmd, env=self._env(), capture_output=True, text=True, timeout=1800, check=False)
             if not os.path.exists(out):
                 raise RuntimeError(f"prices of {symbols}: nothing written (exit {proc.returncode}): "
@@ -210,6 +306,9 @@ class PwbProvider:
         os.makedirs(folder, exist_ok=True)
         out: dict[str, dict[str, SleeveBook]] = {}
         self.errors, self.stale, self.stale_info, self.universe_last = {}, {}, {}, {}
+        self.fresh = {}
+        if "ibkr" in self.fresh_sources:
+            self.collect_ib(until)
         failures: list[BaseException] = []
         for sleeve in self.meta.sleeves:
             try:
@@ -314,4 +413,4 @@ class ReplayProvider:
         return {slug: _cut(h, as_of, last_n) for slug, h in self.history.items()}
 
 
-__all__ = ["FRESH_SOURCES", "EngineProvider", "PwbProvider", "ReplayProvider", "since_for"]
+__all__ = ["FRESH_SOURCES", "EngineProvider", "PwbProvider", "ReplayProvider", "parse_sources", "since_for"]

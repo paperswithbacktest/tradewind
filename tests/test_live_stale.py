@@ -256,7 +256,7 @@ def test_the_meta_portfolio_options():
     m = MetaPortfolio([Sleeve("a", 1.0)], substitutes={"VIX": "VIXY"})
     assert m.stale_symbol_policy == "hold" and m.stale_symbol_max_weight == 0.2
     assert m.fresh_config() == {"strict": False, "tolerance": {}, "proxies": {"SPX": "SPY", "VIX": "VIXY"},
-                                "approximate": []}
+                                "approximate": [], "sources": ["alphavantage"], "grace": {}}
     m2 = MetaPortfolio([Sleeve("a", 1.0)], stale_symbol_policy="BLOCK", fresh_price_tolerance=0.01,
                        fresh_index_proxies={}, fresh_index_proxy_approximate=["VIX"])
     conf = m2.fresh_config()
@@ -267,7 +267,7 @@ def test_the_meta_portfolio_options():
         with pytest.raises(ValueError):
             MetaPortfolio([Sleeve("a", 1.0)], **bad)
     assert fresh_options(json.dumps(conf)) == {"strict": True, "tolerance": conf["tolerance"], "proxies": {},
-                                               "approximate": ["VIX"]}
+                                               "approximate": ["VIX"], "sources": ("alphavantage",), "grace": {}}
     assert fresh_options(None)["strict"] is True
 
 

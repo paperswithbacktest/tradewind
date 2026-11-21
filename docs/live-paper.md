@@ -64,6 +64,9 @@ stale_symbol_policy: hold  # a symbol still stale after the fresh-price top-up: 
 stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
 out_of_universe_policy: no_new # a name held outside a point-in-time universe: never bought live; follow
 universe_max_age_days: 35  # alert universe_age when the point-in-time universe ends longer ago than this
+fresh_prices: ibkr,alphavantage    # IB first, AlphaVantage for the rest ("Fresh prices")
+fresh_close_grace: {equity: 15, fx: 15}   # minutes after the close before the day's bar is taken
+fresh_ib: {client_id: 957}  # the read-only price connection: never the account's client id
 fresh_price_tolerance: {}  # by kind (equity, fx, fx_minor, crypto, index) or symbol ("Fresh prices")
 fresh_index_proxy_approximate: []   # indices continued with a proxy that does not track them
 sleeves:
@@ -274,9 +277,9 @@ report gives in the JSON (`rebate_rate`) but does not net.
 ```bash
 # after the US close (22:00 Paris); the monthly datasets completed to the close (below)
 export ALPHAVANTAGE_API_KEY=...
-python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --propose --fresh-prices alphavantage
+python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --propose --fresh-prices ibkr,alphavantage
 # read ~/pwb-paper/orders/DATE.md, then
-python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --send --fresh-prices alphavantage
+python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr --send --fresh-prices ibkr,alphavantage
 ```
 
 The second command reuses the books computed by the first (`books/DATE/`). The strategies
@@ -287,11 +290,67 @@ trades anyway, with a warning. `--as-of DATE` trades from a given close.
 ## Fresh prices
 
 The PWB daily price datasets are refreshed **once a month**, and the run refuses data more
-than 4 days older than the last session. `--fresh-prices alphavantage` (or
-`fresh_prices: alphavantage` in the meta-portfolio file) completes them up to the last
-close before the strategies compute their signals. Each strategy's price loads
-(`load_dataset` and so `get_pricing`) get the AlphaVantage bars that come after the dataset's
-last day, only for the symbols that strategy loads.
+than 4 days older than the last session. `--fresh-prices ibkr,alphavantage` (or
+`fresh_prices: ibkr,alphavantage` in the meta-portfolio file; `alphavantage` alone still
+works) completes them up to the last close before the strategies compute their signals. Each
+strategy's price loads (`load_dataset` and so `get_pricing`) get the bars that come after the
+dataset's last day, only for the symbols that strategy loads: IB's when the run has them,
+AlphaVantage's otherwise, symbol by symbol.
+
+### IB first
+
+Before the strategies run, the run itself (not the strategies' processes) opens **one**
+read-only connection to TWS / IB Gateway, on the account's host and port and on a client id of
+its own (`fresh_ib: {client_id: 957}` or `--ib-data-client-id`; the account's `--client-id` is
+refused). The same guards as the account apply: a paper port, every managed account `DU...`.
+It takes the union of the symbols the strategies are expected to load -- the last sessions'
+price caches and each sleeve's last cached book -- asks IB one daily request per symbol and
+writes the answers next to AlphaVantage's:
+
+| | |
+|---|---|
+| stocks, ETFs, ADRs | `Stock(symbol, "SMART", "USD")`, a share class with a space (`BRK.B` -> `BRK B`); `ADJUSTED_LAST`, `endDateTime=""`, regular hours, over `fresh_ib.duration` (`3 M`): one request gives the day's close (the raw close) and a history adjusted for splits and dividends, like `TIME_SERIES_DAILY_ADJUSTED`. Cache: `DIR/prices/SESSION/IB_ADJUSTED_LAST/SYMBOL.json` |
+| SPX, VIX | `Index(symbol, "CBOE")`, `TRADES`: the indices' real levels. The VIX no longer needs VIXY (or `fresh_index_proxy_approximate`) for its price; the proxy remains the fallback. `IB_TRADES/` |
+| spot forex | IDEALPRO `MIDPOINT` in IB's direction, turned into the book's (`JPYUSD` = 1 / `USD.JPY`). Until the paper user has the "IDEAL FX" market data (error 162 on 2026-11-21), every pair falls back on AlphaVantage; once it is shared, the same run serves them. BRL, CLP, IDR, INR and ISK have no IDEALPRO pair: never asked. `IB_MIDPOINT/` |
+| never IB | crypto, rates, commodities |
+
+The strategies' processes read those files and never connect. A symbol goes to AlphaVantage
+when its file is missing (a symbol no earlier run loaded), says an error -- 200 (no contract:
+a delisted name), 162 other than a pacing violation (no permission, no data), 354, 10089,
+10090 --, or has no final bar for the session. With `--fresh-prices ibkr` alone, those symbols
+stay stale instead.
+
+**Pacing.** Daily bars are not under IB's 60-requests-in-10-minutes rule (that one is for bars
+of 30 seconds or less): up to `fresh_ib.concurrency` (40) requests at a time, a pacing
+violation waits 10, 20, 40 then 80 s, each request is given `fresh_ib.timeout` (90 s). The
+contracts' conIds are kept in `DIR/prices/ib_conids.json` for a week (qualifying 1 200
+contracts took 48-76 s on 2026-11-21, their history 28-38 s); a conId IB no longer knows is
+qualified again. If IB cannot be reached, the day's warnings say so and AlphaVantage serves
+every symbol.
+
+**IB against AlphaVantage.** When both answers are at hand (AlphaVantage's already in the
+cache), the last common close is compared: the gap is in the worker's summary
+(`crosscheck`), and a gap above 0.5 % is logged. On 2026-11-20 the two agreed to the cent on
+the 19th for 99.7 % of 1 199 names; on the 20th only 50.1 % did, because AlphaVantage's bar of
+the day was not final at 21:47-22:01 UTC (it matched IB the next morning). IB's volume is not
+the consolidated volume (about 0.58 x AlphaVantage's); a load with `adjust=False` gets IB's
+adjusted closes for the days after the anchor (they differ from the raw ones only before an
+ex-date inside that window).
+
+**The day's bar.** A bar dated on the session is taken only if it was read after the close
+plus `fresh_close_grace` minutes -- stocks and indices 16:00 New York (early closes included)
+plus 15, forex 17:00 New York plus 15 -- for IB's bars and AlphaVantage's alike; otherwise the
+symbol has no bar for the session (IB: AlphaVantage is asked; AlphaVantage: the symbol is
+stale), and a rerun after that time asks again. `av_equity` / `av_fx` give AlphaVantage a
+grace of its own: 15 minutes would not have caught the provisional bars read at 21:47 UTC on
+2026-11-20 (47 minutes after the close); with IB first, AlphaVantage serves only the few
+symbols IB does not.
+
+The report of the day has one line on who served the prices:
+`fresh prices (ibkr,alphavantage): 1224 symbol(s), IB 1199 (98.0%), AlphaVantage 21 (1.7%),
+stale 4 (0.3%); IB collection 41 s (1199/1203 asked)`.
+
+### AlphaVantage, and the splice (both sources)
 
 | | |
 |---|---|
@@ -593,9 +652,12 @@ strategies built by a function), `ReplayProvider`, `SimAccount` / `IBPaperAccoun
 
 - Each strategy runs its full history every day. A small book takes seconds; a 2 000-name
   universe takes several minutes and a few GB. The strategies run one after the other.
-- Fresh prices cost one request per live symbol a session. A strategy that loads a
-  2 000-name universe makes up to ~2 000 requests, about 27 minutes at 75 a minute, the
-  first time in a session. The next strategies and the `--send` run read the cache.
+- Fresh prices from AlphaVantage alone cost one request per live symbol a session. A strategy
+  that loads a 2 000-name universe makes up to ~2 000 requests, about 27 minutes at 75 a
+  minute, the first time in a session; with `ibkr,alphavantage` IB serves them in a minute or
+  two and AlphaVantage only the rest. The next strategies and the `--send` run read the cache.
+- The symbols IB is asked for are those of the last sessions and of the sleeves' last books: a
+  symbol a strategy loads for the first time goes to AlphaVantage that day, to IB the next.
 - US stocks and ETFs, IDEALPRO spot forex against USD, and indices through a substitute.
   A strategy that trades another series that is not an instrument (spot commodities,
   reconstructed bond prices) needs a tradable variant first. Until then, exclude it or its

@@ -24,7 +24,13 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     borrow_check: false        # IBKR account: check the shortable tick of every short (read-only)
     borrow_source: auto        # the shorts' fee and availability: auto (hub, then IB), hub, ib, none
     borrow_fee_alert: 1.0      # % a year: a fee at or above it flags the short as hard to borrow
-    fresh_prices: alphavantage # complete the monthly price datasets up to the last close
+    fresh_prices: ibkr,alphavantage  # complete the monthly price datasets up to the last close:
+                               #   IB first (ib_prices.py), AlphaVantage for the rest; or alphavantage
+    fresh_close_grace:         # minutes after the close before the day's bar is taken (both
+      equity: 15               #   sources; av_equity / av_fx: AlphaVantage's alone)
+      fx: 15
+    fresh_ib:                  # the IB price connection (read-only, its own client id)
+      client_id: 957           #   never the account's; concurrency 40, timeout 90, duration "3 M"
     fresh_price_tolerance:     # the chain factor's largest move, by kind or symbol (fresh.py)
       fx_minor: 0.015          # defaults: equity 0.005, fx 0.005 (majors), fx_minor 0.015,
       CHGG: 0.01               #   crypto 0.005, index 0.01; a number: every kind
@@ -86,7 +92,9 @@ class MetaPortfolio:
     papers_dir: str = "~/dev/pwb/papers"
     python: str = ""
     exclude_symbols: list[str] = field(default_factory=list)
-    fresh_prices: str = ""              # "alphavantage": the price loads completed to the last close
+    fresh_prices: str = ""              # "alphavantage", "ibkr,alphavantage": the loads completed to the last close
+    fresh_close_grace: dict = field(default_factory=dict)  # {equity, fx, index, av_equity, av_fx: minutes}
+    fresh_ib: dict = field(default_factory=dict)            # ib_prices.IBDataConfig: client_id, concurrency...
     substitutes: dict = field(default_factory=dict)     # {index: Substitute | "ETF" | {...} | None}
     indices: list[str] = field(default_factory=list)   # more symbols that are indices (not tradable)
     notes: dict = field(default_factory=dict)          # {symbol: text} said while held or targeted
@@ -135,6 +143,15 @@ class MetaPortfolio:
             raise ValueError("universe_max_age_days is a number of calendar days, above 0")
         if not 0.0 <= self.stale_symbol_max_weight <= 1.0:
             raise ValueError("stale_symbol_max_weight is a fraction of a sleeve's gross, between 0 and 1")
+        if isinstance(self.fresh_prices, (list, tuple)):
+            self.fresh_prices = ",".join(str(x) for x in self.fresh_prices)
+        self.fresh_prices = ",".join(x.strip().lower() for x in str(self.fresh_prices or "").split(",") if x.strip())
+        self.fresh_close_grace = {str(k): float(v) for k, v in dict(self.fresh_close_grace or {}).items()}
+        if any(not 0.0 <= v <= 24 * 60 for v in self.fresh_close_grace.values()):
+            raise ValueError("fresh_close_grace: minutes after the close, between 0 and 1440")
+        from .ib_prices import IBDataConfig
+
+        IBDataConfig.from_dict(self.fresh_ib)           # checked here, used by the provider
         tol = self.fresh_price_tolerance
         if isinstance(tol, (int, float)) and not isinstance(tol, bool):
             from .fresh import DEFAULT_TOLERANCE
@@ -168,7 +185,9 @@ class MetaPortfolio:
     def fresh_config(self) -> dict:
         """What the strategies' workers need to complete their prices (``pwb_worker.py``)."""
         return {"strict": self.stale_symbol_policy == "block", "tolerance": dict(self.fresh_price_tolerance),
-                "proxies": self.index_proxies, "approximate": list(self.fresh_index_proxy_approximate)}
+                "proxies": self.index_proxies, "approximate": list(self.fresh_index_proxy_approximate),
+                "sources": [x for x in self.fresh_prices.split(",") if x] or ["alphavantage"],
+                "grace": dict(self.fresh_close_grace)}
 
     def is_index(self, symbol: str) -> bool:
         return is_index(symbol, self.indices)

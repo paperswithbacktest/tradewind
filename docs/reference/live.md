@@ -45,6 +45,8 @@ interface may change.
 
 ::: tradewind.live.daily.fresh
 
+::: tradewind.live.daily.ib_prices
+
 ::: tradewind.live.daily.brokers
 
 ::: tradewind.live.daily.instruments

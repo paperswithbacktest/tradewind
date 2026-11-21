@@ -12,9 +12,11 @@ prices that ``pwb_toolbox.datasets.get_pricing`` returns at that date (a replay 
 days; other datasets are not cut). The process ends with ``os._exit`` once the file is
 written: some strategies register exit hooks that would otherwise run.
 
-``--fresh-prices CACHE`` completes every price load with AlphaVantage's bars up to the last
-close (``fresh.py``). ``--fresh-config`` (JSON: ``strict``, ``tolerance``, ``proxies``,
-``approximate``, from ``MetaPortfolio.fresh_config``) says how. A symbol still stale is listed
+``--fresh-prices CACHE`` completes every price load up to the last close (``fresh.py``): with
+the bars the run collected from IB in that cache (``ib_prices.py``) when ``sources`` has
+``ibkr``, then AlphaVantage's. ``--fresh-config`` (JSON: ``strict``, ``tolerance``,
+``proxies``, ``approximate``, ``sources``, ``grace``, from ``MetaPortfolio.fresh_config``) says
+how; this process never connects to IB. A symbol still stale is listed
 in the file (``stale``, ``stale_info``); with ``strict`` (``stale_symbol_policy: block``) it
 stops the strategy and the file carries the list instead of books, otherwise the strategy runs
 on its rows as they are and the books are written with the list.
@@ -90,7 +92,8 @@ def fresh_options(text: str | None) -> dict:
     defaults)."""
     conf = json.loads(text) if text else {}
     return {"strict": bool(conf.get("strict", True)), "tolerance": dict(conf.get("tolerance") or {}),
-            "proxies": dict(conf.get("proxies") or {}), "approximate": list(conf.get("approximate") or [])}
+            "proxies": dict(conf.get("proxies") or {}), "approximate": list(conf.get("approximate") or []),
+            "sources": tuple(conf.get("sources") or ("alphavantage",)), "grace": dict(conf.get("grace") or {})}
 
 
 def main(argv=None) -> None:
