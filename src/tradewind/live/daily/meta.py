@@ -43,6 +43,12 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
                                    #   reduced or sold, never bought (default); follow: as the books say
     universe_max_age_days: 35      # alert universe_age when the point-in-time universe a sleeve
                                    #   uses ends more than this many days before the session
+    sleeve_error_policy: skip      # a sleeve in error (its run failed, too much of it stale, no
+                                   #   close for the session): skip (default) sets it aside for
+                                   #   the day -- what the account holds for it is kept, nothing
+                                   #   new -- and the others are proposed; block: nothing proposed
+    sleeve_error_max_weight: 0.5   # skip: when the sleeves in error weigh more than this part of
+                                   #   the summed weights, nothing is proposed after all
     sleeves:
       - {slug: protective_asset_allocation_paa_..., weight: 0.075}
       - {slug: decomposing_the_price_earnings_ratio, weight: 0.109,
@@ -64,6 +70,8 @@ REBALANCE = ("daily", "weekly", "monthly", "never")
 STALE_POLICIES = ("hold", "close", "block")
 #: what the run does with a name a sleeve holds outside its point-in-time universe (aggregate.py)
 OUT_OF_UNIVERSE_POLICIES = ("no_new", "follow")
+#: what the run does with a sleeve in error (runner.py)
+SLEEVE_ERROR_POLICIES = ("skip", "block")
 
 
 @dataclass
@@ -109,6 +117,8 @@ class MetaPortfolio:
     stale_symbol_max_weight: float = 0.2    # of a sleeve's gross: above it, the sleeve stays in error
     out_of_universe_policy: str = "no_new"  # no_new: never opened nor added to live; follow: the books
     universe_max_age_days: float = 35.0     # the point-in-time universe's last date may lag the session this much
+    sleeve_error_policy: str = "skip"   # skip: a sleeve in error is set aside for the day; block: nothing proposed
+    sleeve_error_max_weight: float = 0.5    # skip: above this part of the summed weights in error, nothing proposed
 
     def __post_init__(self):
         if self.rebalance not in REBALANCE:
@@ -137,6 +147,12 @@ class MetaPortfolio:
         if self.out_of_universe_policy not in OUT_OF_UNIVERSE_POLICIES:
             raise ValueError(f"out_of_universe_policy is one of {OUT_OF_UNIVERSE_POLICIES}, "
                              f"not {self.out_of_universe_policy!r}")
+        self.sleeve_error_policy = str(self.sleeve_error_policy or "skip").lower()
+        if self.sleeve_error_policy not in SLEEVE_ERROR_POLICIES:
+            raise ValueError(f"sleeve_error_policy is one of {SLEEVE_ERROR_POLICIES}, not {self.sleeve_error_policy!r}")
+        self.sleeve_error_max_weight = float(self.sleeve_error_max_weight)
+        if not 0.0 <= self.sleeve_error_max_weight <= 1.0:
+            raise ValueError("sleeve_error_max_weight is a fraction of the summed weights, between 0 and 1")
         self.stale_symbol_max_weight = float(self.stale_symbol_max_weight)
         self.universe_max_age_days = float(self.universe_max_age_days)
         if not self.universe_max_age_days > 0:
@@ -245,4 +261,5 @@ class MetaPortfolio:
         return cls.from_dict(d)
 
 
-__all__ = ["OUT_OF_UNIVERSE_POLICIES", "REBALANCE", "STALE_POLICIES", "MetaPortfolio", "Sleeve"]
+__all__ = ["OUT_OF_UNIVERSE_POLICIES", "REBALANCE", "SLEEVE_ERROR_POLICIES", "STALE_POLICIES", "MetaPortfolio",
+           "Sleeve"]

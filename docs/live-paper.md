@@ -61,7 +61,9 @@ borrow_check: false        # IBKR: read the shortable tick of every short before
 borrow_source: auto        # the shorts' fee and availability (below); auto is the default at IBKR
 borrow_fee_alert: 1.0      # % a year: a short whose fee is at or above it is hard to borrow
 stale_symbol_policy: hold  # a symbol still stale after the fresh-price top-up: hold, close, block
-stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
+stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols is in error
+sleeve_error_policy: skip  # a sleeve in error: set aside for the day, the others proposed; block
+sleeve_error_max_weight: 0.5   # skip: more of the summed weights in error and nothing is proposed
 out_of_universe_policy: no_new # a name held outside a point-in-time universe: never bought live; follow
 universe_max_age_days: 35  # alert universe_age when the point-in-time universe ends longer ago than this
 fresh_prices: ibkr,alphavantage    # IB first, AlphaVantage for the rest ("Fresh prices")
@@ -284,8 +286,31 @@ python -m tradewind.live.daily --meta meta.yaml --dir ~/pwb-paper --broker ibkr 
 
 The second command reuses the books computed by the first (`books/DATE/`). The strategies
 are not run again, and the day is not tracked twice. If a strategy's last close is older
-than the others', the run stops: the data are behind. Run it again later. `--allow-stale`
-trades anyway, with a warning. `--as-of DATE` trades from a given close.
+than the others', that sleeve is in error (below). `--allow-stale` trades it anyway, with a
+warning. `--as-of DATE` trades from a given close.
+
+### A sleeve in error
+
+A sleeve is *in error* for the day when its strategy's run fails (an exception, a timeout, no
+book written), when its data end before the session, or when more than
+`stale_symbol_max_weight` of its gross is on stale symbols ("Fresh prices"). What happens is
+the meta-portfolio's `sleeve_error_policy` (`--sleeve-error-policy`):
+
+| policy | the sleeve in error | the other sleeves | the day |
+|---|---|---|---|
+| `skip` (default) | set aside: it is given its book of the day before (as `state.json` kept it) at its units of the day before, so its part of the book is what the account holds for it -- no order comes from it, nothing new is bought for it. Neither the rebalance nor the gross cap moves its units (the cap scales the others). On a first day it has nothing. | proposed as on any day | proposed, alert `sleeve_skipped` (the sleeve, the cause, its weight), exit code 4 |
+| `block` | -- | -- | nothing proposed, exit code 3 (stale data) or 5 (a run that failed): the behaviour before this option |
+
+**The guard.** Under `skip`, when the sleeves in error weigh more than
+`sleeve_error_max_weight` (50 %) of the summed weights -- or when every sleeve is in error --
+nothing is proposed after all: exit code 3, alert `stale_prices` listing each sleeve, its
+weight and its cause. Run the day again later: the books that ran are cached.
+
+The day of a sleeve set aside is not in the backtest the run is tracked against (its NAV is
+held at the day before): what its lines earn or lose that day shows in the gap, under
+*residual*. The report's sleeve table says `skipped (holdings kept): CAUSE`, the summary ends
+with `N sleeve(s) skipped (X% of the weights)`, and `state.json` marks the sleeve
+(`skipped`) with the book it was given.
 
 ## Fresh prices
 
@@ -436,9 +461,11 @@ account): that freezes the substitute for every sleeve that trades it.
 
 **The guard.** A sleeve with more than `stale_symbol_max_weight` (20 %) of its gross on stale
 symbols -- each line counted at the larger of its position and its target, at the book's
-close -- stays in error: the run proposes nothing (exit code 3), the report gives the share
-and the symbols. A sleeve that only reads a stale index (SPX for the free-lunch sleeve,
-without a proxy) has no close at the session and stops the run the same way.
+close -- is in error: under `sleeve_error_policy: skip` (the default) it is set aside for the
+day and the others are proposed ("A sleeve in error"); under `block` the run proposes nothing
+(exit code 3). The report gives the share and the symbols. A sleeve that only reads a stale
+index (SPX for the free-lunch sleeve, without a proxy) has no close at the session and is in
+error the same way.
 
 The `stale_symbol` alert lists each symbol with its last bar, its cause and what was done
 (`held at +120, no order (the strategies' book wanted +0)`), and the report has a table of
@@ -523,9 +550,10 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 
 | alert | raised when |
 |---|---|
-| `stale_prices` | nothing proposed: a sleeve has no book at the session's close (data behind), more than `stale_symbol_max_weight` of a sleeve's gross is stale, or `stale_symbol_policy: block`; the report lists the symbols and the sleeves |
+| `stale_prices` | nothing proposed: the sleeves in error weigh more than `sleeve_error_max_weight` of the summed weights, or `sleeve_error_policy: block` and a sleeve has no book at the session's close (data behind) or more than `stale_symbol_max_weight` of its gross stale, or `stale_symbol_policy: block`; the report lists the symbols and the sleeves |
+| `sleeve_skipped` | proposed without a sleeve in error, set aside for the day under `sleeve_error_policy: skip` ("A sleeve in error"); one alert per sleeve with its weight, the cause and the lines kept for it |
 | `stale_symbol` | proposed anyway: symbols still stale after the fresh-price top-up, held or closed by `stale_symbol_policy` ("Fresh prices"); one line each with the last bar and the cause |
-| `run_failed` | a strategy or the run failed; every sleeve is still run, and those in error are listed |
+| `run_failed` | the run failed, or a strategy failed under `sleeve_error_policy: block`; every sleeve is still run, and those in error are listed |
 | `broker_unreachable` | the account cannot be opened or read (TWS / IB Gateway closed or logged out) |
 | `tracking_gap` | the cumulative gap to the backtest is above `--alert-gap` of the NAV (1 %), or the day's gap above `--alert-gap-day` (0.5 %) |
 | `daily_loss` | the day's loss is beyond `--alert-loss` of the previous NAV (3 %) |
@@ -542,8 +570,8 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 |---|---|
 | 0 | done, no alert (or nothing to do) |
 | 2 | usage: options, meta-portfolio file |
-| 3 | stale prices: nothing proposed; run it again later |
-| 4 | done, with alerts (stale symbols set aside and names held outside a universe included: proposed) |
+| 3 | stale prices, or too many sleeves in error: nothing proposed; run it again later |
+| 4 | done, with alerts (stale symbols and sleeves set aside, names held outside a universe included: proposed) |
 | 5 | the run failed |
 | 6 | the broker is unreachable |
 | 7 | another run holds the lock |

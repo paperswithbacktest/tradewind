@@ -18,7 +18,12 @@ One call does the whole day, in this order, and writes the report of the day:
    has answered, and a session in either state never sends again (an interrupted send is an
    alert, to be checked at the broker by hand).
 3. **Fresh prices, signals, proposal** -- ``DailyRunner.run_day`` on the session's close
-   (``as_of``): every sleeve must have that close, or the run stops on stale data.
+   (``as_of``). A sleeve in error (its run failed, too much of it stale, no close for the
+   session) is set aside for the day under ``sleeve_error_policy: skip`` (the default): what
+   the account holds for it does not move, nothing new is bought for it, the other sleeves are
+   proposed and a ``sleeve_skipped`` alert names it, with its cause and its weight. When the
+   sleeves in error weigh more than ``sleeve_error_max_weight`` (50 % by default) of the summed
+   weights, or under ``block``, nothing is proposed (stale data).
 4. **Send** only with ``--send``, before the market-on-open cut-off of the next session
    (09:28 New York); later, the orders would fill a day late, so they are proposed only and
    the run raises an alert.
@@ -30,9 +35,9 @@ One call does the whole day, in this order, and writes the report of the day:
    point-in-time universe the sleeves use, the alerts, and a one-line summary. The exit code says what happened (``EXIT_*`` below); an optional command
    (``--notify-cmd``) is run with the summary when there is an alert.
 
-Exit codes: 0 done (or nothing to do), 2 usage, 3 stale prices (nothing proposed), 4 done
-with alerts (proposed, stale symbols set aside included), 5 run failed, 6 broker unreachable,
-7 another run holds the lock.
+Exit codes: 0 done (or nothing to do), 2 usage, 3 stale prices or too many sleeves in error
+(nothing proposed), 4 done with alerts (proposed, stale symbols or sleeves set aside
+included), 5 run failed, 6 broker unreachable, 7 another run holds the lock.
 """
 
 from __future__ import annotations
@@ -125,7 +130,7 @@ class Alert:
     code: str           # stale_prices, run_failed, broker_unreachable, tracking_gap, daily_loss,
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
     #                     fills_mismatch, orders_working, notify_failed, symbol_watch, short_borrow,
-    #                     stale_symbol, out_of_universe, universe_age
+    #                     stale_symbol, out_of_universe, universe_age, sleeve_skipped
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -337,6 +342,8 @@ class DailySession:
                                 extra={"universe": universe, "prices": prices})
 
         alerts += check_day(report.row, report.sent, self.cfg)
+        for x in report.skipped:
+            alerts.append(Alert("sleeve_skipped", skipped_message(x)))
         if report.stale:
             alerts.append(Alert("stale_symbol", stale_message(report.stale)))
         capped = [x for x in report.out_of_universe if x["capped"]]
@@ -470,12 +477,14 @@ class DailySession:
         day_ret = change / (nav - change) if nav and nav - change else 0.0
         proposed = [{"symbol": o.symbol, "quantity": o.quantity, "reference_close": o.price,
                      "notional": o.notional, "current": o.current, "target": o.target} for o in plan.orders] if plan else []
+        skipped = {x["slug"]: x for x in (report.skipped if report is not None else [])}
         sleeves = []
         for s in self.meta.sleeves:
             info = (state_day.get("sleeves") or {}).get(s.slug, {})
             sleeves.append({"slug": s.slug, "weight": s.weight, "units": (plan.units.get(s.slug) if plan else None),
                             "close": info.get("date"), "nav": info.get("nav"),
-                            "error": errors.get(s.slug, ""), "stale": sorted(stale.get(s.slug, {}))})
+                            "error": errors.get(s.slug, ""), "stale": sorted(stale.get(s.slug, {})),
+                            "skipped": s.slug in skipped})
         stale_symbols = sorted({sym for v in stale.values() for sym in v})
         stale_detail = list(report.stale) if report is not None else []
         codes = sorted({a.code for a in alerts})
@@ -484,7 +493,10 @@ class DailySession:
             summary = (f"{session} {status.upper()} | NAV {nav:,.0f} ({day_ret:+.2%}) | gap to backtest "
                        f"{row.get('gap_cum', 0.0):+,.0f} ({(row.get('gap_cum', 0.0) / nav if nav else 0.0):+.2%}) | orders "
                        f"{len(proposed)} proposed, {len(sent)} sent, {len(fills)} filled | alerts: "
-                       f"{', '.join(codes) or 'none'}")
+                       f"{', '.join(codes) or 'none'}"
+                       + (f" | {len(skipped)} sleeve(s) skipped ("
+                          f"{sum(x['weight'] for x in skipped.values()) / (sum(self.meta.weights.values()) or 1.0):.0%}"
+                          " of the weights)" if skipped else ""))
         else:
             summary = (f"{session} {status.upper()} | no proposal | alerts: {', '.join(codes) or 'none'}"
                        + (f" | {len(stale_symbols)} stale symbol(s)" if stale_symbols else "")
@@ -506,6 +518,7 @@ class DailySession:
                        "skipped": len(plan.skipped) if plan else 0},
             "sleeves": sleeves,
             "sleeves_in_error": errors,
+            "sleeves_skipped": list(skipped.values()),
             "stale_symbols": stale_symbols,
             "stale_detail": stale_detail,
             "out_of_universe": list(report.out_of_universe) if report is not None else [],
@@ -529,6 +542,13 @@ class DailySession:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"command": self.notify_cmd, "error": f"{type(exc).__name__}: {exc}"}
         return {"command": self.notify_cmd, "exit": proc.returncode, "stderr": (proc.stderr or "")[-500:]}
+
+
+def skipped_message(x: dict) -> str:
+    """The ``sleeve_skipped`` alert of one sleeve: its weight, the cause, what is kept."""
+    kept = (f"{len(x['kept'])} line(s) kept as of {x['book_date']}" if x.get("kept") else "nothing held for it")
+    return (f"{x['slug']} (weight {x['weight']:.4f}) set aside for the day: {x['cause']}; {kept}, no order from it, "
+            "nothing new")
 
 
 def stale_message(rows: list[dict]) -> str:
@@ -638,7 +658,12 @@ def render_markdown(d: dict) -> str:
     md += [f"- **{a['code']}**: " + a["message"].replace("\n", "\n  ") for a in d["alerts"]] or ["- none"]
     md += ["", "## Sleeves", "", "| sleeve | weight | units | close | strategy NAV | status |", "|---|---:|---:|---|---:|---|"]
     for s in d["sleeves"]:
-        state = ("error: " + s["error"]) if s["error"] else ("stale: " + ", ".join(s["stale"][:10]) if s["stale"] else "ok")
+        if s.get("skipped"):
+            state = "skipped (holdings kept): " + s["error"]
+        elif s["error"]:
+            state = "error: " + s["error"]
+        else:
+            state = "stale: " + ", ".join(s["stale"][:10]) if s["stale"] else "ok"
         units = "" if s["units"] is None else f"{s['units']:.6g}"
         md.append(f"| `{s['slug']}` | {s['weight']:.4f} | {units} | {s['close'] or ''} | {money(s['nav'])} | {state} |")
     if d.get("stale_detail"):
@@ -738,5 +763,5 @@ if __name__ == "__main__":
 
 __all__ = ["EXIT_ALERT", "EXIT_BROKER", "EXIT_BUSY", "EXIT_FAILED", "EXIT_OK", "EXIT_STALE", "EXIT_USAGE", "Alert",
            "AlertConfig", "DailySession", "SessionResult", "check_day", "closed_session", "next_open",
-           "out_of_universe_message", "prices_line", "render_markdown", "stale_message", "universe_line", "universe_message",
+           "out_of_universe_message", "prices_line", "render_markdown", "skipped_message", "stale_message", "universe_line", "universe_message",
            "universe_status"]
