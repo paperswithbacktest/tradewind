@@ -46,6 +46,12 @@ they are (the behaviour before). The planned exact book (``Plan.exact``) is the 
 so the tracking counts what the strategies' backtests hold beyond it as *untraded* (planned
 against the backtests), not as rounding; ``Plan.out_of_universe`` keeps what they wanted. A
 stale symbol's policy applies after this one.
+
+**Sleeves set aside.** Under ``sleeve_error_policy: skip`` a sleeve in error for the day is
+given its book of the day before (``runner.py``) and its units are kept as they were
+(``kept``): neither the rebalance nor the gross cap moves them, so its part of the book is what
+the account holds for it -- no order comes from it, no new line. The gross cap then scales the
+other sleeves only.
 """
 
 from __future__ import annotations
@@ -177,12 +183,43 @@ def cap_outside(e_in: float, e_out: float, held: float) -> float:
     return e_in + sign * min(abs(e_out), room)
 
 
+def _free_scale(meta: MetaPortfolio, units: dict[str, float], kept: dict[str, float],
+                books: dict[str, SleeveBook], prices: dict[str, float], capital: float) -> float:
+    """The factor on the units not ``kept`` that brings the tradable book to the gross cap
+    (bisection: the kept sleeves' part is fixed, and netting makes the gross non-linear);
+    0 when the kept part alone is above the cap."""
+    fixed = {s: q for s, q in combine({k: v for k, v in units.items() if k in kept}, books).items()
+             if meta.tradable(s)}
+    free = {s: q for s, q in combine({k: v for k, v in units.items() if k not in kept}, books).items()
+            if meta.tradable(s)}
+    cap = meta.max_gross * capital
+
+    def g(f: float) -> float:
+        book = dict(fixed)
+        for s, q in free.items():
+            book[s] = book.get(s, 0.0) + f * q
+        return gross(book, prices)
+
+    if g(0.0) >= cap:
+        return 0.0
+    lo, hi = 0.0, 1.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if g(mid) <= cap else (lo, mid)
+    return lo
+
+
 def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[str, float], capital: float,
              date: str, units: dict[str, float] | None = None, last_reset: str | None = None,
-             weights_seen: dict[str, float] | None = None, frozen: dict[str, str] | None = None) -> Plan:
+             weights_seen: dict[str, float] | None = None, frozen: dict[str, str] | None = None,
+             kept: dict[str, float] | None = None) -> Plan:
     """The day's plan: units (kept or reset), exact and rounded targets, the orders.
-    ``frozen``: ``{symbol: "hold" | "close"}``, the stale symbols (module doc)."""
+    ``frozen``: ``{symbol: "hold" | "close"}``, the stale symbols (module doc). ``kept``:
+    ``{sleeve: units}`` of the sleeves set aside for the day (``sleeve_error_policy: skip``):
+    their units are neither reset nor scaled by the gross cap, so that their part of the book
+    (their book is the one of the day before) stays what the account holds for them."""
     prices = merged_prices(books)
+    kept = dict(kept or {})
     reason = ""
     if units is None:
         reason = "first run"
@@ -193,16 +230,25 @@ def plan_day(meta: MetaPortfolio, books: dict[str, SleeveBook], current: dict[st
     if reason:
         units = sleeve_units(meta, books, capital)
     assert units is not None
+    if kept:
+        units = dict(units, **kept)
     exact_all = combine(units, books)
     excluded = {s: q for s, q in exact_all.items() if not meta.tradable(s)}
     exact = {s: q for s, q in exact_all.items() if meta.tradable(s)}
     g = gross(exact, prices) / capital if capital > 0 else 0.0
     scale = 1.0
     if g > meta.max_gross:
-        scale = meta.max_gross / g
-        units = {k: v * scale for k, v in units.items()}
-        exact = {s: q * scale for s, q in exact.items()}
-        excluded = {s: q * scale for s, q in excluded.items()}
+        if kept:
+            scale = _free_scale(meta, units, kept, books, prices, capital)
+            units = {k: (v if k in kept else v * scale) for k, v in units.items()}
+            exact_all = combine(units, books)
+            excluded = {s: q for s, q in exact_all.items() if not meta.tradable(s)}
+            exact = {s: q for s, q in exact_all.items() if meta.tradable(s)}
+        else:
+            scale = meta.max_gross / g
+            units = {k: v * scale for k, v in units.items()}
+            exact = {s: q * scale for s, q in exact.items()}
+            excluded = {s: q * scale for s, q in excluded.items()}
         reason = (reason + "; " if reason else "") + f"gross cap {meta.max_gross:g} (book at {g:.2f})"
     target = {s: round_lot(q, meta.lot) for s, q in exact.items()}
     if meta.lot and capital > 0 and gross(target, prices) / capital > meta.max_gross + 1e-12:

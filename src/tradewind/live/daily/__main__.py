@@ -67,6 +67,9 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--out-of-universe-policy", choices=["no_new", "follow"],
                    help="a name a sleeve holds outside its point-in-time universe: no_new (kept, reduced or "
                         "sold, never bought; default) or follow (as the books say)")
+    g.add_argument("--sleeve-error-policy", choices=["skip", "block"],
+                   help="a sleeve in error: skip (set aside for the day, its holdings kept, the others "
+                        "proposed; default) or block (nothing proposed); default: the meta-portfolio's")
     g.add_argument("--lot", type=float)
     g.add_argument("--min-order", type=float, dest="min_order_notional")
     g.add_argument("--python", help="the Python that has pwb-toolbox")
@@ -92,7 +95,7 @@ def parser() -> argparse.ArgumentParser:
 #: the command-line options that override the meta-portfolio file
 OVERRIDES = ("capital", "capital_currency", "account_currency", "leverage", "max_gross", "rebalance", "lot",
              "min_order_notional", "python", "papers_dir", "borrow_source", "stale_symbol_policy",
-             "out_of_universe_policy")
+             "out_of_universe_policy", "sleeve_error_policy")
 
 
 def make_provider(args, meta: MetaPortfolio, directory: str) -> PwbProvider:

@@ -6,7 +6,14 @@ One call of ``DailyRunner.run_day`` after the US close:
    target book; the symbols still stale after the fresh-price top-up are put under the
    meta-portfolio's ``stale_symbol_policy`` (``hold`` by default: no order on them; ``close``:
    sold; ``block``: nothing proposed), and a sleeve with more than ``stale_symbol_max_weight``
-   of its gross on them stays in error (``StaleData``: nothing proposed);
+   of its gross on them is in error;
+   a sleeve in error (its run failed, too much of it stale, no close for the session) is
+   under ``sleeve_error_policy``: ``skip`` (the default) sets it aside for the day -- it is
+   given its book of the day before and its units are kept, so what the account holds for it
+   does not move and nothing new is bought for it -- and proposes the others
+   (``DayReport.skipped``); when the sleeves in error weigh more than
+   ``sleeve_error_max_weight`` of the summed weights, or under ``block``, nothing is proposed
+   (``StaleData``);
 2. the account settles the day (the simulated account fills yesterday's orders at today's
    open) and is read: positions, cash, NAV;
 3. the day is tracked against the backtest (``tracking.py``);
@@ -47,6 +54,11 @@ class StaleData(RuntimeError):
     """A strategy's last close is older than the day asked for."""
 
 
+class SleevesInError(StaleData):
+    """Too many sleeves are in error (``sleeve_error_max_weight``), or ``sleeve_error_policy``
+    is ``block``: nothing is proposed."""
+
+
 class AccountCurrencyError(RuntimeError):
     """The account's currency is not the one the meta-portfolio expects, or no rate converts
     it to the books' USD: nothing is sized."""
@@ -66,6 +78,7 @@ class DayReport:
     borrow: dict = field(default_factory=dict)  # the shorts' fee, availability and cost of carry (borrow.py)
     stale: list = field(default_factory=list)   # the stale symbols and what was done with them
     out_of_universe: list = field(default_factory=list)  # names held outside a PIT universe (aggregate.py)
+    skipped: list = field(default_factory=list)  # the sleeves set aside for the day (sleeve_error_policy: skip)
 
 
 def stale_share(book: SleeveBook, symbols) -> float:
@@ -121,13 +134,16 @@ class DailyRunner:
         return self._today or last_session()
 
     # -- one day ---------------------------------------------------------------------------------
-    def _stale_symbols(self, history: dict[str, dict[str, SleeveBook]], as_of: str | None) -> dict[str, dict]:
+    def _stale_symbols(self, history: dict[str, dict[str, SleeveBook]], as_of: str | None,
+                       skipped: dict[str, str] | None = None) -> dict[str, dict]:
         """The symbols the provider left stale, ``{symbol: {last, cause, reason, dataset,
         sleeves, shares, plan_symbol}}``, under the meta-portfolio's policy; raises
-        ``StaleData`` under ``block``, or when a sleeve has more than
-        ``stale_symbol_max_weight`` of its gross on them (that sleeve is put in error)."""
+        ``StaleData`` under ``block``. A sleeve with more than ``stale_symbol_max_weight`` of
+        its gross on them is put in error: added to ``skipped`` (``sleeve_error_policy:
+        skip``, its symbols then left out unless another sleeve has them), or ``StaleData``."""
         meta = self.meta
-        by_sleeve = {k: dict(v) for k, v in (getattr(self.provider, "stale", None) or {}).items() if v}
+        by_sleeve = {k: dict(v) for k, v in (getattr(self.provider, "stale", None) or {}).items()
+                     if v and k not in (skipped or {})}
         if not by_sleeve:
             return {}
         details = getattr(self.provider, "stale_info", None) or {}
@@ -164,7 +180,14 @@ class DailyRunner:
                 lines.append(msg)
                 if isinstance(errors, dict):
                     errors[slug] = msg
-            raise StaleData("\n".join(lines) + " (nothing is proposed)\n" + listing)
+            if skipped is None or meta.sleeve_error_policy != "skip":
+                raise StaleData("\n".join(lines) + " (nothing is proposed)\n" + listing)
+            for slug, _share, _names in over:
+                skipped[slug] = (errors or {}).get(slug) or lines[0]
+            for sym in list(out):
+                out[sym]["sleeves"] = [x for x in out[sym]["sleeves"] if x not in skipped]
+                if not out[sym]["sleeves"]:
+                    del out[sym]
         for sym, d in out.items():
             sub = meta.substitutes.get(sym)
             d["plan_symbol"] = sub.symbol if sub is not None else sym
@@ -190,16 +213,28 @@ class DailyRunner:
                                 f"{s} ({d['shares'].get(s, 0.0):.1%} of its gross)" for s in d["sleeves"]))
         return rows, warnings
 
-    def _pick(self, history: dict[str, dict[str, SleeveBook]], as_of: str | None):
+    def _pick(self, history: dict[str, dict[str, SleeveBook]], as_of: str | None,
+              skipped: dict[str, str] | None = None):
+        """The day, the books of the day and the warnings. With ``skipped`` (``sleeve_error_policy:
+        skip``) a sleeve without a book, or without the day's close, is added to it instead of
+        stopping the run."""
         warnings = []
         lasts = {slug: max(h) for slug, h in history.items() if h}
-        missing = [s.slug for s in self.meta.sleeves if s.slug not in history]
-        if missing:
+        missing = [s.slug for s in self.meta.sleeves if s.slug not in history and s.slug not in (skipped or {})]
+        if missing and skipped is None:
             raise RuntimeError(f"no book for {missing}: nothing is proposed while a sleeve is missing")
-        empty = [s.slug for s in self.meta.sleeves if s.slug not in lasts]
-        if empty:                                   # the strategies ran, the data end before
+        for slug in missing:
+            assert skipped is not None
+            skipped[slug] = "no book (the strategy's run returned none)"
+        empty = [s.slug for s in self.meta.sleeves if s.slug in history and s.slug not in lasts]
+        if empty and (skipped is None or not lasts):    # the strategies ran, the data end before
             raise StaleData(f"no close up to {as_of or 'the last session'} for {empty}: the data end earlier "
                             "(monthly datasets: --fresh-prices)")
+        for slug in empty:
+            assert skipped is not None
+            skipped[slug] = f"no close up to {as_of or 'the last session'}: the data end earlier"
+        if not lasts:
+            raise StaleData("no sleeve has a book: nothing is proposed")
         day = as_of or max(lasts.values())
         if as_of is None:
             behind = (_dt.date.fromisoformat(self.today()) - _dt.date.fromisoformat(day)).days
@@ -211,17 +246,72 @@ class DailyRunner:
                 warnings.append(msg)
         books = {}
         for slug, h in history.items():
+            if skipped is not None and slug in skipped:
+                continue
             dates = [d for d in h if d <= day]
             if not dates:
+                if skipped is not None:
+                    skipped[slug] = f"no close on or before {day}"
+                    continue
                 raise StaleData(f"{slug}: no close on or before {day}")
             last = max(dates)
             if last != day:
                 msg = f"{slug}: last close {last}, not {day}"
                 if not self.allow_stale:
+                    if skipped is not None:
+                        skipped[slug] = msg + " (the data are behind)"
+                        continue
                     raise StaleData(msg + " (the data are behind: rerun later, or pass allow_stale)")
                 warnings.append(msg)
             books[slug] = h[last]
         return day, books, warnings
+
+    def _check_skipped(self, skipped: dict[str, str]) -> float:
+        """The part of the summed weights in error; raises ``SleevesInError`` above
+        ``sleeve_error_max_weight``. The causes go to the provider's ``errors`` (the report's
+        sleeves in error)."""
+        errors = getattr(self.provider, "errors", None)
+        if isinstance(errors, dict):
+            for slug, why in skipped.items():
+                errors.setdefault(slug, why)
+        weights = self.meta.weights
+        total = sum(weights.values())
+        share = sum(weights.get(s, 0.0) for s in skipped) / total if total > 0 else 1.0
+        if share > self.meta.sleeve_error_max_weight or len(skipped) >= len(weights):
+            listing = "\n".join(f"  {s} (weight {weights.get(s, 0.0):.4f}): {why}" for s, why in sorted(skipped.items()))
+            raise SleevesInError(f"{len(skipped)} sleeve(s) in error, {share:.1%} of the summed weights, above "
+                                 f"sleeve_error_max_weight {self.meta.sleeve_error_max_weight:.0%} (nothing is "
+                                 f"proposed):\n{listing}")
+        return share
+
+    def _set_aside(self, skipped: dict[str, str], prev: dict | None, books: dict[str, SleeveBook],
+                   day: str) -> tuple[dict[str, SleeveBook], dict[str, float], list[dict]]:
+        """The books of the sleeves set aside: their book of the day before as the state kept it
+        (its target, or its positions for a state written before targets were kept; nothing on
+        a first day), priced at the day's closes of the other sleeves, else at the previous
+        closes. Returns those books, their units (kept as they were) and the report's rows."""
+        out: dict[str, SleeveBook] = {}
+        units: dict[str, float] = {}
+        rows: list[dict] = []
+        closes = dict((prev or {}).get("closes", {}))
+        closes.update(merged_prices(books, "close"))
+        opens = dict(closes)
+        opens.update(merged_prices(books, "open"))
+        weights = self.meta.weights
+        for slug in [s.slug for s in self.meta.sleeves if s.slug in skipped]:
+            info = ((prev or {}).get("sleeves") or {}).get(slug) or {}
+            book_of = dict(info.get("target", info.get("positions", {})) or {})
+            k = float(((prev or {}).get("units") or {}).get(slug, 0.0)) if info else 0.0
+            nav = float(info.get("nav", 0.0) or 0.0)
+            out[slug] = SleeveBook(date=str(info.get("date") or day), nav=nav, positions=dict(book_of),
+                                   target=dict(book_of),
+                                   open={x: opens[x] for x in book_of if x in opens},
+                                   close={x: closes[x] for x in book_of if x in closes})
+            units[slug] = k
+            rows.append({"slug": slug, "weight": weights.get(slug, 0.0), "cause": skipped[slug],
+                         "book_date": info.get("date") or "", "units": k,
+                         "kept": {x: k * q for x, q in book_of.items() if k * q}})
+        return out, units, rows
 
     def _substitute(self, history: dict[str, dict[str, SleeveBook]]):
         """The books with their indices replaced by the meta-portfolio's substitutes."""
@@ -411,9 +501,18 @@ class DailyRunner:
     def run_day(self, as_of: str | None = None, send: bool = False) -> DayReport:
         meta = self.meta
         history = self.provider.books(as_of, last_n=FROZEN_CLOSES + 1)
-        stale = self._stale_symbols(history, as_of)
+        skipped: dict[str, str] | None = None
+        if meta.sleeve_error_policy == "skip":
+            errors = getattr(self.provider, "errors", None) or {}
+            skipped = {s.slug: str(errors[s.slug]) for s in meta.sleeves if s.slug in errors}
+            history = {k: v for k, v in history.items() if k not in skipped}
+        stale = self._stale_symbols(history, as_of, skipped)
+        if skipped:
+            history = {k: v for k, v in history.items() if k not in skipped}
         history, sub_warnings, subs = self._substitute(history)
-        day, books, warnings = self._pick(history, as_of)
+        day, books, warnings = self._pick(history, as_of, skipped)
+        if skipped:
+            self._check_skipped(skipped)
         for sub in subs.values():
             sub.check_expiry(day)
         specs = {s.symbol: s.spec() for s in subs.values() if s.spec()}
@@ -423,6 +522,13 @@ class DailyRunner:
         state = self._load()
         earlier = sorted(d for d in state["days"] if d < day)
         prev = state["days"][earlier[-1]] if earlier else None
+        kept: dict[str, float] = {}
+        skipped_rows: list[dict] = []
+        if skipped:
+            aside, kept, skipped_rows = self._set_aside(skipped, prev, books, day)
+            books = {**books, **aside}              # the live books first: their prices win
+            for x in skipped_rows:
+                warnings.append(skipped_line(x))
         books_prev = {}
         if prev is not None:
             for slug, h in history.items():
@@ -463,7 +569,8 @@ class DailyRunner:
                         units=None if prev is None else prev["units"],
                         last_reset=None if prev is None else prev.get("last_reset"),
                         weights_seen=None if prev is None else prev.get("weights"),
-                        frozen={d["plan_symbol"]: meta.stale_symbol_policy for d in stale.values()})
+                        frozen={d["plan_symbol"]: meta.stale_symbol_policy for d in stale.values()},
+                        kept=kept)
         stale_rows, stale_warnings = self._stale_report(stale, plan, held)
         warnings += stale_warnings
         outside_rows = out_of_universe_rows(plan)
@@ -489,7 +596,7 @@ class DailyRunner:
             sent = self.account.place(plan.orders, day)
 
         report = DayReport(day, plan, row, sent, warnings=warnings, fx=fx, borrow=borrow, stale=stale_rows,
-                           out_of_universe=outside_rows)
+                           out_of_universe=outside_rows, skipped=skipped_rows)
         self._write_proposal(report, snap, books, capital)
 
         # the state of the day
@@ -498,7 +605,9 @@ class DailyRunner:
             "units": plan.units, "units_prev": {} if prev is None else prev["units"],
             "last_reset": day if plan.rebalanced else (prev or {}).get("last_reset", day),
             "weights": meta.weights, "held": held, "closes": closes,
-            "sleeves": {slug: {"nav": b.nav, "positions": b.positions, "date": b.date} for slug, b in books.items()},
+            "sleeves": {slug: dict({"nav": b.nav, "positions": b.positions, "target": b.target, "date": b.date},
+                                   **({"skipped": skipped[slug]} if skipped and slug in skipped else {}))
+                        for slug, b in books.items()},
             "exact": plan.exact, "planned": {} if prev is None else prev.get("exact", {}),
             "target": plan.target, "sent": bool(send),
             "account_currency": fx["currency"], "fx_rate": fx["rate"], "fx_source": fx["source"],
@@ -612,6 +721,14 @@ class DailyRunner:
         return [self.run_day(d, send=send) for d in dates]
 
 
+def skipped_line(x: dict) -> str:
+    """One sleeve set aside for the day: its weight, the cause, what is kept for it."""
+    kept = (f"its {len(x['kept'])} line(s) of {x['book_date']} kept at {x['units']:.6g} units"
+            if x["kept"] else "nothing held for it")
+    return (f"sleeve skipped: {x['slug']} (weight {x['weight']:.4f}): {x['cause']}; {kept}, no order from it, "
+            "nothing new")
+
+
 def out_of_universe_rows(plan) -> list[dict]:
     """The plan's names held outside a point-in-time universe, with the target kept (after a
     stale symbol's policy, which applies last)."""
@@ -638,5 +755,5 @@ def last_session(today: _dt.date | None = None) -> str:
     return day.isoformat()
 
 
-__all__ = ["AccountCurrencyError", "DailyRunner", "DayReport", "StaleData", "last_session", "out_of_universe_line",
-           "out_of_universe_rows", "stale_share"]
+__all__ = ["AccountCurrencyError", "DailyRunner", "DayReport", "SleevesInError", "StaleData", "last_session",
+           "out_of_universe_line", "out_of_universe_rows", "skipped_line", "stale_share"]

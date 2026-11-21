@@ -12,7 +12,9 @@ day in ``cache_dir``: a second run of the same day (propose, then send) reuses t
 close first (``fresh.py``). A symbol still stale is listed per sleeve (``stale``,
 ``stale_info``) and the books are kept; the runner decides what to do with it
 (``stale_symbol_policy``). With ``stale_symbol_policy: block`` it stops the run
-(``StaleData``), as before. The last date of the point-in-time universe each sleeve loaded is
+(``StaleData``), as before. A sleeve whose run fails is listed in ``errors``; under
+``sleeve_error_policy: skip`` (the default) the others' books are returned and the runner sets
+it aside, under ``block`` the call raises. The last date of the point-in-time universe each sleeve loaded is
 kept too (``universe_last``; the session's ``universe_age`` alert).
 
 ``ReplayProvider`` runs each strategy once up to ``until`` and serves every earlier day from
@@ -222,6 +224,11 @@ class PwbProvider:
                 self.log(f"[signal] {sleeve.slug}: ERROR {self.errors[sleeve.slug]}")
         if failures:
             text = "\n".join(str(e) for e in failures)
+            strict = any(isinstance(e, StaleData) for e in failures) and self.meta.stale_symbol_policy == "block"
+            if self.meta.sleeve_error_policy == "skip" and not strict:
+                # the runner sets the sleeves in error aside (self.errors) and proposes the
+                # others, unless they weigh too much (sleeve_error_max_weight)
+                return out
             if all(isinstance(e, StaleData) for e in failures):
                 raise StaleData(text)
             raise RuntimeError(f"{len(failures)} sleeve(s) in error (nothing is proposed):\n{text}")
