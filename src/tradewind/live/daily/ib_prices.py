@@ -35,7 +35,9 @@ symbols): 28-38 s of requests at 40-50 at a time, no pacing violation.
 
 **conIds.** Qualifying a contract costs more than its history (48-76 s against 28-38 s for
 1 200 symbols): the conIds are kept in ``CACHE/ib_conids.json`` and reused for
-``conid_max_age_days`` (7); a cached conId IB no longer knows (200) is qualified again.
+``conid_max_age_days`` (7); a cached conId IB no longer knows (200) is qualified again. A
+symbol IB has no contract for (a delisted name among the feeds a strategy reads) is kept too,
+and not asked again before that age.
 
 **The day's bar.** IB returns the bar still forming during the session. A bar dated D is kept
 only when the file was written after D's close plus a grace (``bar_complete_at``: stocks and
@@ -317,7 +319,8 @@ class IBDailyPrices:
         except (OSError, ValueError):
             return {}
         horizon = self.clock() - 86400.0 * self.config.conid_max_age_days
-        return {k: v for k, v in table.items() if float(v.get("ts", 0.0)) >= horizon and v.get("conId")}
+        return {k: v for k, v in table.items()
+                if float(v.get("ts", 0.0)) >= horizon and (v.get("conId") or v.get("missing"))}
 
     def _save_conids(self, table: dict) -> None:
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -399,17 +402,24 @@ class IBDailyPrices:
         conids = self._load_conids()
         specs = {s: ib_local(s, k) for s, k in wanted.items()}
         key = {s: f"{sp['sec']}:{sp['symbol']}" for s, sp in specs.items()}
-        contracts = {s: self._contract(specs[s], int(conids.get(key[s], {}).get("conId", 0))) for s in wanted}
+        missing = {s for s in wanted if conids.get(key[s], {}).get("missing")}     # no contract, known
+        contracts = {s: self._contract(specs[s], int(conids.get(key[s], {}).get("conId", 0) or 0))
+                     for s in wanted if s not in missing}
         fresh = [c for s, c in contracts.items() if not getattr(c, "conId", 0)]
         await self._qualify(fresh)
         t_qualify = self.clock() - t0
         for s, c in contracts.items():
             if getattr(c, "conId", 0) and key[s] not in conids:
                 conids[key[s]] = {"conId": int(c.conId), "ts": self.clock()}
+            elif not getattr(c, "conId", 0) and any(code == 200 for code, _ in self._errors.get(id(c), [])):
+                conids[key[s]] = {"conId": 0, "missing": True, "ts": self.clock()}   # asked again in a week
         sem = asyncio.Semaphore(self.config.concurrency)
         results: dict[str, _Result] = {}
 
         async def one(sym: str) -> None:
+            if sym in missing:
+                results[sym] = _Result(code=200, error="no contract at IB (conId cache: no security definition)")
+                return
             c = contracts[sym]
             if not getattr(c, "conId", 0):
                 errs = self._errors.get(id(c), [])
@@ -448,7 +458,8 @@ class IBDailyPrices:
                 label = "pacing" if "pacing" in (res.error or "").lower() else str(res.code or "none")
                 codes[label] = codes.get(label, 0) + 1
         return {"asked": len(wanted), "served": served, "fallback": len(wanted) - served, "errors": codes,
-                "qualified": len(fresh), "conid_cache": len(wanted) - len(fresh),
+                "qualified": len(fresh), "conid_cache": len(wanted) - len(fresh) - len(missing),
+                "known_missing": len(missing),
                 "retries": sum(r.retries for r in results.values()),
                 "seconds_qualify": round(t_qualify, 1), "seconds": round(self.clock() - t0, 1)}
 

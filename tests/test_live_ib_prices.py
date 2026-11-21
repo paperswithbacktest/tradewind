@@ -276,6 +276,13 @@ def test_the_conids_are_kept_and_a_stale_one_is_qualified_again(tmp_path):
     assert stats["served"] == 2
     with open(tmp_path / "prices" / "ib_conids.json") as fh:
         assert json.load(fh)["STK:HD"]["conId"] == 22
+    # a symbol without a contract is not qualified again the next session
+    ib4 = StubIB({("STK", "AAPL"): 1}, {1: [bars(AAPL)]})
+    collector(tmp_path / "m", ib4).collect({"AAPL": "equity", "KVUE": "equity"})
+    ib5 = StubIB({("STK", "AAPL"): 1}, {1: [bars(AAPL)]})
+    st = collector(tmp_path / "m", ib5, session=nxt, clock=AFTER + 86400).collect({"AAPL": "equity", "KVUE": "equity"})
+    assert ib5.qualified == [] and st["known_missing"] == 1
+    assert read(tmp_path / "m", "IB_ADJUSTED_LAST", "KVUE", nxt)["code"] == 200
     # a week later the table is too old: everything is qualified again
     ib3 = StubIB({("STK", "AAPL"): 1}, {1: [bars(AAPL)]})
     collector(tmp_path, ib3, session="2026-11-27", clock=AFTER + 9 * 86400).collect({"AAPL": "equity"})
