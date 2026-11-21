@@ -309,7 +309,8 @@ def test_a_sleeve_behind_the_others_stops_the_run(tmp_path):
             return hist
 
     account = SimAccount(str(tmp_path / "s.json"))
-    runner = DailyRunner(_meta(), Fixed(), account, str(tmp_path / "st"), today=UNTIL, log=lambda *a: None)
+    runner = DailyRunner(_meta(sleeve_error_policy="block"), Fixed(), account, str(tmp_path / "st"), today=UNTIL,
+                         log=lambda *a: None)
     with pytest.raises(StaleData, match="momentum"):
         runner.run_day()
     report = DailyRunner(_meta(), Fixed(), account, str(tmp_path / "st2"), allow_stale=True, today=UNTIL,

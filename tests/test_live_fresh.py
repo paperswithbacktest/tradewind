@@ -327,7 +327,8 @@ def test_last_close_session_waits_for_the_new_york_close():
 # -- the provider --------------------------------------------------------------------------------
 def test_a_stale_worker_stops_the_run_and_nothing_is_cached(tmp_path, monkeypatch):
     monkeypatch.setenv("ALPHAVANTAGE_API_KEY", KEY)
-    meta = MetaPortfolio([Sleeve("s1", 1.0, path=str(tmp_path / "strategy.py"))], fresh_prices="alphavantage")
+    meta = MetaPortfolio([Sleeve("s1", 1.0, path=str(tmp_path / "strategy.py"))], fresh_prices="alphavantage",
+                         stale_symbol_policy="block")           # strict: the worker stops on a stale symbol
     (tmp_path / "strategy.py").write_text("")
     seen = {}
 

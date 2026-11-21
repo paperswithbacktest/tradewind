@@ -366,7 +366,8 @@ def test_block_proposes_nothing(tmp_path):
 
 
 def test_a_sleeve_with_too_much_of_its_gross_stale_stays_in_error(tmp_path):
-    runner, provider, d2, (sym,) = two_days(tmp_path, _meta(), held_by_momentum)     # max weight 0.2
+    runner, provider, d2, (sym,) = two_days(tmp_path, _meta(sleeve_error_policy="block"),
+                                            held_by_momentum)                           # max weight 0.2
     with pytest.raises(StaleData, match="above stale_symbol_max_weight 20%"):
         runner.run_day(d2, send=False)
     assert "momentum" in provider.errors and sym in provider.errors["momentum"]
@@ -425,6 +426,7 @@ def test_the_session_proposes_with_a_stale_symbol_alert(tmp_path):
         md = fh.read()
     assert "## Stale symbols" in md and "| symbol | last bar | cause |" in md and "`momentum`" in md
 
-    over = session(tmp_path, WithStale(replay, {"momentum": {sym: "stale"}}, info), _meta(), d, name="over")
+    over = session(tmp_path, WithStale(replay, {"momentum": {sym: "stale"}}, info),
+                   _meta(sleeve_error_policy="block"), d, name="over")
     assert over.code == EXIT_STALE and "momentum" in over.report["sleeves_in_error"]
     assert not over.report["orders"]["proposed"] and over.report["stale_symbols"] == [sym]
