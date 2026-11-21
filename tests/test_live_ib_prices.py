@@ -520,3 +520,9 @@ def test_the_report_says_who_served_the_prices():
                               "(1.7%), stale 4 (0.3%); IB collection 41 s (1199/1203 asked)")
     down = dict(p, ib={"error": "ConnectionRefusedError: refused"})
     assert prices_line(down).endswith("; IB not reached: ConnectionRefusedError: refused")
+
+
+def test_a_relative_run_directory_is_made_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    provider = PwbProvider(MetaPortfolio([Sleeve("a", 1.0)]), "run/books", log=lambda *a: None)
+    assert provider.cache_dir == str(tmp_path / "run" / "books") and os.path.isabs(provider.fresh_cache)

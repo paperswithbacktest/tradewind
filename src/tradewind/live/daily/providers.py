@@ -141,7 +141,8 @@ class PwbProvider:
         self.fresh_cache = fresh_cache or os.path.join(os.path.dirname(os.path.abspath(cache_dir)), "prices")
         self.fresh: dict[str, dict] = {}
         self.warnings: list[str] = []
-        self.cache_dir = cache_dir
+        # absolute: the worker changes its directory to the papers' before writing its book
+        self.cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
         self.python = os.path.expanduser(python or meta.python or sys.executable)
         self.papers_dir = os.path.expanduser(papers_dir or meta.papers_dir)
         self.timeout = timeout
