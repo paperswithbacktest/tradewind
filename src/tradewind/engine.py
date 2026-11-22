@@ -12,6 +12,7 @@ the event bus delivers the notifications, the strategy steps, analyzers step.
 
 from __future__ import annotations
 
+from . import indicator as _indicator
 from .broker import BackBroker
 from .clock import Phase, UnionClock
 from .dateutils import num2date
@@ -610,6 +611,7 @@ class Engine(ParamsBase):
             if original is not None:
                 original(obj)
             env._building = obj
+            _indicator._BUILDING.append(obj)
 
         # MetaParams calls cls._tw_before_init(obj) before __init__; install the binding
         # on a throwaway subclass so the user's class is untouched.
@@ -623,6 +625,7 @@ class Engine(ParamsBase):
                 strat = bound(*args, **skwargs)
         finally:
             env._building = None
+            _indicator._BUILDING.clear()
             reset_construction()
         strat.__class__ = cls
         env._building = None

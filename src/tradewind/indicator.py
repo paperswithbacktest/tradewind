@@ -97,6 +97,11 @@ def reset_construction() -> None:
     _CONSTRUCTING.clear()
 
 
+# the strategy whose ``__init__`` is running (set by the engine): the owner of an indicator
+# built there with no input
+_BUILDING: list = []
+
+
 class Indicator(LineArithmetic, ParamsBase):
     lines: tuple = ()
     plotinfo: ClassVar[dict] = {}
@@ -114,6 +119,14 @@ class Indicator(LineArithmetic, ParamsBase):
     def _tw_consume_args(self, *inputs):
         """Bind the input lines before the user's ``__init__`` runs; nothing is passed on,
         so a corpus indicator written as ``def __init__(self)`` works."""
+        if not inputs:
+            # Observed on the oracle (probe ``indicator_no_input``): an indicator built with
+            # no input reads its owner's first feed -- the indicator building it, else the
+            # strategy -- and follows that feed's clock, even when ``next`` never reads it.
+            owner = _CONSTRUCTING[-1] if _CONSTRUCTING else (_BUILDING[-1] if _BUILDING else None)
+            datas = getattr(owner, "datas", None) or []
+            if datas:
+                inputs = (datas[0],)
         self.datas = list(inputs)
         self.data = self.datas[0] if self.datas else None
         for i, d in enumerate(self.datas):

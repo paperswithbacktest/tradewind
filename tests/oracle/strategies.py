@@ -1712,6 +1712,74 @@ def build(bt):
             self.extra["rows"].append((n, self.datas[0].close[0], repr(self.broker.getvalue()),
                                        repr(self.broker.get_value(datas=[self.datas[0]]))))
 
+    class CreatedPrice(Recorder):
+        """``order.created.price`` / ``.pricelimit`` of every kind of order (parity 0.1.54):
+        pwb-toolbox reads ``created.price`` as the price a market order was sized on."""
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self._n = getattr(self, "_n", 0) + 1
+            n, d = self._n, self.datas[0]
+            if n == 2:
+                self.buy(data=d, size=1)
+            if n == 3:
+                self.buy(data=d, size=1, exectype=bt.Order.Limit, price=round(d.close[0] * 0.99, 2))
+            if n == 4:
+                self.sell(data=d, size=1, exectype=bt.Order.Stop, price=round(d.close[0] * 0.97, 2))
+            if n == 5:
+                self.order_target_size(data=self.datas[1], target=5)
+            if n == 6:
+                self.buy(data=d, size=1, price=99.0)
+            if n == 7:
+                self.close(data=self.datas[1])
+            if n == 8:
+                self.buy(data=d, size=1, exectype=bt.Order.StopLimit, price=round(d.close[0] * 1.2, 2),
+                         plimit=round(d.close[0] * 1.21, 2))
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            if order.status == order.Submitted:
+                self.extra["rows"].append((order.ref - self._first_ref(order), order.data._name,
+                                           repr(order.created.price), repr(order.created.pricelimit)))
+
+        def _first_ref(self, order):
+            if not hasattr(self, "_ref0"):
+                self._ref0 = order.ref
+            return self._ref0
+
+    class NoInputConstant(bt.Indicator):
+        lines = ("r",)
+        params = (("k", 0.25),)
+
+        def next(self):
+            self.lines.r[0] = self.p.k + len(self)
+
+    class NoInputClose(bt.Indicator):
+        lines = ("q",)
+
+        def next(self):
+            self.lines.q[0] = self.data.close[0]
+
+    class IndicatorNoInput(Recorder):
+        """An indicator built with no input (parity 0.1.54, corpus
+        ``trend_following_algorithms_on_india_s_nifty_index``): it follows the strategy's
+        first feed, whether its ``next`` reads it or not."""
+
+        def __init__(self):
+            super().__init__()
+            self.konst = NoInputConstant(k=0.5)
+            self.close0 = NoInputClose()
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self.extra["rows"].append((len(self), len(self.konst), self.konst.r[0], len(self.close0),
+                                       self.close0.q[0]))
+
     return {
         "levered_negative_close": LeveredNegativeClose,
         "slippage_perc": SlippagePerc,
@@ -1774,4 +1842,6 @@ def build(bt):
         "bracket_batch": BracketBatch,
         "bracket_batch_unchecked": BracketBatchUnchecked,
         "position_by_name": PositionByName,
+        "created_price": CreatedPrice,
+        "indicator_no_input": IndicatorNoInput,
     }

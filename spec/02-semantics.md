@@ -185,6 +185,18 @@ by `cash + t`, `t` summing **each long's entry value then its open P&L** in firs
 order, on 307 of the 335 bars (99 for the current `size * close` terms) -- a lead, not
 adopted: it changes the mark of every long book and needs the full corpus parity.
 
+### Parity 0.1.54 (2026-11-22)
+
+Campaign of the whole catalogue on pwb-toolbox 0.1.54, both engines in one environment, one
+frozen papers tree, every dataset pinned to one revision, seed 0 (spec/12). Divergences
+isolated with order logs of both engines (every notification, cash and value as hex floats)
+and scratch probes on the oracle, then kept as probes in `tests/oracle/strategies.py`:
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| `order.created.price` is the order's price, else the **close of its feed when the order is made** (market, close, target orders); `created.pricelimit` is `plimit`, else that same price | kept | probe `created_price`. pwb-toolbox's fill-gap audit divides the open by `created.price`: at 0.0 it gave no gap, the harness did not re-run the strategy at a reduced exposure as it did on the oracle (`absolute_momentum_a_simple_rule…`, `reconsidering_returns`, `how_to_use_gold_as_a_safe_haven` and three more: the first run identical, the published second run sized one share apart) |
+| An indicator built with **no input** (`Konst(k=0.5)`) reads its owner's first feed -- the indicator building it, else the strategy -- and follows that feed's clock even when its `next` never reads it | kept | probe `indicator_no_input`; corpus `trend_following_algorithms_on_india_s_nifty_index` (`IndexError` on Tradewind: a constant cash-rate indicator with no data had no bars) |
+
 ## Clock and bars
 
 | behaviour | kept / corrected | note |

@@ -48,6 +48,14 @@ class OrderData:
         self.dt = dt
 
 
+def _close_now(data) -> float:
+    """The close a feed shows now, 0.0 before its first bar (or for a non-feed)."""
+    try:
+        return float(data.close[0]) if len(data) else 0.0
+    except (AttributeError, IndexError, TypeError):
+        return 0.0
+
+
 class Order:
     # execution types
     Market, Close, Limit, Stop, StopLimit, StopTrail, StopTrailLimit, Historical = range(8)
@@ -79,7 +87,12 @@ class Order:
         self.ordtype = ordtype if ordtype is not None else (Order.Buy if size > 0 else Order.Sell)
         self.tradeid = tradeid
         self.status = Order.Created
-        self.created = OrderData(size=size, price=price or 0.0, pricelimit=plimit or 0.0, remsize=size)
+        # Observed on the oracle (probe ``created_price``): ``created.price`` is the order's
+        # price, else the close of its feed when the order is made; ``created.pricelimit`` is
+        # ``plimit``, else that same price. pwb-toolbox sizes its fill-gap audit on it.
+        cprice = price if price is not None else _close_now(data)
+        self.created = OrderData(size=size, price=cprice, pricelimit=plimit if plimit is not None else cprice,
+                                 remsize=size)
         self.executed = OrderData(remsize=size)
         self.info = dict(info or {})
         self.info.update(kwargs)
