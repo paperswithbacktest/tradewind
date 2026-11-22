@@ -16,6 +16,7 @@ from .broker import BackBroker
 from .clock import Phase, UnionClock
 from .dateutils import num2date
 from .events import CorporateActionEvent, OrderEvent, TradeEvent, UniverseEvent
+from . import indicator as _indicator
 from .indicator import reset_construction
 from .lines import building
 from .market import MarketState
@@ -610,6 +611,7 @@ class Engine(ParamsBase):
             if original is not None:
                 original(obj)
             env._building = obj
+            _indicator._BUILDING.append(obj)
 
         # MetaParams calls cls._tw_before_init(obj) before __init__; install the binding
         # on a throwaway subclass so the user's class is untouched.
@@ -623,6 +625,7 @@ class Engine(ParamsBase):
                 strat = bound(*args, **skwargs)
         finally:
             env._building = None
+            _indicator._BUILDING.clear()
             reset_construction()
         strat.__class__ = cls
         env._building = None
