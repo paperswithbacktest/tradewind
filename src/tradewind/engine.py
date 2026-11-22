@@ -140,6 +140,12 @@ class Engine(ParamsBase):
     def addwriter(self, *args, **kwargs):
         pass
 
+    def runstop(self):
+        """Stop the run after the current slice. Observed on the oracle (probe ``runstop``):
+        the rest of the slice runs, then no other bar; ``stop`` is called and orders still
+        waiting are never processed."""
+        self._tw_runstop = True
+
     def addcalendar(self, cal):
         pass
 
@@ -268,9 +274,12 @@ class Engine(ParamsBase):
             return []
         clock, market, strategies = ctx
         broker, bus = self._broker, self._broker.bus
+        self._tw_runstop = False
         try:
             for s in clock:
                 self._slice(s, broker, market, bus, strategies)
+                if self._tw_runstop:
+                    break
         finally:
             self._tw_release_bus()
         # Observed on the oracle: notifications are delivered at the start of the next

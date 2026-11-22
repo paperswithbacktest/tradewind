@@ -223,3 +223,22 @@ def test_percentage_commission_parameter_reads_the_converted_rate():
     scheme = Scheme()
     assert scheme.p.commission == pytest.approx(0.002)
     assert scheme.getcommission(10, 100.0) == pytest.approx(2.5)
+
+
+def test_runstop_ends_the_run_after_the_current_slice():
+    rows = []
+
+    class S(tw.Strategy):
+        def next(self):
+            rows.append(len(self))
+            if len(self) == 3:
+                self.buy(size=10)
+            if len(self) == 5:
+                self.sell(size=4)
+                self.env.runstop()
+
+        def stop(self):
+            rows.append(("stop", self.position.size))
+
+    run(S)
+    assert rows == [1, 2, 3, 4, 5, ("stop", 10)]
