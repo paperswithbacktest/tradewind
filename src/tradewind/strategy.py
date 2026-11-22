@@ -7,6 +7,8 @@ builds indicators from ``self.data`` works. Order helpers delegate to the broker
 
 from __future__ import annotations
 
+import datetime as _dt
+
 import numpy as np
 
 from .lines import DatetimeLine
@@ -94,6 +96,7 @@ class Strategy(ParamsBase):
         self._tw_minperiod = 1
         self._tw_indicators = []
         self._tw_nextstarted = False
+        self._tw_last_step = -1           # -1 none yet, 0 prenext, 1 nextstart, 2 next
         self._tw_listed = False
         self._tw_warm = False
         self.analyzers = _Analyzers()
@@ -191,6 +194,16 @@ class Strategy(ParamsBase):
     def next(self):
         pass
 
+    # cheat on open (``cheat_on_open=True``): called before the broker fills the bar
+    def prenext_open(self):
+        pass
+
+    def nextstart_open(self):
+        self.next_open()
+
+    def next_open(self):
+        pass
+
     def stop(self):
         pass
 
@@ -224,7 +237,7 @@ class Strategy(ParamsBase):
         if not size:
             return None
         order = self.broker.buy(self, data, size=abs(size), price=price, plimit=plimit, exectype=exectype,
-                                valid=valid, tradeid=tradeid, **kwargs)
+                                valid=valid, tradeid=tradeid, oco=oco, **kwargs)
         self._tw_orders.append(order)
         return order
 
@@ -236,7 +249,7 @@ class Strategy(ParamsBase):
         if not size:
             return None
         order = self.broker.sell(self, data, size=abs(size), price=price, plimit=plimit, exectype=exectype,
-                                 valid=valid, tradeid=tradeid, **kwargs)
+                                 valid=valid, tradeid=tradeid, oco=oco, **kwargs)
         self._tw_orders.append(order)
         return order
 
@@ -308,6 +321,10 @@ class Strategy(ParamsBase):
         by one share whenever the fractional parts straddle an integer.
         """
         data = self.data if data is None else self._tw_resolve(data)
+        if price is not None:
+            # observed on the oracle (probe ``orders``): a price given here sizes the order
+            # and is the order's price too (the limit of ``exectype=Order.Limit``)
+            kwargs["price"] = price
         price = data.close[0] if price is None else price
         possize = self.getposition(data).size
         if not target and possize:
@@ -358,7 +375,9 @@ class Strategy(ParamsBase):
     def _tw_check_timers(self, date, when):
         for timer in self._tw_timers:
             if timer.when == when and timer.check(date):
-                self.notify_timer(timer, date, *timer.args, **timer.kwargs)
+                # observed on the oracle (probe ``timer_corpus``): ``when`` is a datetime
+                # (midnight of the bar's date on daily bars), not a date
+                self.notify_timer(timer, _dt.datetime.combine(date, _dt.time()), *timer.args, **timer.kwargs)
 
     def _tw_check_timers_at(self, clock, s, end: bool):
         """Timers in the place's time under an ``ExchangeClock`` (phase 11, or 15 with
@@ -396,12 +415,28 @@ class Strategy(ParamsBase):
     def _tw_step(self):
         """prenext / nextstart / next by the clock feed's length against the min period."""
         if not self._tw_ready():
+            self._tw_last_step = 0
             self.prenext()
         elif not self._tw_nextstarted:
             self._tw_nextstarted = True
+            self._tw_last_step = 1
             self.nextstart()
         else:
+            self._tw_last_step = 2
             self.next()
+
+    def _tw_step_open(self):
+        """The cheat-on-open hook of a slice: the one matching the previous step (observed
+        on the oracle, probe ``next_open2``: ``prenext_open`` on the first slice and while
+        the previous step was ``prenext``, ``nextstart_open`` once after ``nextstart``,
+        ``next_open`` after)."""
+        last = self._tw_last_step
+        if last == 2:
+            self.next_open()
+        elif last == 1:
+            self.nextstart_open()
+        else:
+            self.prenext_open()
 
     def _tw_notify(self, order_or_trade):
         if isinstance(order_or_trade, Order):

@@ -49,6 +49,10 @@ class CommInfoBase(ParamsBase):
         self._commission = self.p.commission
         if self._commtype == self.COMM_PERC and not self.p.percabs:
             self._commission /= 100.0
+            # observed on the oracle (probe ``broker``): the parameter itself reads the
+            # converted rate afterwards, so a subclass's ``_getcommission`` reading
+            # ``self.p.commission`` charges 0.002 % for ``commission=0.002``
+            self.p.commission = self._commission
         self._creditrate = self.p.interest / 365.0
 
     # -- properties ---------------------------------------------------------------

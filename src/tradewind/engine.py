@@ -61,7 +61,7 @@ class Engine(ParamsBase):
         self._universe_provider = None
         self._universe_removal = "keep"
         self._universe_gate = False
-        if self.p.cheat_on_open:
+        if self.p.cheat_on_open and self.p.broker_coo:
             self._broker.set_coo(True)
         # Tradewind's own: the clock (None: UnionClock, the oracle default), the seed of the
         # global generators (None: left as they are), declared data revisions, fingerprint
@@ -139,6 +139,12 @@ class Engine(ParamsBase):
 
     def addwriter(self, *args, **kwargs):
         pass
+
+    def runstop(self):
+        """Stop the run after the current slice. Observed on the oracle (probe ``runstop``):
+        the rest of the slice runs, then no other bar; ``stop`` is called and orders still
+        waiting are never processed."""
+        self._tw_runstop = True
 
     def addcalendar(self, cal):
         pass
@@ -268,9 +274,12 @@ class Engine(ParamsBase):
             return []
         clock, market, strategies = ctx
         broker, bus = self._broker, self._broker.bus
+        self._tw_runstop = False
         try:
             for s in clock:
                 self._slice(s, broker, market, bus, strategies)
+                if self._tw_runstop:
+                    break
         finally:
             self._tw_release_bus()
         # Observed on the oracle: notifications are delivered at the start of the next
@@ -290,6 +299,8 @@ class Engine(ParamsBase):
         for k, v in kwargs.items():
             if k in self.p:
                 setattr(self.p, k, v)
+        if kwargs.get("cheat_on_open") and self.p.broker_coo:
+            self._broker.set_coo(True)
         if not self.datas:
             return None
         for data in self.datas:
@@ -472,8 +483,24 @@ class Engine(ParamsBase):
         if trace is not None:
             trace.append(Phase.MARKET_DATA)
         market.step(s)
-        for strat in strategies:
-            strat._tw_tick(s.position)
+        # cheat on open (``cheat_on_open``, read on every slice: a strategy may set
+        # ``self.cerebro.p.cheat_on_open`` in its ``__init__``). Observed on the oracle
+        # (probes ``next_open*``): the feeds show the new bar, the strategy's clock and its
+        # indicators still the previous one, the broker the previous mark; the hook follows
+        # what the previous step was (``prenext_open`` / ``nextstart_open`` / ``next_open``).
+        # Its orders join this bar's batch when the broker cheats on open (``set_coo``, set
+        # by the engine when ``cheat_on_open`` is a parameter of the run), else the next one.
+        held = None
+        if self.p.cheat_on_open and strategies:
+            submitted = broker.submitted
+            before = len(submitted)
+            for strat in strategies:
+                strat._tw_step_open()
+            if not broker._coo and len(submitted) > before:
+                held = [submitted.pop() for _ in range(len(submitted) - before)][::-1]
+            else:
+                for i in range(before, len(submitted)):
+                    submitted[i]._tw_placed_now = True
         # 3 to 8: the broker
         if trace is not None:
             trace.append(Phase.CORPORATE_ACTIONS)
@@ -484,6 +511,8 @@ class Engine(ParamsBase):
         if trace is not None:
             trace.append(Phase.ACCEPTANCE)
         broker.acceptance(s)
+        if held:
+            broker.submitted.extend(held)
         if trace is not None:
             trace.append(Phase.FILLS)
         broker.fills(s)
@@ -507,6 +536,7 @@ class Engine(ParamsBase):
             trace.append(Phase.TIMERS_START)
         date = None
         exchange = self._exchange_clock
+        mark = len(bus._queue)
         for strat in strategies:
             if strat._tw_timers:
                 if exchange is not None:
@@ -515,11 +545,26 @@ class Engine(ParamsBase):
                 if date is None:
                     date = num2date(s.dtnum).date()
                 strat._tw_check_timers(date, Timer.SESSION_START)
+        # the strategy's clock moves to the new slice here: observed on the oracle (probe
+        # ``timer_corpus``), ``len(self)`` inside a session-start ``notify_timer`` (and in a
+        # cheat-on-open hook) still counts the previous slices, inside ``notify_order`` and
+        # ``next`` the new one
+        for strat in strategies:
+            strat._tw_tick(s.position)
+        # what the session-start timers' orders raised (Submitted, ...) is delivered with the
+        # next slice's notifications, as for the orders of ``next`` (observed on the oracle,
+        # probe ``timer_clock``)
+        timer_events = None
+        if len(bus._queue) > mark:
+            timer_events = bus._queue[mark:]
+            del bus._queue[mark:]
         # 12 delivery: order events, then trade events, ... (kind, seq)
         if trace is not None:
             trace.append(Phase.DELIVERY)
         if len(bus):
             bus.deliver()
+        if timer_events:
+            bus._queue[:0] = timer_events
         # 13 strategy
         if trace is not None:
             trace.append(Phase.STRATEGY)

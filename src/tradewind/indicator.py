@@ -229,7 +229,7 @@ class Indicator(LineArithmetic, ParamsBase):
         return self.lines[0][ago]
 
     def __call__(self, ago=0):
-        return self.lines[0][ago]
+        return self.lines[0](ago)
 
     def __float__(self):
         return self.lines[0][0]
