@@ -616,8 +616,12 @@ def prices_line(p: dict) -> str:
                 + (f", {ib.get('kept')} already cached" if ib.get("kept") else "") + ")")
     else:
         tail = ""
+    kr = p.get("kraken") or {}
+    if kr.get("error"):
+        tail += f"; Kraken not reached: {kr['error']}"
+    kraken = f", Kraken {p['kraken_served']}{pct('kraken')}" if p.get("kraken_served") else ""
     return (f"fresh prices ({','.join(p.get('sources') or [])}): {p.get('n', 0)} symbol(s), IB {p.get('ibkr', 0)}"
-            f"{pct('ibkr')}, AlphaVantage {p.get('alphavantage', 0)}{pct('alphavantage')}, stale {p.get('stale', 0)}"
+            f"{pct('ibkr')}{kraken}, AlphaVantage {p.get('alphavantage', 0)}{pct('alphavantage')}, stale {p.get('stale', 0)}"
             f"{pct('stale')}{tail}")
 
 

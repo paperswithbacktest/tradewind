@@ -1,4 +1,5 @@
-"""The two accounts a daily run trades: ``SimAccount`` (simulated) and ``IBPaperAccount``.
+"""The accounts a daily run trades: ``SimAccount`` (simulated), ``IBPaperAccount`` and
+``KrakenAccount`` (crypto spot, validation mode unless armed; spec/11).
 
 Both answer the same four calls: ``settle`` (the fills since the last run), ``snapshot`` (cash,
 positions, NAV), ``place`` (send the day's orders) and ``close``.
@@ -28,6 +29,7 @@ a ``MKT`` ``DAY`` order on the contract the meta-portfolio names. An index is ne
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import math
 import os
@@ -35,7 +37,9 @@ import time
 from dataclasses import dataclass, field
 
 from ..adapter import AdapterError
+from ..guards import RiskLimits
 from ..ibkr import PAPER_PORTS, PAPER_PREFIXES, IBAdapter
+from ..kraken import DEFAULT_TAKER_FEE, NON_TRADABLE_SUFFIXES, KrakenAdapter, catalogue_base
 from ..messages import Ack, Canceled, Execution, OrderRequest, Rejected
 from .aggregate import ProposedOrder
 from .instruments import fx_pair, ibkr_fx_commission, is_index
@@ -429,4 +433,195 @@ class IBPaperAccount:
         self.adapter.disconnect()
 
 
-__all__ = ["Fill", "IBPaperAccount", "SimAccount", "Snapshot", "estimated_commission", "ibkr_tiered_commission"]
+def _previous_weekday(day: _dt.date) -> _dt.date:
+    day -= _dt.timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= _dt.timedelta(days=1)
+    return day
+
+
+class KrakenAccount:
+    """A Kraken spot account (spec/11 § 8), through ``KrakenAdapter``.
+
+    The books are in USD and in base units (``BTC`` 0.25); the account holds its cash in
+    ``quote`` (USD or EUR) and trades the pairs ``<base>/<quote>``. Positions come back under
+    the books' symbols (``BTC``, or ``BTCUSD`` when that is the name the books use).
+
+    ``send=False`` (propose): reads the account, never calls ``AddOrder``. ``send=True``:
+    market orders, sells first, each checked locally (pair whitelist ``allowed``,
+    ``max_order_notional`` in USD, minimums, balances) and then sent to ``AddOrder`` **with
+    validate=true** unless ``live=True`` and ``TRADEWIND_KRAKEN_LIVE=1``: the status is then
+    ``validated`` (Kraken checked it, nothing traded) instead of ``sent``. The key is read from
+    ``KRAKEN_API_KEY`` / ``KRAKEN_API_SECRET`` only.
+    """
+
+    kind = "kraken"
+
+    def __init__(self, *, quote: str = "USD", send: bool = False, live: bool = False,
+                 allowed: list[str] | None = None, max_order_notional: float | None = None,
+                 taker_fee: float = DEFAULT_TAKER_FEE, base_fx: float | None = None,
+                 adapter: KrakenAdapter | None = None, environ=None):
+        self.send = bool(send)
+        self.quote = quote.upper()
+        self.base_fx = base_fx
+        self.fx_rate: float | None = 1.0 if self.quote == "USD" else None
+        self.taker_fee = float(taker_fee)
+        self.max_order_notional = max_order_notional
+        self.allowed = None if allowed is None else {a.upper() for a in allowed}
+        limits = RiskLimits(allow_short=False)
+        self.adapter = adapter or KrakenAdapter(quote=self.quote, live=live and send, limits=limits,
+                                                taker_fee=taker_fee, environ=environ)
+        self.adapter.connect()
+        self.account = "KRAKEN"
+        self._fills: list[Fill] = []
+
+    @property
+    def mode(self) -> str:
+        return self.adapter.mode if self.send else "propose (read-only)"
+
+    # -- the account's currency -----------------------------------------------------------------------
+    def currency_info(self) -> dict:
+        """The quote currency is the account's; Kraken publishes no rate to the books' USD
+        here (the runner takes PWB's, or ``--base-fx-rate``)."""
+        return {"currency": self.quote, "published": 1.0 if self.quote == "USD" else None, "fallback": self.base_fx}
+
+    def set_fx(self, rate: float) -> None:
+        """USD per unit of the quote currency."""
+        self.fx_rate = float(rate)
+
+    def _rate(self) -> float:
+        if self.fx_rate is None:
+            raise AdapterError(f"the Kraken account is in {self.quote}: set the day's rate first (set_fx)")
+        return self.fx_rate
+
+    def _book_name(self, base: str, known) -> str:
+        name = catalogue_base(base)
+        for candidate in (name, name + "USD", base, base + "USD"):
+            if candidate in known:
+                return candidate
+        return name
+
+    # -- the four calls -------------------------------------------------------------------------------
+    def settle(self, date: str, opens: dict[str, float], closes: dict[str, float]) -> list[Fill]:
+        """The trades since the day after the previous weekday session (00:00 UTC): the
+        orders placed after its close execute in the first minutes of the next UTC day,
+        weekends included. Prices and fees in USD (``fx_rate``)."""
+        rate = self._rate()
+        day = _dt.date.fromisoformat(date[:10])
+        start = _previous_weekday(day) + _dt.timedelta(days=1)
+        since = int(_dt.datetime(start.year, start.month, start.day, tzinfo=_dt.timezone.utc).timestamp())
+        res = self.adapter.rest.private("TradesHistory", {"start": since}) or {}
+        known = set(opens) | set(closes)
+        fills = []
+        for tid, tr in sorted((res.get("trades") or {}).items(), key=lambda kv: float(kv[1].get("time", 0))):
+            pair = self.adapter._pair_of(str(tr.get("pair", "")))
+            if pair is None or pair.quote_name != self.quote:
+                continue
+            sym = self._book_name(pair.base_name, known)
+            q = float(tr.get("vol", 0.0)) * (1.0 if tr.get("type") == "buy" else -1.0)
+            px = float(tr.get("price", 0.0)) * rate
+            fills.append(Fill(sym, q, px, float(opens.get(sym, px)), float(tr.get("fee", 0.0)) * rate,
+                              str(tr.get("ordertxid", tid))))
+        self._fills = fills
+        return fills
+
+    def snapshot(self, closes: dict[str, float] | None = None) -> Snapshot:
+        """Cash (the quote balance, in USD), positions in the books' symbols and base units,
+        the NAV at the books' closes (at Kraken's last trade for an asset no book prices)."""
+        rate = self._rate()
+        closes = closes or {}
+        ad = self.adapter
+        bal = ad.balances()
+        quote_asset = ad.pairs.quote_asset(self.quote)
+        cash_quote = bal.get(quote_asset, (0.0, 0.0))[0]
+        positions: dict[str, float] = {}
+        unpriced = []
+        for asset, (q, _avail) in sorted(bal.items()):
+            if asset == quote_asset or not q or asset.endswith(NON_TRADABLE_SUFFIXES):
+                continue
+            pair = ad.pairs.by_base_asset(asset, self.quote) or ad.pairs.by_base_asset(asset, "USD")
+            if pair is None:
+                continue                                    # another fiat or an asset without a pair
+            name = self._book_name(pair.base_name, closes)
+            positions[name] = positions.get(name, 0.0) + q
+            if name not in closes:
+                unpriced.append((name, pair))
+        last = ad.last_prices([p for _n, p in unpriced])
+        marks = dict(closes)
+        for name, pair in unpriced:
+            if pair.key in last:                            # a USD pair's price is already in USD
+                marks[name] = last[pair.key] * (1.0 if pair.quote_name == "USD" else rate)
+        cash = cash_quote * rate
+        nav = cash + sum(q * marks.get(s, 0.0) for s, q in positions.items())
+        working = []
+        for o in ((ad.rest.private("OpenOrders") or {}).get("open") or {}).values():
+            d = o.get("descr") or {}
+            pair = ad._pair_of(str(d.get("pair", "")))
+            name = self._book_name(pair.base_name, closes) if pair else str(d.get("pair", ""))
+            sign = 1.0 if d.get("type") == "buy" else -1.0
+            working.append((name, sign * (float(o.get("vol", 0.0)) - float(o.get("vol_exec", 0.0)))))
+        return Snapshot(cash=cash, nav=nav, positions=positions, fills=list(self._fills), open_orders=working,
+                        account=self.account, currency="USD", base_currency=self.quote, fx_rate=rate,
+                        nav_base=nav / rate, base_cash=cash_quote if self.quote != "USD" else 0.0)
+
+    def place(self, orders: list[ProposedOrder], date: str) -> list[dict]:
+        if not self.send:
+            raise AdapterError("this account was opened read-only (propose mode): nothing is sent")
+        rate = self._rate()
+        ad = self.adapter
+        bal = ad.balances()
+        quote_asset = ad.pairs.quote_asset(self.quote)
+        quote_left = bal.get(quote_asset, (0.0, 0.0))[1]
+        stamp = date.replace("-", "")
+        out = []
+        # sells first: their proceeds (less the fee) fund the buys that follow
+        ordered = sorted(enumerate(orders, 1), key=lambda io: (io[1].quantity > 0, io[0]))
+        for i, o in ordered:
+            cid = f"twk-{stamp}-{i:04d}"
+            row = {"id": cid, "symbol": o.symbol, "quantity": o.quantity, "status": "", "reason": ""}
+            out.append(row)
+            reason = ""
+            if self.allowed is not None and o.symbol.upper() not in self.allowed:
+                reason = f"{o.symbol} is not in the allowed pairs"
+            elif self.max_order_notional is not None and o.notional > self.max_order_notional:
+                reason = f"notional {o.notional:,.2f} USD over max_order_notional {self.max_order_notional:,.2f}"
+            elif not (o.price > 0 and math.isfinite(o.price)):
+                reason = "no reference price"
+            if reason:
+                row.update(status="skipped", reason=reason)
+                continue
+            try:
+                pair = ad.register(o.symbol)
+            except AdapterError as exc:
+                row.update(status="skipped", reason=str(exc))
+                continue
+            price_quote = o.price / rate
+            base_left = bal.get(pair.base, (0.0, 0.0))[1]
+            r = ad.submit(cid, o.symbol, o.quantity, reference_price=price_quote, check_balance=True,
+                          available=(base_left, quote_left))
+            if r["status"] == "refused":
+                row.update(status="skipped", reason=r["reason"])
+                continue
+            vol = r["volume"]
+            if o.quantity > 0:
+                cost = vol * price_quote * (1.0 + self.taker_fee)
+                if r["status"] in ("sent", "validated"):
+                    quote_left -= cost
+            else:
+                quote_left += vol * price_quote * (1.0 - self.taker_fee)
+                b, a = bal.get(pair.base, (0.0, 0.0))
+                bal[pair.base] = (b, a - vol)
+            row.update(status=r["status"], reason=r["reason"], volume=vol, pair=r["pair"], txid=r["txid"])
+        by_id = {r["id"]: r for r in out}
+        return [by_id[f"twk-{stamp}-{i:04d}"] for i in range(1, len(orders) + 1)]
+
+    def estimated_commission(self, order: ProposedOrder) -> float:
+        """The taker fee of a proposed order, in USD."""
+        return order.notional * self.taker_fee
+
+    def close(self) -> None:
+        self.adapter.disconnect()
+
+
+__all__ = ["Fill", "IBPaperAccount", "KrakenAccount", "SimAccount", "Snapshot", "estimated_commission",
+           "ibkr_tiered_commission"]
