@@ -188,12 +188,30 @@ test (`-m network`, skipped by default) calls public endpoints only.
 Written from Kraken's public documentation and spec/07; no third-party Kraken client was
 read or installed. Logged in `CLEANROOM.md`.
 
-## 12. Questions for Édouard
+## 12. Decisions (Édouard, 2026-11-22) and what is still to do
 
-1. **Quote currency**: USD or EUR pairs for the first account? (A EUR account pays no
-   conversion on deposit; the books are in USD either way.)
-2. **Fee tier**: 0.40 % taker assumed for the pre-check; to set from the account.
-3. **Weekends**: crypto trades seven days a week; the daily runner trades weekdays only.
-   A 7-day schedule (decision at 00:00 UTC daily) is a separate change.
-4. **Which sleeves**: only catalogue strategies on `Cryptocurrencies-Daily-Price`; the
-   meta-portfolio for Kraken is to be chosen.
+1. **Quote currency: USD** by default (`quote="USD"`, `--kraken-quote USD`); EUR stays
+   available.
+2. **Fees: 0.40 %** taker by default (`taker_fee`, `--kraken-taker-fee`,
+   `FractionalCommInfo`) until the account's real tier is known.
+3. **Weekends: the daily runner trades the NYSE weekdays for now**, documented as such
+   (`docs/live-kraken-daily.md`). `LiveEngine` with `KrakenBars` already trades every day.
+4. **Fractional sizing**: `FractionalCommInfo` (live/kraken.py) for `LiveEngine` and the
+   backtest; `lot: 0` in a crypto meta-portfolio.
+5. **Which sleeves**: long-only catalogue strategies on `Cryptocurrencies-Daily-Price` whose
+   symbols have a Kraken pair; the meta-portfolio is still to be chosen.
+
+**To do before real money** (open):
+
+- [ ] **A seven-day calendar for the daily runner**, required for any crypto strategy
+  measured on seven days: a session every day, decided on the 00:00 UTC bar (`CRYPTO` of
+  `calendars.py` in place of `NYSE` in `session.closed_session`, `runner.last_session`,
+  the send cut-off and the scheduling examples), the books, the tracking and the
+  reconciliation run on calendar days. Until then the account trades the weekend's moves on
+  Monday night and the tracking gap carries them (timing term).
+- [ ] The first run with a key, validation mode: record what Kraken answers to
+  `validate=true` (assumed: a description, no `txid`), that it accepts the 18-character
+  `cl_ord_id`, and the form of `descr.pair` in `OpenOrders`.
+- [ ] The account's fee tier, in place of 0.40 %.
+- [ ] Several weeks of validation mode, then Édouard's sign-off, then both keys with small
+  limits and `reconcile="halt"`.

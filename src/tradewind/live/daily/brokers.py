@@ -451,7 +451,9 @@ class KrakenAccount:
     market orders, sells first, each checked locally (pair whitelist ``allowed``,
     ``max_order_notional`` in USD, minimums, balances) and then sent to ``AddOrder`` **with
     validate=true** unless ``live=True`` and ``TRADEWIND_KRAKEN_LIVE=1``: the status is then
-    ``validated`` (Kraken checked it, nothing traded) instead of ``sent``. The key is read from
+    ``validated`` (Kraken checked it, nothing traded) instead of ``sent``. An order under the
+    pair's lot or minimum is ``skipped``; one a guard refuses (whitelist, notional, balance,
+    no short, no pair) is ``refused``; one Kraken refuses is ``rejected``. The key is read from
     ``KRAKEN_API_KEY`` / ``KRAKEN_API_SECRET`` only.
     """
 
@@ -588,19 +590,23 @@ class KrakenAccount:
             elif not (o.price > 0 and math.isfinite(o.price)):
                 reason = "no reference price"
             if reason:
-                row.update(status="skipped", reason=reason)
+                row.update(status="refused", reason=reason)
                 continue
             try:
                 pair = ad.register(o.symbol)
             except AdapterError as exc:
-                row.update(status="skipped", reason=str(exc))
+                row.update(status="refused", reason=str(exc))
                 continue
             price_quote = o.price / rate
             base_left = bal.get(pair.base, (0.0, 0.0))[1]
             r = ad.submit(cid, o.symbol, o.quantity, reference_price=price_quote, check_balance=True,
                           available=(base_left, quote_left))
             if r["status"] == "refused":
-                row.update(status="skipped", reason=r["reason"])
+                # under the pair's lot or minimum: skipped (dust, no alert); any other guard:
+                # refused (the session raises orders_rejected)
+                dust = r["reason"].startswith("under one lot") or "'s ordermin" in r["reason"] \
+                    or "'s costmin" in r["reason"]
+                row.update(status="skipped" if dust else "refused", reason=r["reason"])
                 continue
             vol = r["volume"]
             if o.quantity > 0:

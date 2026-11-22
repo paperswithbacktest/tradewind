@@ -36,17 +36,6 @@ SYMBOLS = ["BTC", "ETH"]
 PERIOD, WEIGHT = 50, 0.45
 
 
-class Fractional(tw.CommInfoBase):
-    """Crypto sizes are fractional: ``order_target_percent`` sizes to 1e-8 of a coin (the
-    adapter then cuts to each pair's ``lot_decimals``). 0.40 % per trade, Kraken's entry
-    taker fee."""
-
-    params = (("stocklike", True), ("commtype", tw.CommInfoBase.COMM_PERC), ("commission", 0.004))
-
-    def getsize(self, price, cash):
-        return int(cash / price * 1e8) / 1e8
-
-
 class TrendCrypto(tw.Strategy):
     params = (("period", PERIOD), ("weight", WEIGHT))
 
@@ -86,7 +75,7 @@ def run_public(args, rest=None):
 
 def run_account(args):
     from tradewind.live import KillSwitch, LiveEngine, LiveFeed, RiskLimits
-    from tradewind.live.kraken import KrakenAdapter
+    from tradewind.live.kraken import FractionalCommInfo, KrakenAdapter
 
     os.makedirs(os.path.dirname(args.journal) or ".", exist_ok=True)
     adapter = KrakenAdapter(quote=args.quote, live=args.live, symbols=SYMBOLS,
@@ -100,7 +89,7 @@ def run_account(args):
                         kill_switch=KillSwitch(args.kill_file), reconcile="adopt",
                         limits=RiskLimits(max_order_notional=0.5 * args.capital,
                                           allowed_symbols=frozenset(SYMBOLS), allow_short=False))
-    engine.broker.addcommissioninfo(Fractional())
+    engine.broker.addcommissioninfo(FractionalCommInfo())    # sizes to 1e-8 of a coin, 0.40 % a trade
     for s in SYMBOLS:
         engine.adddata(LiveFeed(dataname=source.history(s)), name=s)
     engine.addstrategy(TrendCrypto)

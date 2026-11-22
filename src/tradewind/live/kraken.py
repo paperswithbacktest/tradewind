@@ -39,6 +39,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 
+from ..comminfo import CommInfoBase
 from .adapter import AdapterError, BarRecord
 from .guards import RiskLimits
 from .messages import (
@@ -77,6 +78,26 @@ RETRYABLE = ("EAPI:Rate limit exceeded", "EService:Throttled", "EService:Unavail
 
 DEFAULT_TAKER_FEE = 0.004            # the entry tier; AssetPairs' fee tables are deprecated
 DAY_NS = 86_400 * 1_000_000_000
+
+
+# --------------------------------------------------------------------------------------------- #
+# Sizing                                                                                        #
+# --------------------------------------------------------------------------------------------- #
+class FractionalCommInfo(CommInfoBase):
+    """A commission scheme for crypto spot: fractional sizes and a percentage fee.
+
+    The default stock scheme sizes ``order_target_percent`` / ``order_target_value`` in whole
+    units (0 or 1 BTC); this one sizes to ``decimals`` places (8: a satoshi), toward zero, and
+    charges ``commission`` of the traded value (0.004: Kraken's entry taker fee, to replace by
+    the account's own). The adapter then cuts each order to the pair's ``lot_decimals``.
+    Install it on the broker: ``engine.broker.addcommissioninfo(FractionalCommInfo())``."""
+
+    params = (("stocklike", True), ("commtype", CommInfoBase.COMM_PERC), ("commission", DEFAULT_TAKER_FEE),
+              ("percabs", True), ("decimals", 8))
+
+    def getsize(self, price, cash):
+        scale = 10 ** int(self.p.decimals)
+        return math.floor(self.p.leverage * cash / price * scale) / scale
 
 
 # --------------------------------------------------------------------------------------------- #
@@ -960,6 +981,7 @@ def bar_day(stamp_s: int) -> str:
     return _dt.datetime.fromtimestamp(int(stamp_s), tz=_dt.timezone.utc).date().isoformat()
 
 
-__all__ = ["API_URL", "KEY_ENV", "LIVE_ENV", "SECRET_ENV", "CallCounter", "Credentials", "KrakenAdapter",
+__all__ = ["API_URL", "KEY_ENV", "LIVE_ENV", "SECRET_ENV", "CallCounter", "Credentials", "FractionalCommInfo",
+           "KrakenAdapter",
            "KrakenBars", "KrakenError", "KrakenREST", "NonceSource", "PairInfo", "PairTable", "balance_refusal",
            "bar_day", "catalogue_base", "cl_ord_id", "order_fields", "parse_ohlc", "sign"]

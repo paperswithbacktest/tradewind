@@ -198,7 +198,7 @@ def main(argv=None) -> int:
         print("warning:", w)
     print("proposal:", report.proposal_md)
     if args.send:
-        bad = [s for s in report.sent if s.get("status") in ("rejected", "cancelled")]
+        bad = [s for s in report.sent if s.get("status") in ("rejected", "cancelled", "refused")]
         for s in bad:
             print(f"  {s['symbol']} {s['quantity']:+g}: {s['status']} {s.get('reason', '')}")
     return 0

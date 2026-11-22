@@ -36,6 +36,7 @@ backtrader's own results, bar by bar:
 | Futures | interfaces in place, implementations planned |
 | Live trading on Interactive Brokers (paper first): `tradewind.live`, `pip install 'tradewind[ibkr]'` | preview ([Live trading](live-trading.md)) |
 | Daily paper run of a meta-portfolio: signals after the close, a capped and rounded book, proposed orders, live against backtest: `python -m tradewind.live.daily` | preview, paper accounts only ([the daily paper run](live-paper.md)) |
+| Live trading on Kraken, crypto spot (USD or EUR pairs), one strategy or a daily meta-portfolio: `KrakenAdapter`, `--broker kraken` | preview, validation mode by default ([live trading on Kraken](live-kraken.md), [the daily run on Kraken](live-kraken-daily.md)) |
 | Plots (equity against a benchmark, drawdown, monthly returns, exposure and turnover) and a bridge to pyfolio and alphalens tear sheets | done, opt-in: `tradewind[plot]`, `tradewind[tearsheets]` ([Plots and tear sheets](plots.md)) |
 | backtrader's resampling and replay, its own `cerebro.plot()`, `optstrategy` | not available yet |
 
@@ -85,6 +86,8 @@ code is on [Examples on real data](real-data-examples.md).
     account, journal and replay, guards.
     [The daily paper run](live-paper.md): several strategies in one paper account, orders
     proposed every evening, the account tracked against its backtest.
+    [Live trading on Kraken](live-kraken.md) and [the daily run on Kraken](live-kraken-daily.md):
+    crypto spot, the same engine and runner, orders validated by Kraken until armed.
 18. [Reproducibility](reproducibility.md): the run fingerprint, what it guarantees and what
     it does not.
 19. [Tradewind vs Lean](tradewind-vs-lean.md): where Tradewind is at level, ahead and

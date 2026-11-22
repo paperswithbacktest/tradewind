@@ -31,6 +31,7 @@ from tradewind.live.kraken import (
     LIVE_ENV,
     CallCounter,
     Credentials,
+    FractionalCommInfo,
     KrakenAdapter,
     KrakenBars,
     KrakenError,
@@ -527,13 +528,6 @@ def test_kraken_bars_never_pass_a_forming_bar():
 # --------------------------------------------------------------------------------------------- #
 # A LiveEngine session                                                                          #
 # --------------------------------------------------------------------------------------------- #
-class Fractional(tw.CommInfoBase):
-    params = (("stocklike", True), ("commtype", tw.CommInfoBase.COMM_PERC), ("commission", 0.004))
-
-    def getsize(self, price, cash):
-        return int(cash / price * 1e8) / 1e8
-
-
 class Alternate(tw.Strategy):
     """Half the account in BTC on one bar, nothing on the next: orders every bar."""
 
@@ -554,7 +548,7 @@ def _engine(adapter, venue, clock, journal, frame):
     engine = LiveEngine(adapter, bars, journal=journal, fsync=False, poll_interval=3600,
                         limits=RiskLimits(max_order_notional=20_000, allowed_symbols=frozenset({"BTC"}),
                                           allow_short=False))
-    engine.broker.addcommissioninfo(Fractional())
+    engine.broker.addcommissioninfo(FractionalCommInfo())
     engine.adddata(LiveFeed(dataname=frame[frame.index < pd.Timestamp(clock(), unit="ns").normalize()
                                            - pd.Timedelta(days=1)]), name="BTC")
     engine.addstrategy(Alternate)
@@ -652,8 +646,8 @@ def test_daily_account(tmp_path):
     st = {(s["symbol"], s["quantity"]): s for s in sent}
     assert [s["id"] for s in sent] == [f"twk-20261119-{i:04d}" for i in range(1, 5)]
     assert st[("BTC", 0.05)]["status"] == "validated" and st[("ETH", -1.5)]["status"] == "validated"
-    assert st[("DOGE", 10.0)]["status"] == "skipped" and "no EUR pair" in st[("DOGE", 10.0)]["reason"]
-    assert st[("ETH", -5.0)]["status"] == "skipped" and "short" in st[("ETH", -5.0)]["reason"]
+    assert st[("DOGE", 10.0)]["status"] == "refused" and "no EUR pair" in st[("DOGE", 10.0)]["reason"]
+    assert st[("ETH", -5.0)]["status"] == "refused" and "short" in st[("ETH", -5.0)]["reason"]
     adds = venue.calls("AddOrder")
     assert [a[3]["type"] for a in adds] == ["sell", "buy"]  # sells first
     assert all(a[3]["validate"] == "true" for a in adds) and adds[1][3]["pair"] == "XBTEUR"
@@ -796,3 +790,55 @@ def test_example_public_mode_and_validation_session(tmp_path, monkeypatch, capsy
     with open(tmp_path / "live" / "kraken.jsonl", encoding="utf-8") as fh:
         text = fh.read()
     assert SENTINEL_KEY not in text and SENTINEL_SECRET not in text
+
+
+def test_fractional_scheme_sizes_in_satoshis():
+    c = FractionalCommInfo()
+    assert c.getsize(91_234.5, 10_000) == 0.10960765            # toward zero, 8 decimals
+    assert c.getcommission(0.1, 90_000) == pytest.approx(36.0)  # 0.40 % of the value
+    assert FractionalCommInfo(decimals=4, commission=0.0026).getsize(3_000.0, 1_000) == 0.3333
+
+
+def test_session_alerts_and_reconciliation_for_kraken_statuses(tmp_path):
+    """A validated order traded nothing: no fills_mismatch the next day; a refused one (a
+    local guard) raises orders_rejected; a skipped one (dust) raises nothing."""
+    from tradewind.live.daily.session import AlertConfig, DailySession, check_day
+
+    cfg = AlertConfig(max_gap=1.0, max_gap_day=1.0, max_loss=1.0)
+    sent = [{"symbol": "BTC", "quantity": 0.05, "status": "validated"},
+            {"symbol": "ETH", "quantity": 0.0001, "status": "skipped", "reason": "volume 0.0001 under ETHUSD's ordermin"},
+            {"symbol": "DOGE", "quantity": 10.0, "status": "refused", "reason": "Kraken has no EUR pair for 'DOGE'"}]
+    alerts = check_day({"nav_real": 10_000.0}, sent, cfg)
+    assert [a.code for a in alerts] == ["orders_rejected"] and "DOGE" in alerts[0].message
+    d = tmp_path / "day"
+    session = DailySession(None, str(d), provider_factory=None, account_factory=None, log=lambda *a: None)
+    with open(d / "state.json", "w") as fh:
+        json.dump({"days": {"2026-11-19": {"held": {"BTC": 0.1}, "sent": True},
+                            "2026-11-20": {"held": {"BTC": 0.1}}}}, fh)
+    session._mark("2026-11-19", phase="sent", sent=sent)
+    assert session._reconcile("2026-11-20", {"working": []})["mismatches"] == []
+
+
+def test_the_kraken_schedule_runs_after_the_crypto_bar_and_on_the_nyse_session():
+    """``docs/examples/schedule/tradewind-daily-kraken.cron``: 00:15 UTC, Tuesday to Saturday,
+    is after the day's crypto bar is final and works on the NYSE session of the evening
+    before, every weekday of a year (daylight saving both sides)."""
+    import datetime as _dt
+
+    from tradewind.calendars import NYSE
+    from tradewind.live.daily.kraken_prices import crypto_bar_complete_at
+    from tradewind.live.daily.session import closed_session
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "docs", "examples", "schedule", "tradewind-daily-kraken.cron")) as fh:
+        line = next(x for x in fh if x.strip() and not x.startswith("#"))
+    minute, hour, _dom, _mon, dow = line.split()[:5]
+    assert (int(minute), int(hour), dow) == (15, 0, "2-6") and "BROKER=kraken FRESH_PRICES=kraken" in line
+    for k in range(365):
+        d = _dt.date(2026, 1, 1) + _dt.timedelta(days=k)
+        if not NYSE.is_trading_day(d):
+            continue
+        run = _dt.datetime.combine(d + _dt.timedelta(days=1), _dt.time(0, 15), tzinfo=_dt.timezone.utc)
+        assert run.isoweekday() in range(2, 7)
+        assert closed_session(run) == d.isoformat()
+        assert run.timestamp() >= crypto_bar_complete_at(d.isoformat())

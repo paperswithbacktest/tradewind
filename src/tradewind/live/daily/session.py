@@ -150,7 +150,7 @@ def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
         if before > 0 and change / before < -cfg.max_loss:
             out.append(Alert("daily_loss", f"the day's loss {change:+,.2f} ({change / before:+.2%}), "
                                            f"beyond {cfg.max_loss:.2%}"))
-    bad = [s for s in sent if s.get("status") in ("rejected", "cancelled")]
+    bad = [s for s in sent if s.get("status") in ("rejected", "cancelled", "refused")]   # refused: a local guard
     if bad:
         out.append(Alert("orders_rejected", f"{len(bad)} order(s) refused by the broker: " + ", ".join(
             f"{s['symbol']} {s['quantity']:+g} {s['status']} {s.get('reason', '')}".strip() for s in bad[:10])))
@@ -416,7 +416,7 @@ class DailySession:
             return out
         expected = dict(days[prev].get("held", {}))
         for s in prev_marker.get("sent", []):
-            if s.get("status") in ("rejected", "cancelled", "skipped"):
+            if s.get("status") in ("rejected", "cancelled", "skipped", "refused", "validated"):  # validated: nothing traded
                 continue
             expected[s["symbol"]] = expected.get(s["symbol"], 0.0) + float(s["quantity"])
         held = today.get("held", {})

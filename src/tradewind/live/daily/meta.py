@@ -101,7 +101,7 @@ class MetaPortfolio:
     python: str = ""
     exclude_symbols: list[str] = field(default_factory=list)
     fresh_prices: str = ""              # "alphavantage", "ibkr,alphavantage": the loads completed to the last close
-    fresh_close_grace: dict = field(default_factory=dict)  # {equity, fx, index, av_equity, av_fx: minutes}
+    fresh_close_grace: dict = field(default_factory=dict)  # {equity, fx, index, crypto, av_equity, av_fx: minutes}
     fresh_ib: dict = field(default_factory=dict)            # ib_prices.IBDataConfig: client_id, concurrency...
     substitutes: dict = field(default_factory=dict)     # {index: Substitute | "ETF" | {...} | None}
     indices: list[str] = field(default_factory=list)   # more symbols that are indices (not tradable)
