@@ -12,11 +12,11 @@ the event bus delivers the notifications, the strategy steps, analyzers step.
 
 from __future__ import annotations
 
+from . import indicator as _indicator
 from .broker import BackBroker
 from .clock import Phase, UnionClock
 from .dateutils import num2date
 from .events import CorporateActionEvent, OrderEvent, TradeEvent, UniverseEvent
-from . import indicator as _indicator
 from .indicator import reset_construction
 from .lines import building
 from .market import MarketState
