@@ -48,6 +48,32 @@ def _lazy(fn, *operands):
     return operate(fn, *operands)
 
 
+class RuntimeDelay:
+    """What ``line(ago)`` gives outside the build stage. Observed on the oracle (probe
+    ``line_delay``): a delayed line made inside ``next`` is an object, not a number --
+    ``float(data.close(-2))`` raises ``TypeError`` (a corpus strategy catches it and reads
+    ``close[i]`` instead). Read past values with ``line[-k]``."""
+
+    __slots__ = ("ago", "line")
+
+    def __init__(self, line, ago):
+        self.line, self.ago = line, ago
+
+    def __repr__(self):
+        return f"<delayed line {getattr(self.line, '_name', '')!r} ago={self.ago}>"
+
+
+def _delayed(line, ago):
+    """``line(ago)``: in the build stage, a line delayed by ``-ago`` bars (``close(-1)`` is
+    yesterday's close on every bar, with a minimum period longer by that much); otherwise
+    a ``RuntimeDelay``."""
+    if not _BUILDING[0]:
+        return RuntimeDelay(line, ago)
+    from .lineops import delay
+
+    return delay(line, ago)
+
+
 def _number(x) -> float:
     """``float(x)``, or a feed's current close (a feed has no ``__float__`` on the oracle
     either, yet ``line == feed`` compares with its close: probe ``feed_operators``)."""
@@ -231,8 +257,8 @@ class LineBuffer(LineArithmetic):
         except IndexError:
             raise IndexError(f"line {self._name!r}: ago={ago} at len={len(self)} of {self.buflen()}") from None
 
-    def __call__(self, ago: int = 0) -> float:
-        return self[ago]
+    def __call__(self, ago: int = 0):
+        return _delayed(self, ago)
 
     def get(self, ago: int = 0, size: int = 1) -> list:
         """The ``size`` values ending at ``ago`` (inclusive), oldest first.

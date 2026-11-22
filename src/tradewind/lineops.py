@@ -126,6 +126,32 @@ def operate(fn, *operands):
     return op
 
 
+def _shift(k):
+    def shifted(a):
+        out = np.full(len(a), np.nan)
+        if k == 0:
+            out[:] = a
+        elif k < len(a):
+            out[k:] = a[:-k]
+        return out
+
+    return shifted
+
+
+def delay(line, ago):
+    """``line(ago)`` in the build stage (``ago <= 0``): the line ``-ago`` bars back on every
+    bar, its minimum period longer by ``-ago`` (observed on the oracle, probe
+    ``line_delay``: ``Highest(close(-1), period=3)`` first has a value on the fourth bar,
+    the highest of the three closes before the current one)."""
+    k = -int(ago)
+    if k < 0:
+        raise NotImplementedError("a line called with a positive ago (a line read forward) is not supported")
+    op = operate(_shift(k), line)
+    op._tw_minperiod += k
+    op._tw_push_minperiod()
+    return op
+
+
 def If(cond, a, b):
     """``a`` where ``cond`` is true, else ``b``: a line, built in a strategy's ``__init__``."""
     return operate(_if, cond, a, b)

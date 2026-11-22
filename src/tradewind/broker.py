@@ -225,6 +225,7 @@ class BackBroker(BrokerBase):
         # set by the engine for the length of a run when nobody listens (``Engine.run``):
         # the order / trade events are then not built at all
         self._tw_quiet_orders = False
+        self._tw_fill_remaining = None     # the fill pass's queue of orders left open (OCO)
         self._tw_quiet_trades = False
         # multi-currency and delayed settlement (``set_conversion``, ``set_properties``,
         # ``set_profile``): off by default, and then the mark is the oracle's
@@ -657,12 +658,47 @@ class BackBroker(BrokerBase):
         # sees Submitted then Accepted, not Accepted twice, even though the live order
         # object has already moved on; ``executed`` is frozen with it.
         if self._tw_quiet_orders:
+            if order._tw_oco is not None and not order.alive():
+                self._tw_end_oco(order)
             return
         clone = order._snapshot()
         security = getattr(order.data, "security", None)
         ex = order.executed
         self.bus.publish(OrderEvent(self._now, 0, order.ref, security.id if security is not None else None,
                                     order.status, ex.size, ex.price, ex.comm, "", clone))
+        if order._tw_oco is not None and not order.alive():
+            self._tw_end_oco(order)
+
+    # -- one-cancels-others ------------------------------------------------------------------
+    @staticmethod
+    def _tw_link_oco(order, oco):
+        """``order`` joins the OCO group of ``oco`` (one group however the members name
+        each other: ``b`` oco ``a`` then ``c`` oco ``b`` is the group a, b, c)."""
+        group = oco._tw_oco
+        if group is None:
+            group = oco._tw_oco = [oco]
+        group.append(order)
+        order._tw_oco = group
+
+    def _tw_end_oco(self, order):
+        """``order`` of an OCO group ended (filled, cancelled, expired, refused): every other
+        member waiting in the book is cancelled now, the latest made first. Observed on the
+        oracle (probe ``oco``): the members' own notification comes first, then ``Canceled``
+        for the others in reverse creation order; a member still waiting for its batch
+        acceptance is left to it (the batch refuses what follows a refusal: ``Margin``)."""
+        group = order._tw_oco
+        for member in group:
+            member._tw_oco = None
+        remaining = self._tw_fill_remaining
+        for other in reversed(group):
+            if other is order or not other.alive() or other in self.submitted:
+                continue
+            if other in self.pending:
+                self.pending.remove(other)
+            elif remaining is not None and other in remaining:
+                remaining.remove(other)
+            other.cancel()
+            self.notify(other)
 
     # -- order entry -------------------------------------------------------------------------
     def buy(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None,
@@ -670,6 +706,8 @@ class BackBroker(BrokerBase):
             histnotify=False, _checksubmit=True, **kwargs):
         order = BuyOrder(owner=owner, data=data, size=abs(size), price=price, plimit=plimit,
                          exectype=exectype, valid=valid, tradeid=tradeid, **kwargs)
+        if oco is not None:
+            self._tw_link_oco(order, oco)
         return self.submit(order, check=_checksubmit)
 
     def sell(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None,
@@ -677,6 +715,8 @@ class BackBroker(BrokerBase):
              histnotify=False, _checksubmit=True, **kwargs):
         order = SellOrder(owner=owner, data=data, size=-abs(size), price=price, plimit=plimit,
                           exectype=exectype, valid=valid, tradeid=tradeid, **kwargs)
+        if oco is not None:
+            self._tw_link_oco(order, oco)
         return self.submit(order, check=_checksubmit)
 
     def submit(self, order, check=True):
@@ -979,7 +1019,7 @@ class BackBroker(BrokerBase):
         sids, sizes, schemes, checks = [], [], [], []
         for o in orders:
             et = o.exectype
-            if o._tw_bracket is not None or (et != _MARKET and et != _CLOSE):
+            if o._tw_bracket is not None or o._tw_oco is not None or (et != _MARKET and et != _CLOSE):
                 return False
             security = o.data.security
             if security._broker is not self or security.id >= n_sec:
@@ -1045,7 +1085,8 @@ class BackBroker(BrokerBase):
         seen = set()
         live = []
         for o in orders:
-            if o._tw_bracket is not None or o.exectype != _MARKET or o.valid is not None or not o.size:
+            if (o._tw_bracket is not None or o._tw_oco is not None or o.exectype != _MARKET
+                    or o.valid is not None or not o.size):
                 return False
             security = o.data.security
             sid = security.id
@@ -1208,6 +1249,7 @@ class BackBroker(BrokerBase):
         if len(pending) >= self._tw_vector_min and has_bar is not None and self._tw_fill_vector(has_bar):
             return
         remaining = collections.deque()
+        self._tw_fill_remaining = remaining
         activate: list = []
         while pending:
             order = pending.popleft()
@@ -1242,10 +1284,7 @@ class BackBroker(BrokerBase):
                 order.expire()
                 self.notify(order)
                 continue
-            placed = None
-            if getattr(fill_model, "needs_placed_bar", True) and len(data) >= 2:
-                placed = Bar(data.datetime[-1], data.open[-1], data.high[-1], data.low[-1], data.close[-1],
-                             data.volume[-1])
+            placed = self._tw_placed_bar(fill_model, order, data)
             proposal = fill_model.fill(FillParameters(security, order, bar, placed, self._now, models.slippage))
             if proposal is None:
                 remaining.append(order)
@@ -1253,8 +1292,27 @@ class BackBroker(BrokerBase):
             if self._execute(security, order, proposal, self._dtnum):
                 remaining.append(order)    # a part filled, the rest waits for the next bar
         self.pending = remaining
+        self._tw_fill_remaining = None
         for child in activate:
             child._tw_waiting = False
+
+    @staticmethod
+    def _tw_placed_bar(fill_model, order, data):
+        """The bar the order was placed on, for a fill model that prices on it (``coc``):
+        the previous bar, or this one for an order placed in a cheat-on-open hook and
+        filled in the same slice (observed on the oracle, probe ``next_open``: with
+        ``set_coc`` and ``set_coo`` such an order fills at this bar's close)."""
+        if not getattr(fill_model, "needs_placed_bar", True):
+            return None
+        if getattr(order, "_tw_placed_now", False):
+            order._tw_placed_now = False
+            ago = 0
+        elif len(data) >= 2:
+            ago = -1
+        else:
+            return None
+        lines = (data.datetime, data.open, data.high, data.low, data.close, data.volume)
+        return Bar(*(line[ago] for line in lines))
 
     def _tw_fill_one(self, order, has_bar, remaining) -> None:
         """The fill phase of one order, by the general path (a bracket's orders)."""
@@ -1269,10 +1327,7 @@ class BackBroker(BrokerBase):
             order.expire()
             self.notify(order)
             return
-        placed = None
-        if getattr(fill_model, "needs_placed_bar", True) and len(data) >= 2:
-            placed = Bar(data.datetime[-1], data.open[-1], data.high[-1], data.low[-1], data.close[-1],
-                         data.volume[-1])
+        placed = self._tw_placed_bar(fill_model, order, data)
         proposal = fill_model.fill(FillParameters(security, order, bar, placed, self._now,
                                                   security.models.slippage))
         if proposal is None or self._execute(security, order, proposal, self._dtnum):

@@ -224,6 +224,28 @@ with a non-zero threshold and 1 751 with zero only (solvency guards); no diverge
 440 measured strategies is due to it. Such a divergence is listed by slug as "strategy decision on
 a value one ulp apart", not fixed in the engine.
 
+### API scan of the catalogue (2026-11-22)
+
+Static scan (ast) of the 5 852 `strategy.py` of papers `origin/main` (4 959 published, 893
+held) against Tradewind's live objects and the parity campaign: the surfaces the corpus uses
+that no parity run had exercised were probed on both engines (black box; probes kept in
+`tests/oracle/strategies.py` and pinned in `tests/test_api_scan.py`).
+
+| behaviour | kept / corrected | how it was seen |
+|---|---|---|
+| **Cheat on open**: with `cheat_on_open` (an engine parameter, or `self.cerebro.p.cheat_on_open = True` set in a strategy's `__init__`, read on every slice) a hook runs on every slice right after the feeds move: `prenext_open` on the first slice and while the previous step was `prenext`, `nextstart_open` once after `nextstart` (by default it calls `next_open`), `next_open` after. It sees the new bar (all its lines), the strategy's clock (`len(self)`) and the broker's mark of the previous slice. Its orders join this slice's batch (accepted and filled at this bar's open, at its close with `set_coc`) when the broker cheats on open (`set_coo(True)`, set by the engine when `cheat_on_open` is an engine parameter or a `run` keyword, not when a strategy sets the flag late), else the next slice's | kept | probes `cheat_on_open`, `cheat_on_open_engine`; corpus `on_the_predictability_of_stock_prices…`, `overnight_reversal_and_the_asymmetric_reaction_to_news`, `portfolio_construction_with_news_sentiment…` (no `next_open` was ever called on Tradewind: they never traded) |
+| An indicator read inside a cheat-on-open hook shows **this** bar's value on Tradewind, the previous bar's on the oracle (which steps indicators after the hook) | **not matched**, documented | probe `next_open2`; no corpus strategy reads an indicator there |
+| **One-cancels-others** (`oco=`): the members form one group however they name each other (`b` oco `a`, `c` oco `b`); when one ends (filled, cancelled, expired, refused) every other member waiting in the book is `Canceled`, the latest made first, after the member's own notification; a member still waiting for its batch acceptance is left to the batch (which refuses what follows a refusal) | kept | probe `oco_groups`; corpus `on_the_predictability_of_stock_prices…` and three more passing `oco=` (Tradewind dropped the argument: both band entries could fill) |
+| `coc=False` passed to `buy`/`sell` turns the broker's cheat-on-close off for that order; `coc=True` does not turn it on | kept | probe `order_coc`; corpus `overnight_reversal…` |
+| `valid=` as a `date` / `datetime` (that instant, a date at midnight) or a `timedelta` (from the bar the order is made on): the order expires on the first bar after it | kept | probe `oco_groups` (Tradewind raised `TypeError` comparing a float with a date) |
+| `order_target_value(price=)` (and `order_target_percent(price=)`) : the price sizes the order **and** is its price (a limit's limit) | kept | probe `target_value_price` (Tradewind sent a `Limit` without a price) |
+| A session-start `notify_timer` runs on the **previous** clock (`len(self)` the slices before this one, the feeds already on the new bar), gets `when` as a `datetime` (midnight on daily bars), and what its orders raise (`Submitted`...) is delivered with the next slice's notifications | kept | probe `timer_clock`; the five corpus timer strategies read neither, their NAVs were already identical |
+| `line(ago)` inside `__init__` is the line delayed by `-ago` bars (minimum period longer by as much: `Highest(close(-1), 3)` first has a value on bar 4); called inside `next` it is not a number (`float()` raises `TypeError`) | kept | probe `line_delay`; corpus `skewness_preference_and_the_popularity_of_technical_analysis` (`Highest(close(-1))`), `multi_asset_portfolio_optimization…` (catches the `TypeError` and reads `close[i]`) |
+| `cerebro.runstop()` (from a strategy, `self.env.runstop()`) ends the run after the current slice: no other bar, `stop` is called, orders still waiting are never processed | kept | probe `runstop`; held `a_fuzzy_online_portfolio_selection…` (`AttributeError` on Tradewind) |
+| A percentage `CommInfoBase` with `percabs=False` divides `p.commission` itself by 100 (a subclass's `_getcommission` reading `self.p.commission` gets the converted rate) | kept | probe `broker` |
+| Timers with **several** `monthdays` / `weekdays`, `monthdays` past a short month's end (`[31]`), `monthcarry=False` after a missed day, `SESSION_END` on daily bars: the oracle fires on dates Tradewind does not (and never fires `SESSION_END` on daily bars); Tradewind fires at most once per month / week | **not matched**, À VALIDER (no corpus use) | probe `timer_rules` (tables in the API-scan report) |
+| An order placed on a feed **before its first bar** (from a timer or `prenext`): on the oracle a market or target order is accepted and never fills, a limit fills at once against the wrapped end of the buffer; `created.price` is that wrapped close. Tradewind fills them at the feed's first bar, `created.price` 0.0 | **not matched**, À VALIDER (look-ahead on the oracle) | probe `unlisted_order`; to watch in the campaign (timer strategies on indices that list late) |
+
 ## Clock and bars
 
 | behaviour | kept / corrected | note |

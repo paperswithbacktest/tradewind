@@ -44,7 +44,7 @@ def frames(n_sym=3, n_bars=120, seed=11):
 
 
 def run_one(bt, cls, fr, cash=100_000, commission=None):
-    cerebro = bt.Cerebro(stdstats=False)
+    cerebro = bt.Cerebro(stdstats=False, **getattr(cls, "oracle_cerebro", {}))
     for name, f in fr.items():
         cerebro.adddata(bt.feeds.PandasData(dataname=f), name=name)
     cerebro.addstrategy(cls)
