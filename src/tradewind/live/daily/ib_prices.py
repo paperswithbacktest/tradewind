@@ -498,7 +498,7 @@ def universe(cache_dir: str, session: str, books_dir: str | None, slugs: list[st
     out: dict[str, str | None] = {}
     root = os.path.expanduser(cache_dir)
     folders = {"TIME_SERIES_DAILY_ADJUSTED": "equity", "TIME_SERIES_DAILY": "equity", "FX_DAILY": "fx",
-               "DIGITAL_CURRENCY_DAILY": "crypto", **{v: k for k, v in FOLDERS.items()}}
+               "DIGITAL_CURRENCY_DAILY": "crypto", "KRAKEN_OHLC": "crypto", **{v: k for k, v in FOLDERS.items()}}
     if os.path.isdir(root):
         days = sorted(d for d in os.listdir(root) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) and d <= session)
         for day in days[-sessions_back:]:
@@ -532,16 +532,23 @@ def universe(cache_dir: str, session: str, books_dir: str | None, slugs: list[st
 
 
 def summarize(served: dict[str, set], stale: set) -> dict:
-    """``{n, ibkr, alphavantage, stale, shares}`` over the unique symbols the workers filled."""
-    ib, av = set(served.get("ibkr", set())), set(served.get("alphavantage", set())) - set(served.get("ibkr", set()))
-    every = ib | av | set(stale)
+    """``{n, ibkr, kraken_served, alphavantage, stale, shares}`` over the unique symbols the workers
+    filled (``kraken``: crypto symbols served by Kraken's public data)."""
+    ib = set(served.get("ibkr", set()))
+    kr = set(served.get("kraken", set())) - ib
+    av = set(served.get("alphavantage", set())) - ib - kr
+    every = ib | kr | av | set(stale)
     n = len(every)
 
     def share(x):
         return len(x) / n if n else math.nan
 
-    return {"n": n, "ibkr": len(ib), "alphavantage": len(av), "stale": len(set(stale)),
-            "shares": {"ibkr": share(ib), "alphavantage": share(av), "stale": share(set(stale))}}
+    out = {"n": n, "ibkr": len(ib), "alphavantage": len(av), "stale": len(set(stale)),
+           "shares": {"ibkr": share(ib), "alphavantage": share(av), "stale": share(set(stale))}}
+    if kr:
+        out["kraken_served"] = len(kr)
+        out["shares"]["kraken"] = share(kr)
+    return out
 
 
 __all__ = ["DATA_CLIENT_ID", "DEFAULT_GRACE", "FALLBACK_CODES", "FOLDERS", "IB_INDICES", "NO_IB_CURRENCIES",

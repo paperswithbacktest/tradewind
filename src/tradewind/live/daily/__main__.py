@@ -28,7 +28,7 @@ import sys
 
 from .borrow import SOURCES as BORROW_SOURCES
 from .borrow import borrow_source
-from .brokers import IBPaperAccount, SimAccount
+from .brokers import IBPaperAccount, KrakenAccount, SimAccount
 from .meta import REBALANCE, MetaPortfolio
 from .providers import PwbProvider, ReplayProvider
 from .runner import AccountCurrencyError, DailyRunner, StaleData
@@ -39,7 +39,7 @@ def parser() -> argparse.ArgumentParser:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--meta", required=True, help="the meta-portfolio (YAML, JSON or CSV)")
     p.add_argument("--dir", default="paper", help="state, proposals and journal (default ./paper)")
-    p.add_argument("--broker", choices=["sim", "ibkr"], default="sim")
+    p.add_argument("--broker", choices=["sim", "ibkr", "kraken"], default="sim")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--propose", action="store_true", help="write the proposal only (the default)")
     mode.add_argument("--send", action="store_true", help="place the orders (market-on-open)")
@@ -50,7 +50,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--fresh-prices", default=None, metavar="SOURCES",
                    help="complete the monthly price datasets up to the last close: ibkr,alphavantage (IB first, "
                         "AlphaVantage for the rest), alphavantage, ibkr, or none (AlphaVantage's key in "
-                        "ALPHAVANTAGE_API_KEY)")
+                        "ALPHAVANTAGE_API_KEY); kraken: crypto closes from Kraken's public data (no key)")
     g = p.add_argument_group("meta-portfolio overrides")
     g.add_argument("--capital", type=float)
     g.add_argument("--capital-currency", help="the currency of --capital / capital: USD, or the account's (default)")
@@ -87,6 +87,16 @@ def parser() -> argparse.ArgumentParser:
     i.add_argument("--base-fx-rate", type=float, default=None,
                    help="an account whose currency is not USD: the price of 1 unit of it in USD (EURUSD), "
                         "the last resort after IB's own rate and PWB's forex series")
+    k = p.add_argument_group("Kraken spot account (spec/11; key in KRAKEN_API_KEY / KRAKEN_API_SECRET)")
+    k.add_argument("--kraken-quote", choices=["USD", "EUR"], default="USD", help="the pairs' quote currency")
+    k.add_argument("--kraken-live", action="store_true",
+                   help="with --send AND TRADEWIND_KRAKEN_LIVE=1 in the environment, orders trade; otherwise "
+                        "every order is sent with validate=true (checked by Kraken, never traded)")
+    k.add_argument("--kraken-allowed", default=None, metavar="SYMBOLS",
+                   help="comma-separated whitelist of the books' crypto symbols (BTC,ETH); others are skipped")
+    k.add_argument("--kraken-max-order", type=float, default=None, metavar="USD",
+                   help="refuse any order whose notional exceeds this (USD)")
+    k.add_argument("--kraken-taker-fee", type=float, default=0.004, help="taker fee for the checks (0.004)")
     s = p.add_argument_group("simulated account")
     s.add_argument("--sim-cash", type=float, default=110_000.0, help="in the account's currency")
     s.add_argument("--sim-currency", default=None,
@@ -115,12 +125,17 @@ def make_provider(args, meta: MetaPortfolio, directory: str) -> PwbProvider:
 def make_borrow(meta: MetaPortfolio, broker: str):
     """The shorts' borrow source: the meta-portfolio's ``borrow_source`` (or ``--borrow-source``);
     unset, ``auto`` on an IBKR account and none on the simulated one."""
-    return borrow_source(meta.borrow_source or ("auto" if broker == "ibkr" else "none"))
+    return borrow_source(meta.borrow_source or ("auto" if broker == "ibkr" else "none"))  # spot crypto: none
 
 
 def make_account(args, directory: str, send: bool):
     """The account the command line asks for (an IBKR paper account opens read-only unless
     ``send``)."""
+    if args.broker == "kraken":
+        allowed = [x.strip() for x in args.kraken_allowed.split(",") if x.strip()] if args.kraken_allowed else None
+        return KrakenAccount(quote=args.kraken_quote, send=send, live=args.kraken_live, allowed=allowed,
+                             max_order_notional=args.kraken_max_order, taker_fee=args.kraken_taker_fee,
+                             base_fx=args.base_fx_rate)
     if args.broker == "ibkr":
         return IBPaperAccount(args.host, args.port, args.client_id, account=args.account, send=send,
                               base_fx=args.base_fx_rate)
@@ -140,7 +155,7 @@ def main(argv=None) -> int:
     except (RuntimeError, ValueError) as exc:
         print(exc, file=sys.stderr)
         return 2
-    if args.broker == "ibkr" and args.replay:
+    if args.broker in ("ibkr", "kraken") and args.replay:
         print("--replay runs on the simulated account only", file=sys.stderr)
         return 2
     account = make_account(args, directory, args.send)
@@ -183,7 +198,7 @@ def main(argv=None) -> int:
         print("warning:", w)
     print("proposal:", report.proposal_md)
     if args.send:
-        bad = [s for s in report.sent if s.get("status") in ("rejected", "cancelled")]
+        bad = [s for s in report.sent if s.get("status") in ("rejected", "cancelled", "refused")]
         for s in bad:
             print(f"  {s['symbol']} {s['quantity']:+g}: {s['status']} {s.get('reason', '')}")
     return 0

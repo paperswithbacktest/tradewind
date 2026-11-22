@@ -1,7 +1,8 @@
 """Live trading (chantier 7, spec/07-live-ibkr.md).
 
 ``LiveEngine`` runs unchanged strategies against a ``BrokerAdapter``: ``IBAdapter``
-(Interactive Brokers through ib_async, ``pip install tradewind[ibkr]``) or ``FakeIB`` (a
+(Interactive Brokers through ib_async, ``pip install tradewind[ibkr]``), ``KrakenAdapter``
+(Kraken crypto spot over REST, validation mode by default; spec/11) or ``FakeIB`` (a
 simulated venue for tests and dry runs). Nothing here is imported by the backtest engine,
 and nothing here needs a dependency beyond numpy and pandas until ``IBAdapter.connect``.
 """
@@ -15,6 +16,7 @@ from .feed import CapacityError, LiveFeed
 from .guards import KeyedInterval, KillSwitch, RateLimiter, RiskLimits
 from .ibkr import IBAdapter, IBBars
 from .journal import Journal
+from .kraken import Credentials, KrakenAdapter, KrakenBars, KrakenError, KrakenREST
 from .messages import (
     AccountSnapshot,
     Ack,
@@ -39,6 +41,7 @@ __all__ = [
     "Canceled",
     "CapacityError",
     "Connection",
+    "Credentials",
     "Execution",
     "FakeBars",
     "FakeIB",
@@ -49,6 +52,10 @@ __all__ = [
     "KeyedInterval",
     "Kill",
     "KillSwitch",
+    "KrakenAdapter",
+    "KrakenBars",
+    "KrakenError",
+    "KrakenREST",
     "LiveBroker",
     "LiveClock",
     "LiveDivergence",

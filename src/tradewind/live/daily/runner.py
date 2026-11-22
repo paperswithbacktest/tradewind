@@ -456,12 +456,13 @@ class DailyRunner:
         kind = getattr(self.account, "kind", "")
         forced = self.meta.account_currency
         if forced and forced != cur:
+            label = {"ibkr": "IBKR", "kraken": "Kraken"}.get(kind, "simulated")
             raise AccountCurrencyError(
                 f"the meta-portfolio says the account is in {forced} (account_currency), the "
-                f"{'IBKR' if kind == 'ibkr' else 'simulated'} account is in {cur}: nothing is sized")
+                f"{label} account is in {cur}: nothing is sized")
         if forced:
             origin = "forced"
-        elif kind == "ibkr":
+        elif kind in ("ibkr", "kraken"):
             origin = "detected"
         elif getattr(self.account, "explicit_currency", False):
             origin = "simulated account"
@@ -629,6 +630,11 @@ class DailyRunner:
         report.chart = self.journal.plot()
         return report
 
+    def _commission(self, order) -> float:
+        """The account's own estimate when it has one (Kraken's taker fee), IBKR's otherwise."""
+        own = getattr(self.account, "estimated_commission", None)
+        return own(order) if callable(own) else estimated_commission(order)
+
     # -- the proposal ------------------------------------------------------------------------------
     def _write_proposal(self, report: DayReport, snap, books: dict[str, SleeveBook], capital: float) -> None:
         plan, day = report.plan, report.date
@@ -640,14 +646,14 @@ class DailyRunner:
             lines_csv.append(",".join(str(x) for x in (
                 o.symbol, "BUY" if o.quantity > 0 else "SELL", f"{abs(o.quantity):g}", f"{o.price:.4f}",
                 f"{o.notional:.2f}", f"{o.current:g}", f"{o.target:g}", f"{o.exact:.4f}",
-                f"{estimated_commission(o):.2f}" if math.isfinite(o.price) else "",
+                f"{self._commission(o):.2f}" if math.isfinite(o.price) else "",
                 (st.get("status", "") + (" " + st["reason"] if st.get("reason") else "")).strip() or "proposed")))
         with open(base + ".csv", "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines_csv) + "\n")
 
         buys = sum(o.notional for o in plan.orders if o.quantity > 0 and math.isfinite(o.notional))
         sells = sum(o.notional for o in plan.orders if o.quantity < 0 and math.isfinite(o.notional))
-        commission = sum(estimated_commission(o) for o in plan.orders if math.isfinite(o.price))
+        commission = sum(self._commission(o) for o in plan.orders if math.isfinite(o.price))
         r = report.row
         md = [f"# Orders for the open after {day}", "",
               (f"- mode: **{'SENT' if report.sent else 'proposal (nothing sent)'}**, account `{snap.account}` "

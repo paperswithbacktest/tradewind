@@ -124,6 +124,8 @@ nav:
   - Live trading:
       - One strategy on IB: live-trading.md
       - Meta-portfolio, daily (paper): live-paper.md
+      - One strategy on Kraken (crypto): live-kraken.md
+      - Meta-portfolio, daily, on Kraken: live-kraken-daily.md
       - Keeping IB Gateway running: keeping-ib-gateway-running.md
   - Analyzers: analyzers.md
   - Plots and tear sheets: plots.md

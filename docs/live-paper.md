@@ -5,6 +5,9 @@
     account. It refuses any port but the paper ports (TWS 7497, IB Gateway 4002) and any
     account whose id does not start with `DU`. Nothing is sent without `--send`.
 
+A crypto meta-portfolio on Kraken runs with the same runner: see
+[the daily run on Kraken](live-kraken-daily.md).
+
 [Live trading (IB)](live-trading.md) runs **one** strategy bar by bar. This page runs a
 **meta-portfolio**, several strategies at given weights in one account, once a day after
 the US close:

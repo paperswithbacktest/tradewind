@@ -131,6 +131,21 @@ figures) and [Examples from the catalogue](catalogue-examples.md).
     --8<-- "live_ibkr_paper.py"
     ```
 
+## Crypto on Kraken
+
+`live_kraken.py`: a daily trend rule on BTC and ETH, run live on Kraken in validation mode
+(every order checked by Kraken with `validate=true`, nothing traded). Guide:
+[Live trading on Kraken](live-kraken.md).
+
+`python live_kraken.py --public` reads Kraken's public daily bars only (no key); without it,
+the account's key comes from `KRAKEN_API_KEY` / `KRAKEN_API_SECRET`.
+
+??? example "live_kraken.py"
+
+    ```python
+    --8<-- "live_kraken.py"
+    ```
+
 ## The synthetic data
 
 `_data.py` builds the bars every example reads: a seeded random walk on business days,

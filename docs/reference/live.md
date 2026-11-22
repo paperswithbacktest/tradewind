@@ -1,6 +1,7 @@
 # Live trading
 
-Guides: [Live trading (IB)](../live-trading.md), [the daily paper run](../live-paper.md). Preview: the
+Guides: [Live trading (IB)](../live-trading.md), [the daily paper run](../live-paper.md),
+[live trading on Kraken](../live-kraken.md), [the daily run on Kraken](../live-kraken-daily.md). Preview: the
 interface may change.
 
 ::: tradewind.live
@@ -25,6 +26,8 @@ interface may change.
 
 ::: tradewind.live.ibkr
 
+::: tradewind.live.kraken
+
 ::: tradewind.live.fake
 
 ## The daily run of a meta-portfolio
@@ -46,6 +49,8 @@ interface may change.
 ::: tradewind.live.daily.fresh
 
 ::: tradewind.live.daily.ib_prices
+
+::: tradewind.live.daily.kraken_prices
 
 ::: tradewind.live.daily.brokers
 

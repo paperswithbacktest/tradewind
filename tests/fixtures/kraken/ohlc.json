@@ -1,0 +1,13 @@
+{
+  "_source": "docs.kraken.com/api/docs/rest-api/get-ohlc-data: the documented shape ([time, open, high, low, close, vwap, volume, count], strings but time and count, 'last', the last row the uncommitted one); the figures are illustrative",
+  "error": [],
+  "result": {
+    "XXBTZUSD": [
+      [1763424000, "92000.0", "93500.0", "91100.0", "93010.5", "92400.1", "1520.12345678", 40211],
+      [1763510400, "93010.5", "94120.0", "92500.0", "93800.0", "93300.2", "1388.00000001", 38750],
+      [1763596800, "93800.0", "93900.0", "90200.0", "91050.3", "92010.9", "2101.50000000", 51022],
+      [1763683200, "91050.3", "91500.0", "90900.0", "91200.0", "91180.0", "120.00000000", 3011]
+    ],
+    "last": 1763596800
+  }
+}

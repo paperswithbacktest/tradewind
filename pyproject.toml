@@ -41,6 +41,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["network: calls a public API on the network (skipped unless TRADEWIND_NETWORK_TESTS=1)"]
 
 [tool.ruff]
 line-length = 100

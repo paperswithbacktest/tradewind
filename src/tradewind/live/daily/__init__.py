@@ -4,7 +4,7 @@ Every evening after the US close: each strategy of the meta-portfolio runs in si
 to the last close and gives its target book (``providers``, ``books``); the books are summed
 at the meta-portfolio's weights and leverage, capped, rounded to lots and compared with the
 account (``aggregate``); the orders are proposed, and placed only on request
-(``runner``) on a simulated account or an IBKR **paper** account (``brokers``); the day is
+(``runner``) on a simulated account or an IBKR **paper** account (``brokers``) or a Kraken spot account in validation mode (``KrakenAccount``); the day is
 tracked against the backtest (``tracking``), and the shorts' borrow fee and availability are
 reported (``borrow``). The monthly price datasets can be completed up
 to the last close from IB (``ib_prices``, one read-only connection of the run's own) and from
@@ -18,7 +18,7 @@ catalogue strategy (pwb-toolbox, in its own environment) is asked for.
 from .aggregate import Plan, ProposedOrder, plan_day
 from .books import BookRecorder, SleeveBook, record_books
 from .borrow import AutoBorrowSource, HubBorrowSource, IBShortableSource, borrow_report
-from .brokers import IBPaperAccount, SimAccount, ibkr_tiered_commission
+from .brokers import IBPaperAccount, KrakenAccount, SimAccount, ibkr_tiered_commission
 from .meta import MetaPortfolio, Sleeve
 from .providers import EngineProvider, PwbProvider, ReplayProvider
 from .runner import DailyRunner, DayReport, StaleData, last_session
@@ -34,6 +34,7 @@ __all__ = [
     "IBPaperAccount",
     "IBShortableSource",
     "Journal",
+    "KrakenAccount",
     "MetaPortfolio",
     "Plan",
     "ProposedOrder",

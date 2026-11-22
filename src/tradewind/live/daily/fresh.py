@@ -613,6 +613,7 @@ class FreshPrices:
     inactive: set = field(default_factory=set)
     ib: object | None = None                           # ib_prices.IBPriceCache
     av: bool = True
+    kraken: object | None = None                       # kraken_prices.KrakenPriceCache (crypto)
     served: dict = field(default_factory=dict)         # symbol -> "ibkr" | "alphavantage"
     ib_fallbacks: dict = field(default_factory=dict)   # symbol -> why IB did not serve it
     crosscheck: dict = field(default_factory=dict)     # symbol -> {date, ib, av, gap}: both sources at hand
@@ -629,11 +630,16 @@ class FreshPrices:
         session = session or last_close_session()
         sources = tuple(sources or ("alphavantage",))
         ib = IBPriceCache(cache_dir, session, grace) if "ibkr" in sources else None
+        kraken = None
+        if "kraken" in sources:
+            from .kraken_prices import KrakenPriceCache
+
+            kraken = KrakenPriceCache(cache_dir, session, float((grace or {}).get("crypto", 5.0)))
         av_grace = {k: v for k, v in (grace or {}).items() if not k.startswith("av_")}
         av_grace.update({k[3:]: v for k, v in (grace or {}).items() if k.startswith("av_")})
         return cls(AlphaVantage(cache_dir, session, log=log, grace=av_grace, **client_kwargs), session, log=log,
                    strict=strict, tolerance=dict(tolerance or {}), proxies=dict(proxies or {}),
-                   approximate=set(approximate), ib=ib, av="alphavantage" in sources)
+                   approximate=set(approximate), ib=ib, av="alphavantage" in sources, kraken=kraken)
 
     def _ib(self, kind: str, symbol: str) -> pd.DataFrame | None:
         """IB's bars for ``symbol`` when the run collected them and they reach the session."""
@@ -663,14 +669,26 @@ class FreshPrices:
         if abs(gap) > TOLERANCE:
             self.log(f"[prices] {symbol}: IB {b:g} against AlphaVantage {a:g} on {day} ({gap:+.2%})")
 
+    def _kraken(self, kind: str, symbol: str) -> pd.DataFrame | None:
+        """Kraken's daily bars for a crypto ``symbol`` when the run collected them."""
+        if self.kraken is None or kind != "crypto":
+            return None
+        frame, why = self.kraken.bars(kind, symbol)  # type: ignore[attr-defined]
+        if frame is None:
+            self.ib_fallbacks[symbol] = why
+        return frame
+
     def _bars(self, kind: str, symbol: str) -> pd.DataFrame | None:
         if (kind, symbol) not in self._memo:
-            bars = self._ib(kind, symbol) if kind in ("equity", "fx") else None
+            bars = self._ib(kind, symbol) if kind in ("equity", "fx") else self._kraken(kind, symbol)
             if bars is not None:
-                self.served[symbol] = "ibkr"
-                self._cross(kind, symbol, bars)
+                if kind == "crypto":
+                    self.served[symbol] = "kraken"
+                else:
+                    self.served[symbol] = "ibkr"
+                    self._cross(kind, symbol, bars)
             elif not self.av:
-                raise FetchError(f"IB did not serve it ({self.ib_fallbacks.get(symbol, 'not asked')}) and "
+                raise FetchError(f"no listed source served it ({self.ib_fallbacks.get(symbol, 'not asked')}) and "
                                  "alphavantage is not in --fresh-prices")
             else:
                 bars = self.client.daily(kind, symbol)
@@ -851,7 +869,8 @@ class FreshPrices:
             "stale_info": dict(sorted(self.stale_info.items())),
             "not_covered": dict(sorted(self.not_covered.items())),
             "inactive": len(self.inactive),
-            "served": {src: sorted(s for s, v in self.served.items() if v == src) for src in ("ibkr", "alphavantage")},
+            "served": {src: sorted(s for s, v in self.served.items() if v == src)
+                       for src in ("ibkr", "kraken", "alphavantage") if src != "kraken" or self.kraken is not None},
             "ib_fallbacks": dict(sorted(self.ib_fallbacks.items())),
             "crosscheck": dict(sorted(self.crosscheck.items())),
             "splices": {name: asdict(done) for name, done in self.splices.items()},

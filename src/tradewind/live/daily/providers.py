@@ -43,7 +43,7 @@ from .books import SleeveBook, record_books
 from .meta import MetaPortfolio
 from .runner import StaleData
 
-FRESH_SOURCES = ("alphavantage", "ibkr")
+FRESH_SOURCES = ("alphavantage", "ibkr", "kraken")
 
 
 def parse_sources(text: str | None) -> tuple[str, ...]:
@@ -114,7 +114,7 @@ class PwbProvider:
     def __init__(self, meta: MetaPortfolio, cache_dir: str, *, python: str | None = None,
                  papers_dir: str | None = None, timeout: float = 4 * 3600, log=print,
                  fresh_prices: str | None = None, fresh_cache: str | None = None, ib: dict | None = None,
-                 ib_factory=None):
+                 ib_factory=None, kraken_factory=None):
         self.meta = meta
         self.fresh_sources = parse_sources(fresh_prices if fresh_prices is not None else meta.fresh_prices)
         self.fresh_prices = ",".join(self.fresh_sources) or None
@@ -129,6 +129,11 @@ class PwbProvider:
         self.ib_factory = ib_factory
         self.ib_stats: dict = {}
         self._ib_session: str | None = None
+        # Kraken's public daily bars for the crypto symbols (no key); kraken_factory(session,
+        # cache) -> an object with collect({symbol: kind}) (tests); default KrakenDailyPrices
+        self.kraken_factory = kraken_factory
+        self.kraken_stats: dict = {}
+        self._kraken_session: str | None = None
         if "ibkr" in self.fresh_sources:
             from .ib_prices import IBDataConfig
 
@@ -231,12 +236,38 @@ class PwbProvider:
         self.ib_stats["candidates"] = len(wanted)
         return self.ib_stats
 
+    def collect_kraken(self, session: str | None) -> dict:
+        """The Kraken pre-collection of ``session`` (public data, once per session): the crypto
+        symbols the strategies are expected to load, written to the session's cache. Kraken
+        unreachable is a warning: the next source listed serves them."""
+        if "kraken" not in self.fresh_sources:
+            return {}
+        from .fresh import last_close_session
+        from .ib_prices import universe
+        from .kraken_prices import KrakenDailyPrices
+
+        session = session or last_close_session()
+        if self._kraken_session == session:
+            return self.kraken_stats
+        self._kraken_session = session
+        wanted = universe(self.fresh_cache, session, self.cache_dir, [s.slug for s in self.meta.sleeves])
+        try:
+            collector = (self.kraken_factory(session, self.fresh_cache) if self.kraken_factory is not None
+                         else KrakenDailyPrices(self.fresh_cache, session, log=self.log))
+            self.kraken_stats = dict(collector.collect(wanted))
+        except Exception as exc:  # noqa: BLE001 - the next source takes over, said in the warnings
+            msg = f"Kraken prices not collected ({type(exc).__name__}: {exc})"
+            self.log(f"[prices] {msg}")
+            self.warnings.append(msg)
+            self.kraken_stats = {"error": f"{type(exc).__name__}: {exc}"}
+        return self.kraken_stats
+
     def price_report(self) -> dict:
         """Who served the fresh prices of the last ``books()`` (unique symbols over the
         sleeves): IB, AlphaVantage, stale; and the IB collection's statistics."""
         from .ib_prices import summarize
 
-        served: dict[str, set] = {"ibkr": set(), "alphavantage": set()}
+        served: dict[str, set] = {"ibkr": set(), "kraken": set(), "alphavantage": set()}
         stale: set = set()
         fallbacks: dict[str, str] = {}
         cross: dict[str, dict] = {}
@@ -248,7 +279,7 @@ class PwbProvider:
             cross.update(fresh.get("crosscheck") or {})
         out = summarize(served, stale)
         gaps = sorted((abs(v["gap"]), s) for s, v in cross.items() if isinstance(v.get("gap"), (int, float)))
-        out.update(sources=list(self.fresh_sources), ib=dict(self.ib_stats),
+        out.update(sources=list(self.fresh_sources), ib=dict(self.ib_stats), kraken=dict(self.kraken_stats),
                    ib_fallbacks=len([s for s in fallbacks if s in served.get("alphavantage", set()) | stale]),
                    crosscheck={"n": len(gaps), "max": (gaps[-1][1], gaps[-1][0]) if gaps else None,
                                "over_0.5%": [s for g, s in gaps if g > 0.005]})
@@ -312,6 +343,8 @@ class PwbProvider:
         self.fresh = {}
         if "ibkr" in self.fresh_sources:
             self.collect_ib(until)
+        if "kraken" in self.fresh_sources:
+            self.collect_kraken(until)
         failures: list[BaseException] = []
         for sleeve in self.meta.sleeves:
             try:

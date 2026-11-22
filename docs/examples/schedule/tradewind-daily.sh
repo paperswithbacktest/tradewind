@@ -10,13 +10,14 @@ set -u
 PYTHON="$HOME/venvs/tradewind/bin/python"    # the environment with tradewind (and ib_async for IBKR)
 META="$HOME/pwb-paper/meta.yaml"             # the meta-portfolio (its python: has pwb-toolbox)
 DIR="$HOME/pwb-paper"                        # state, proposals, reports
-BROKER="sim"                                 # sim, or ibkr (TWS / IB Gateway paper, port 7497 / 4002)
+BROKER="${BROKER:-sim}"                      # sim, ibkr (TWS / IB Gateway paper, port 7497 / 4002) or kraken
+FRESH_PRICES="${FRESH_PRICES:-alphavantage}" # the fresh-price sources; kraken for a crypto meta-portfolio
 
 # secrets stay out of this file: ALPHAVANTAGE_API_KEY=..., TRADEWIND_NOTIFY_CMD=... (optional)
 ENV_FILE="$HOME/.config/tradewind/daily.env"
 if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 
-ARGS=(--meta "$META" --dir "$DIR" --broker "$BROKER" --fresh-prices alphavantage
+ARGS=(--meta "$META" --dir "$DIR" --broker "$BROKER" --fresh-prices "$FRESH_PRICES"
       --alert-gap 0.01 --alert-loss 0.03)
 # proposals only by default; TRADEWIND_SEND=1 (in the env file) places the orders too
 if [ "${TRADEWIND_SEND:-0}" = "1" ]; then ARGS+=(--send); fi

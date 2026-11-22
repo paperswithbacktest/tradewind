@@ -1,0 +1,9 @@
+# The daily run of a crypto meta-portfolio on Kraken (an example: crontab -e and paste, after
+# editing the path). The crypto bar of a day is complete at 00:00 UTC the next day: the run
+# must start after 00:05 UTC, when it is final (--fresh-prices kraken). 00:15 UTC, Tuesday to
+# Saturday, is 19:15 or 20:15 New York the evening before, Monday to Friday: the run works on
+# that day's NYSE session (holidays: the session already done, nothing). The wrapper is
+# tradewind-daily.sh with BROKER=kraken and FRESH_PRICES=kraken; the Kraken key goes into its
+# env file (KRAKEN_API_KEY=..., KRAKEN_API_SECRET=..., chmod 600), never into a repository.
+# Weekends: not traded (the runner follows the NYSE weekdays; see live-kraken-daily.md).
+15 0 * * 2-6  BROKER=kraken FRESH_PRICES=kraken $HOME/pwb-crypto/tradewind-daily.sh
