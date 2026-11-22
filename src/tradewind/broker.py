@@ -1306,11 +1306,13 @@ class BackBroker(BrokerBase):
             return None
         if getattr(order, "_tw_placed_now", False):
             order._tw_placed_now = False
-            return Bar(data.datetime[0], data.open[0], data.high[0], data.low[0], data.close[0], data.volume[0])
-        if len(data) >= 2:
-            return Bar(data.datetime[-1], data.open[-1], data.high[-1], data.low[-1], data.close[-1],
-                       data.volume[-1])
-        return None
+            ago = 0
+        elif len(data) >= 2:
+            ago = -1
+        else:
+            return None
+        lines = (data.datetime, data.open, data.high, data.low, data.close, data.volume)
+        return Bar(*(line[ago] for line in lines))
 
     def _tw_fill_one(self, order, has_bar, remaining) -> None:
         """The fill phase of one order, by the general path (a bracket's orders)."""
