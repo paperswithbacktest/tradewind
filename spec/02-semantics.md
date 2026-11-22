@@ -29,7 +29,7 @@ Four behaviours the public documentation does not state, learned from order logs
 | `add_cash` is **queued**: invisible to `getcash` in the bar that asks, invisible to the next bar's batch check and fills, landed at the end of that pass | kept | probe `add_cash_timing`; corpus `consumer_protection…pension_product`; thirty one-step scenarios on the oracle |
 | `get_value(datas=…)` returns the value of **those positions alone** (no cash) and **applies any pending `add_cash` on the spot**; the plain `get_value()` is the value **marked once per bar** after fills and additions, unmoved by a same-bar `add_cash` or by that side effect | kept, flagged | same probe: an `order_target_value` after `add_cash` gets its whole batch checked against the new cash, a plain `sell` does not. **A read with a side effect is a defect**: the corrected default (chantier 4) applies `add_cash` at a single, documented point and makes `get_value` pure |
 | The batch pre-check prices a market order at the **close of its submission bar**, a limit or stop order at its own price; the fill is then re-checked at the fill price (an order Accepted at the pre-check can still end `Margin`) | kept | `a_new_anomaly…`: order logs, 2020-04-08 |
-| **runonce (default)**: a `next`-only indicator is computed in one pre-pass before the run, during which every feed that is **not one of its inputs sits at its last bar**; an indicator reading such a feed through a parameter sees one frozen value for the whole series. `runonce=False` steps it live. | kept, flagged | probe `foreign_feed`; corpus `a_study_in_portfolio_diversification_using_vix_options` reads VIX = 15.86 on all 9 601 bars. **The reference NAVs embed this defect**; the corrected default (chantier 4) is to step `next`-only indicators live and regenerate those NAVs. |
+| **runonce (default)**: a `next`-only indicator is computed in one pre-pass before the run, during which every feed that is **not one of its inputs sits at its last bar**; an indicator reading such a feed through a parameter sees one frozen value for the whole series. `runonce=False` steps it live. | kept, flagged | probe `foreign_feed`; corpus `a_study_in_portfolio_diversification_using_vix_options` read VIX = 15.86 on all 9 601 bars (until it set `_nextforce`, parity 0.1.54 below). **The reference NAVs embed this defect**; the corrected default (chantier 4) is to step `next`-only indicators live and regenerate those NAVs. An indicator or observer with `_nextforce` turns the pre-pass off for the whole run (parity 0.1.54) |
 
 Observed on 2026-11-03 for the `bt.*` names the codemod found missing (probes `line_ops`,
 `minperiod_add`, `minperiod_chain`, `analyzers`; scratch probes with no trade, an open trade
@@ -196,6 +196,33 @@ and scratch probes on the oracle, then kept as probes in `tests/oracle/strategie
 |---|---|---|
 | `order.created.price` is the order's price, else the **close of its feed when the order is made** (market, close, target orders); `created.pricelimit` is `plimit`, else that same price | kept | probe `created_price`. pwb-toolbox's fill-gap audit divides the open by `created.price`: at 0.0 it gave no gap, the harness did not re-run the strategy at a reduced exposure as it did on the oracle (`absolute_momentum_a_simple_rule…`, `reconsidering_returns`, `how_to_use_gold_as_a_safe_haven` and three more: the first run identical, the published second run sized one share apart) |
 | An indicator built with **no input** (`Konst(k=0.5)`) reads its owner's first feed -- the indicator building it, else the strategy -- and follows that feed's clock even when its `next` never reads it | kept | probe `indicator_no_input`; corpus `trend_following_algorithms_on_india_s_nifty_index` (`IndexError` on Tradewind: a constant cash-rate indicator with no data had no bars) |
+| An indicator whose class sets **`_nextforce = True`** (or whose own `__init__` sets it on `self`), built anywhere in the run -- by the strategy, as another indicator's child, `once`-defining or line-binding alike -- turns the runonce pre-pass **off for the whole run**: every `next`-only indicator, forced or not, is stepped live and reads a foreign feed at the bar's date, as with `runonce=False`. An observer class with it does the same; on a strategy (class or instance) or an analyzer, or set on an indicator after it is built, it changes nothing | kept | probe `nextforce`; scratch probe of thirteen placements (each frozen or live on both engines). Corpus `a_study_in_portfolio_diversification_using_vix_options` (papers `fe3a5a8` sets it on its VIX-gated signal: Tradewind kept the pre-pass and read the last VIX on every bar, first NAV gap 1990-10-17, Sharpe 0.5051 against 0.5044), `when_to_own_stocks_and_when_to_own_gold`, `market_sentiment_and_an_overnight_anomaly` (the three catalogue strategies that set it) |
+
+**The last-bit residual of the marked value: the written cause (spec/12, criterion 1).**
+What is known. The oracle's `getvalue()` differs from `cash + size × close` (Tradewind's mark,
+the `cash + t` row above) by one unit in the last place on a few marks in a hundred; cash, sizes,
+entry prices and closes are identical on both engines on every dumped bar, so the gap is in the
+**mark alone**, never in an order's size or a fill, unless a strategy turns the mark into a
+decision. On the 0.1.54 campaign it accounts for every `within_tol` verdict (max relative gap
+4.2e-16 on the first 440 strategies, none above 1e-15). Reproduction: a **single long** is enough
+(scratch probe, eight seeds: 400 random-walk closes, one 291-share buy at 1 bp commission, held;
+163 of 3 184 marks one ulp away -- 109 above, 54 below), so neither shorts nor the first-touch order
+of several positions (the suspects of 0.1.45 and 0.1.51) are needed. Excluded, by exhaustive search
+on those marks: any expression of at most four terms over cash, size, entry price, close, the
+previous mark and the previous close (`+ - ×`, every parenthesisation), the previous mark plus the
+day's P&L, entry value plus open P&L in either association (2 578 of 3 184 at best, against 3 021
+for `cash + size × close`), five-term expressions adding the starting cash and the commission,
+`math.fsum`, a constant hidden cash and exact (rational) rounding of `cash + size × close`. Not
+known: the order or the intermediate quantity the oracle rounds through; Tradewind keeps
+`cash + t`, which matches 95 % of the marks bit for bit. **Where it can change a result**: a
+strategy that compares the value or the cash with a threshold, or truncates a size computed from it
+(`int(value × w / price)`), and lands within an ulp of the edge (`optimal_portfolio_choice_with_wash_sale_constraints`,
+`are_informed_traders_sensitive_to_regulatory_environments`, `analysis_of_the_effect_of_covid…`
+above). A scan of the frozen catalogue (`fe3a5a8`, 4 954 strategies; report `parity_0154`) finds 6
+strategies comparing `getvalue()`/`getcash()` directly, 908 more comparing a name derived from them
+with a non-zero threshold and 1 751 with zero only (solvency guards); no divergence among the first
+440 measured strategies is due to it. Such a divergence is listed by slug as "strategy decision on
+a value one ulp apart", not fixed in the engine.
 
 ## Clock and bars
 

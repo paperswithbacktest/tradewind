@@ -163,6 +163,12 @@ class Indicator(LineArithmetic, ParamsBase):
         unlike an input, whose period ``addminperiod`` adds to."""
         if _CONSTRUCTING and _CONSTRUCTING[-1] is self:
             _CONSTRUCTING.pop()
+        if getattr(self, "_nextforce", False) and self._tw_env is not None:
+            # Observed on the oracle (probe ``nextforce``): an indicator whose class, or whose
+            # own ``__init__``, sets ``_nextforce`` true turns the runonce pre-pass off for the
+            # **whole run**: every ``next``-only indicator is then stepped live, as with
+            # ``runonce=False``. Set on the instance after it is built, it changes nothing.
+            self._tw_env._tw_nextforce = True
         if self._tw_children:
             self._tw_minperiod = max([self._tw_minperiod] + [c._tw_minperiod for c in self._tw_children])
             self._tw_push_minperiod()
@@ -320,7 +326,11 @@ class Indicator(LineArithmetic, ParamsBase):
 
     def _tw_runonce(self) -> bool:
         env = self._tw_env
-        return bool(getattr(getattr(env, "p", None), "runonce", True)) if env is not None else True
+        if env is None:
+            return True
+        if getattr(env, "_tw_nextforce", False):
+            return False
+        return bool(getattr(getattr(env, "p", None), "runonce", True))
 
     def _tw_reads(self, target, seen=None) -> bool:
         """Does this indicator read a line of ``target``, directly or through the
