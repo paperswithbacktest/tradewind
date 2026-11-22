@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import itertools
 from typing import ClassVar
 
@@ -48,6 +49,26 @@ class OrderData:
         self.dt = dt
 
 
+def _valid_num(valid, data):
+    """``valid`` as the engine's float date. Observed on the oracle (probe ``oco``, case 6):
+    a ``date`` or ``datetime`` is that instant (a date is its midnight), a ``timedelta``
+    counts from the bar the order is made on; the order expires on the first bar after it.
+    A number is already one; ``None`` never expires."""
+    if valid is None or isinstance(valid, (int, float)):
+        return valid
+    from .dateutils import date2num
+
+    if isinstance(valid, (_dt.date, _dt.datetime)):
+        return date2num(valid)
+    if isinstance(valid, _dt.timedelta):
+        try:
+            now = float(data.datetime[0]) if len(data) else 0.0
+        except (AttributeError, IndexError, TypeError):
+            now = 0.0
+        return now + valid.total_seconds() / 86400.0
+    return valid
+
+
 def _close_now(data) -> float:
     """The close a feed shows now, 0.0 before its first bar (or for a non-feed)."""
     try:
@@ -72,6 +93,8 @@ class Order:
     # limit); a child waits until the bar after its entry fills (spec/02, "Bracket orders")
     _tw_bracket: list | None = None
     _tw_waiting = False
+    # the members of a one-cancels-others group share one list (``oco=``)
+    _tw_oco: list | None = None
 
     def __init__(self, owner, data, size, price=None, plimit=None, exectype=None, valid=None,
                  ordtype=None, tradeid=0, info=None, **kwargs):
@@ -83,7 +106,7 @@ class Order:
         self.pricelimit = plimit
         self.plimit = plimit
         self.exectype = Order.Market if exectype is None else exectype
-        self.valid = valid
+        self.valid = _valid_num(valid, data)
         self.ordtype = ordtype if ordtype is not None else (Order.Buy if size > 0 else Order.Sell)
         self.tradeid = tradeid
         self.status = Order.Created

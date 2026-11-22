@@ -193,7 +193,11 @@ class NextBarFillModel:
 
     def fill(self, p: FillParameters) -> FillProposal | None:
         order = p.order
-        if self.coc and order.exectype == _MARKET and p.placed_bar is not None:
+        # ``coc=False`` given to ``buy``/``sell`` (kept in ``order.info``) turns the broker's
+        # cheat-on-close off for that order; ``coc=True`` does not turn it on (observed on
+        # the oracle, probe ``order_coc``)
+        coc = self.coc and (not order.info or bool(order.info.get("coc", True)))
+        if coc and order.exectype == _MARKET and p.placed_bar is not None:
             price = slipped(p.slippage, p.security, order, p.placed_bar.close, True)
         else:
             price = self.fill_price(order, p.bar, p.slippage, p.security)

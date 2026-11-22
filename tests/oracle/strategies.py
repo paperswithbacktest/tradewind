@@ -7,6 +7,7 @@ the two runs can be compared line by line. They exercise the Tier 1 and Tier 2 i
 """
 
 
+import datetime as _dt
 import math
 
 
@@ -1780,6 +1781,177 @@ def build(bt):
             self.extra["rows"].append((len(self), len(self.konst), self.konst.r[0], len(self.close0),
                                        self.close0.q[0]))
 
+
+    # -- API scan of the catalogue (2026-11-22): surfaces the corpus uses that no parity
+    # run had exercised (``reports/api_scan`` of the handoff, spec/02 "API scan")
+
+    class CheatOnOpen(Recorder):
+        """``self.cerebro.p.cheat_on_open = True`` in ``__init__`` with ``set_coo`` and
+        ``set_coc`` (corpus ``on_the_predictability_of_stock_prices…``,
+        ``overnight_reversal…``, ``portfolio_construction_with_news_sentiment…``):
+        ``next_open`` sees the new bar's open, buys at the open with ``coc=False``, places
+        OCO bands and stops; ``next`` closes at the close and cancels the rest."""
+
+        def __init__(self):
+            super().__init__()
+            self.broker.set_coo(True)
+            self.broker.set_coc(True)
+            self.cerebro.p.cheat_on_open = True
+            self.day = []
+            self.extra = {"rows": []}
+
+        def prenext_open(self):
+            self.extra["rows"].append(("prenext_open", len(self), self.datas[0].datetime.date(0).isoformat()))
+
+        def next_open(self):
+            n = len(self)
+            self.extra["rows"].append(("next_open", n, self.datas[0].datetime.date(0).isoformat(),
+                                       round(self.broker.getvalue(), 6)))
+            nav = self.broker.getvalue()
+            for i, d in enumerate(self.datas[:3]):
+                op = d.open[0]
+                size = int(0.25 * nav / op)
+                if n % 3 == 0:
+                    b = self.buy(data=d, size=size, exectype=bt.Order.Limit, price=op * 0.996)
+                    s = self.sell(data=d, size=size, exectype=bt.Order.Limit, price=op * 1.004, oco=b)
+                    self.day += [b, s, self.sell(data=d, size=size, exectype=bt.Order.Stop, price=op * 0.99),
+                                 self.buy(data=d, size=size, exectype=bt.Order.Stop, price=op * 1.01)]
+                elif (n + i) % 2:
+                    self.buy(data=d, size=size, coc=False)
+                else:
+                    self.sell(data=d, size=size, coc=False)
+
+        def next(self):
+            super().next()
+            for o in self.day:
+                if o.alive():
+                    self.cancel(o)
+            self.day = []
+            for d in self.datas[:3]:
+                if self.getposition(d).size:
+                    self.close(d)
+
+    class CheatOnOpenEngine(Recorder):
+        """``Cerebro(cheat_on_open=True)`` (the broker cheats on open too): a target order in
+        ``next_open`` fills at that bar's open; ``nextstart_open`` once, after the warm-up."""
+
+        def __init__(self):
+            super().__init__()
+            self.sma = bt.ind.SMA(self.datas[0].close, period=5)
+            self.extra = {"rows": []}
+
+        def nextstart_open(self):
+            self.extra["rows"].append(("nextstart_open", len(self)))
+            self.next_open()
+
+        def next_open(self):
+            n = len(self)
+            if n % 4 == 0:
+                self.order_target_percent(self.datas[0], target=0.9 if n % 8 else 0.0)
+
+    CheatOnOpenEngine.oracle_cerebro = {"cheat_on_open": True}
+
+    class OcoGroups(Recorder):
+        """``oco=``: a fill, a cancel, an expiry (``valid`` as a date, a datetime, a
+        timedelta) and a refusal of one member; three members; a chain."""
+
+        def next(self):
+            super().next()
+            self._n = getattr(self, "_n", 0) + 1
+            n, d = self._n, self.datas[0]
+            c = d.close[0]
+            today = d.datetime.date(0)
+            if n == 3:
+                a = self.buy(data=d, size=5, exectype=bt.Order.Limit, price=c * 0.995)
+                self.sell(data=d, size=5, exectype=bt.Order.Limit, price=c * 1.005, oco=a)
+            if n == 10:
+                a = self.buy(data=d, size=5, exectype=bt.Order.Limit, price=c * 0.98)
+                self.sell(data=d, size=5, exectype=bt.Order.Stop, price=c * 0.97, oco=a)
+                self.sell(data=d, size=5, exectype=bt.Order.Limit, price=c * 1.02, oco=a)
+            if n == 20:
+                self.a = self.buy(data=d, size=5, exectype=bt.Order.Limit, price=c * 0.5)
+                self.b = self.sell(data=d, size=5, exectype=bt.Order.Limit, price=c * 1.5, oco=self.a)
+            if n == 22:
+                self.cancel(self.b)
+            if n == 25:
+                a = self.buy(data=d, size=5, exectype=bt.Order.Limit, price=c * 0.5,
+                             valid=today + _dt.timedelta(days=4))
+                self.sell(data=d, size=5, exectype=bt.Order.Limit, price=c * 1.5, oco=a)
+            if n == 32:
+                self.buy(data=d, size=3)
+                a = self.sell(data=d, size=5, exectype=bt.Order.Limit, price=c * 1.5)
+                self.buy(data=d, size=10 ** 7, exectype=bt.Order.Limit, price=c * 1.1, oco=a)
+            if n == 40:
+                a = self.buy(data=d, size=5, exectype=bt.Order.Limit, price=c * 1.1)
+                b = self.sell(data=d, size=5, exectype=bt.Order.Limit, price=c * 1.5, oco=a)
+                self.sell(data=d, size=5, exectype=bt.Order.Limit, price=c * 1.6, oco=b)
+            if n == 50:
+                self.buy(data=d, size=5, exectype=bt.Order.Limit, price=c * 0.5,
+                         valid=_dt.datetime.combine(today, _dt.time()) + _dt.timedelta(days=2))
+                self.buy(data=d, size=5, exectype=bt.Order.Limit, price=c * 0.5, valid=_dt.timedelta(days=3))
+                self.buy(data=d, size=5, exectype=bt.Order.Limit, price=c * 0.5, valid=today)
+
+    class TimerClock(Recorder):
+        """The corpus timer (``SESSION_START``, ``monthdays=[1]``, ``monthcarry=True``) on two
+        feeds and an indicator: ``len(self)`` and ``when`` inside ``notify_timer``."""
+
+        def __init__(self):
+            super().__init__()
+            self.sma = bt.ind.SMA(self.datas[0].close, period=15)
+            self.add_timer(when=bt.Timer.SESSION_START, monthdays=[1], monthcarry=True)
+            self.extra = {"rows": []}
+
+        def notify_timer(self, timer, when, *args, **kwargs):
+            d0 = self.datas[0]
+            self.extra["rows"].append((len(self), len(d0), type(when).__name__, str(when),
+                                       round(self.broker.getvalue(), 6)))
+            self.order_target_percent(d0, target=0.45)
+            self.order_target_percent(self.datas[1], target=0.45)
+
+    class LineDelay(Recorder):
+        """``line(-k)`` in ``__init__`` (corpus ``skewness_preference…``: ``Highest(close(-1))``)
+        and ``float(line(-k))`` inside ``next`` (a ``TypeError`` the corpus catches)."""
+
+        def __init__(self):
+            super().__init__()
+            c = self.datas[0].close
+            self.hh = bt.ind.Highest(c(-1), period=3)
+            self.mom = c - c(-3)
+            self.lag = bt.ind.SMA(c, period=2)(-2)
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            try:
+                run = repr(float(self.datas[0].close(-2)))
+            except TypeError:
+                run = "TypeError"
+            self.extra["rows"].append((len(self), repr(self.hh[0]), repr(self.mom[0]), repr(self.lag[0]), run))
+
+    class TargetValuePrice(Recorder):
+        """``order_target_value(price=)`` / ``order_target_percent(price=)``: the price sizes
+        the order and is its limit; a ``CommInfoBase`` subclass reading ``p.commission``."""
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self._n = getattr(self, "_n", 0) + 1
+            n, d = self._n, self.datas[0]
+            if n == 5:
+                self.order_target_value(d, target=30_000, exectype=bt.Order.Limit, price=d.close[0] * 0.99)
+            if n == 15:
+                self.order_target_percent(d, target=0.1, exectype=bt.Order.Limit, price=d.close[0] * 1.01)
+            if n == 25:
+                self.order_target_value(data=d, target=0.0, price=d.close[0])
+
+        def notify_order(self, order):
+            super().notify_order(order)
+            if order.status == order.Submitted:
+                self.extra["rows"].append((order.getordername(), order.created.size, repr(order.created.price)))
+
     return {
         "levered_negative_close": LeveredNegativeClose,
         "slippage_perc": SlippagePerc,
@@ -1844,4 +2016,10 @@ def build(bt):
         "position_by_name": PositionByName,
         "created_price": CreatedPrice,
         "indicator_no_input": IndicatorNoInput,
+        "cheat_on_open": CheatOnOpen,
+        "cheat_on_open_engine": CheatOnOpenEngine,
+        "oco_groups": OcoGroups,
+        "timer_clock": TimerClock,
+        "line_delay": LineDelay,
+        "target_value_price": TargetValuePrice,
     }
