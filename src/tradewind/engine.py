@@ -341,6 +341,10 @@ class Engine(ParamsBase):
 
         recorder = FingerprintRecorder(self, seed)
         self._fingerprint = recorder
+        # Observed on the oracle (probe ``nextforce``): an observer class with ``_nextforce``
+        # true turns runonce off for the run, like such an indicator (indicator.py); an
+        # analyzer or a strategy with it changes nothing
+        self._tw_nextforce = any(getattr(o[0], "_nextforce", False) for o in self.observers)
         strategies = []
         for cls, args, skwargs in self.strats:
             strat = self._build_strategy(cls, args, skwargs)

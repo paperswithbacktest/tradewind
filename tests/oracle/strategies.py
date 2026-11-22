@@ -1952,6 +1952,32 @@ def build(bt):
             if order.status == order.Submitted:
                 self.extra["rows"].append((order.getordername(), order.created.size, repr(order.created.price)))
 
+    class ForeignReadForced(ForeignRead):
+        """``ForeignRead`` with ``_nextforce`` set on the class."""
+
+        _nextforce = True
+
+    class NextForce(Recorder):
+        """``_nextforce`` on an indicator class (parity 0.1.54, corpus
+        ``a_study_in_portfolio_diversification_using_vix_options``, three in the catalogue):
+        the runonce pre-pass is off for the whole run, so the forced indicator and an
+        un-forced one reading another foreign feed both read the bar's value; the strategy
+        trades on the forced one."""
+
+        def __init__(self):
+            super().__init__()
+            self.forced = ForeignReadForced(self.datas[0], other=self.datas[1])
+            self.plain = ForeignRead(self.datas[0], other=self.datas[2])
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            f, p = float(self.forced[0]), float(self.plain[0])
+            self.extra["rows"].append((self.datas[0].datetime.date(0).isoformat(), round(f, 6), round(p, 6)))
+            if len(self) % 10 == 0:
+                target = 0.9 if f > float(self.datas[1].close[-5]) else 0.3
+                self.order_target_percent(self.datas[0], target=target)
+
     return {
         "levered_negative_close": LeveredNegativeClose,
         "slippage_perc": SlippagePerc,
@@ -2022,4 +2048,5 @@ def build(bt):
         "timer_clock": TimerClock,
         "line_delay": LineDelay,
         "target_value_price": TargetValuePrice,
+        "nextforce": NextForce,
     }
