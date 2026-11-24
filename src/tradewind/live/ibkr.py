@@ -161,6 +161,9 @@ class IBAdapter:
         self.published_fx: float | None = None  # IB's rate: units of `currency` per unit of the base
         self.base_cash: float | None = None    # the cash held in the base currency (CashBalance)
         self.nav_base: float | None = None     # NetLiquidation in the base currency
+        self.balances: dict[str, float] = {}   # CashBalance by currency, in its own units
+        self.accrued: dict[str, float] = {}    # AccruedCash by currency (the base's when IB gives only BASE)
+        self.currency_rates: dict[str, float] = {}  # ExchangeRate by currency: base units per unit
         self.account = account
         self.require_paper = require_paper
         self.readonly = readonly
@@ -398,6 +401,12 @@ class IBAdapter:
         self.fx_missing = False
         self.nav_base = values.get(("NetLiquidation", self.base_currency))
         self.base_cash = values.get(("CashBalance", self.base_currency))
+        self.balances = {cur: v for (tag, cur), v in values.items() if tag == "CashBalance" and cur != "BASE"}
+        self.accrued = {cur: v for (tag, cur), v in values.items() if tag == "AccruedCash" and cur != "BASE"}
+        if not self.accrued and ("AccruedCash", "BASE") in values:
+            self.accrued = {self.base_currency: values[("AccruedCash", "BASE")]}
+        self.currency_rates = {cur: v for (tag, cur), v in values.items()
+                               if tag == "ExchangeRate" and cur != "BASE" and v > 0}
         if self.base_currency == self.currency:
             self.published_fx, self.fx_used, self.fx_source = 1.0, 1.0, ""
             return values.get(("TotalCashValue", self.currency)), values.get(("NetLiquidation", self.currency))

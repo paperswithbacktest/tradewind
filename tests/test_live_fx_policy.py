@@ -138,7 +138,8 @@ def test_short_rates_are_read_as_of_the_previous_day_from_public_csvs(tmp_path):
     assert any("fredgraph.csv?id=DFF" in u for u in urls) and any("data-api.ecb.europa.eu" in u for u in urls)
     assert sorted(os.listdir(tmp_path / "rates")) == ["ecb_EST_B.X.WT.csv", "fred_DFF.csv"]
     offline = ShortRates({"GBP": "fred:NOPE"}, None, fetch=lambda url: 1 / 0, log=lambda *a: None)
-    assert offline.differential("GBP", "2026-11-20") == 0.0 and "no short rate for GBP" in offline.warnings[0]
+    assert offline.differential("GBP", "2026-11-20") == 0.0
+    assert "not downloaded" in offline.warnings[0] and "no short rate for GBP" in offline.warnings[-1]
 
 
 # -- the runner ------------------------------------------------------------------------------------
@@ -217,3 +218,282 @@ def test_nothing_declared_runs_as_before_and_wrong_declarations_stop(tmp_path):
                                     "fx_policy": "Hedged", "fx_rates": {"EUR": 2.0}})
     pol = meta.currency_policy()
     assert (pol.base_currency, pol.policy, pol.rebalance, pol.pair) == ("EUR", "hedged", "monthly", "EURUSD")
+
+
+# -- the account's dollar exposure, read currency by currency (accrued interest is not dollars) -------
+def _ib_account(values, positions):
+    """An IB paper account (a stub of TWS) that reports ``values`` (tag, currency, value) and
+    ``positions`` (symbol, quantity, average cost)."""
+    import types
+
+    from test_live_daily import _adapter, _StubIB
+
+    from tradewind.live.daily import IBPaperAccount
+
+    stub = _StubIB()
+    v = types.SimpleNamespace
+    stub.accountValues = lambda account="": [v(tag=t, value=str(x), currency=c) for t, c, x in values]
+    stub.positions = lambda account="": [v(contract=v(symbol=s), position=q, avgCost=a) for s, q, a in positions]
+    return IBPaperAccount(adapter=_adapter(stub), send=False)
+
+
+#: the EUR paper account as IB reported it on 2026-11-24 (report fx_config_2026-11-24, n. 1): a NAV
+#: of 1 000 271.69 EUR, a CashBalance of 1 000 000 EUR and 274.09 EUR of interest accrued, at
+#: 1.09021 USD per EUR. The dollar side (one stock, the USD borrowed for it) is set so that the
+#: items add up to that NAV: the account's dollar exposure is -2.40 EUR, not the +296 USD read then.
+X_IB = 1.09021
+IB_VALUES = [
+    ("NetLiquidation", "EUR", 1_000_271.69), ("NetLiquidation", "BASE", 1_000_271.69),
+    ("TotalCashValue", "EUR", 994_685.85),
+    ("CashBalance", "EUR", 1_000_000.00), ("CashBalance", "USD", -5_002.616504), ("CashBalance", "BASE", 995_411.39),
+    ("AccruedCash", "EUR", 274.09), ("AccruedCash", "BASE", 274.09),
+    ("ExchangeRate", "EUR", 1.0), ("ExchangeRate", "USD", 1.0 / X_IB), ("ExchangeRate", "BASE", 1.0),
+]
+IB_POSITIONS = [("SPY", 10.0, 480.0), ("EUR.USD", 0.0, 0.0)]
+
+
+def test_accrued_interest_in_the_base_currency_is_not_a_dollar_exposure():
+    from tradewind.live.daily.fxpolicy import account_split
+
+    snap = _ib_account(IB_VALUES, IB_POSITIONS).snapshot({"SPY": 500.0})
+    assert snap.nav == pytest.approx(1_000_271.69 * X_IB)
+    assert snap.balances == {"EUR": 1_000_000.0, "USD": -5_002.616504} and snap.accrued == {"EUR": 274.09}
+    split = account_split(snap, "EUR", X_IB, pair="EURUSD", hedge_in_base_cash=True)
+    # the old reading: the NAV less the EUR cash balance, the accrued interest taken for dollars
+    assert snap.nav - snap.base_cash * X_IB == pytest.approx(296.2, abs=0.1)
+    # by currency: EUR cash and EUR interest are base units, the dollars are the stock less the loan
+    assert split.base_units == pytest.approx(1_000_274.09)
+    assert split.usd == pytest.approx(-2.40 * X_IB, abs=0.01)
+    assert abs(split.unexplained) < 0.01 and not split.notes
+    # hedged, IB's minimum of 200 USD: no order (the old reading proposed +272 EUR, a ghost)
+    policy = FxPolicy("EUR", "hedged", "monthly", min_notional=200.0)
+    assert policy.order(split.usd, X_IB, day="2026-12-01", last="2026-11-24", capital_usd=0.0) == 0.0
+    assert policy.order(296.2, X_IB, day="2026-12-01", last="2026-11-24", capital_usd=0.0) == pytest.approx(
+        296.2 / X_IB)
+    # IB gives the accrued interest only for BASE: it is the base currency's
+    only_base = [x for x in IB_VALUES if not (x[0] == "AccruedCash" and x[1] == "EUR")]
+    snap = _ib_account(only_base, IB_POSITIONS).snapshot({"SPY": 500.0})
+    assert snap.accrued == {"EUR": 274.09}
+    # USD interest accrued (the loan's) is dollars
+    with_usd = IB_VALUES + [("AccruedCash", "USD", -3.0)]
+    split = account_split(_ib_account(with_usd, IB_POSITIONS).snapshot({"SPY": 500.0}), "EUR", X_IB)
+    assert split.usd == pytest.approx(-2.40 * X_IB - 3.0, abs=0.01)
+
+
+def test_an_unexplained_nav_withholds_the_hedge_order():
+    from tradewind.live.daily.fxpolicy import account_split
+
+    # a position with no close to value it: the items do not add up to the NAV
+    snap = _ib_account(IB_VALUES, IB_POSITIONS).snapshot({})
+    split = account_split(snap, "EUR", X_IB)
+    assert split.unexplained == pytest.approx(5_000.0, abs=0.01) and "SPY +10: no value" in split.notes
+
+
+class _AccruingSim(SimAccount):
+    """A simulated EUR account that accrues interest on its EUR cash as IB reports it: in the NAV
+    (``AccruedCash``), not in the cash balance."""
+
+    per_day = 27.4
+
+    def snapshot(self, closes=None):
+        snap = super().snapshot(closes)
+        n = len(self.state.get("_days", []))
+        if self.state.get("date") and self.state.get("date") not in self.state.setdefault("_days", []):
+            self.state["_days"].append(self.state["date"])
+            n += 1
+        accrued = 274.09 + self.per_day * n
+        snap.accrued = {self.currency: accrued}
+        snap.nav += accrued * snap.fx_rate
+        snap.nav_base = snap.nav / snap.fx_rate
+        return snap
+
+
+def _run_account(tmp_path, name, account_cls, n=30, cash=100_000.0, **meta_kw):
+    inner = _provider()
+    inner._prices = _prices
+    replay = ReplayProvider(inner, UNTIL, n + 1)
+    directory = str(tmp_path / name)
+    account = account_cls(os.path.join(directory, "sim.json"), cash=cash, currency="EUR")
+    runner = DailyRunner(_meta(**meta_kw), replay, account, directory, log=lambda *a: None, rates=ShortRates(RATES))
+    reports = runner.replay(replay.dates()[-n:])
+    return runner, reports, pd.read_csv(os.path.join(directory, "tracking.csv"))
+
+
+def test_the_runner_does_not_hedge_accrued_base_interest(tmp_path):
+    kw = {"base_currency": "EUR", "fx_policy": "hedged", "capital": 100_000.0, "min_order_notional": 200.0}
+    _r, plain_reports, plain = _run_account(tmp_path, "plain", SimAccount, **kw)
+    _r, reports, accruing = _run_account(tmp_path, "accruing", _AccruingSim, **kw)
+    # the interest is in the NAV, and none of it is a dollar exposure
+    assert (accruing["nav_real"] - plain["nav_real"]).iloc[-1] > 274.09 * 1.0
+    np.testing.assert_allclose(accruing["fx_exposure"], plain["fx_exposure"], atol=1e-6)
+    np.testing.assert_allclose(accruing["fx_unexplained"], 0.0, atol=1e-6)
+
+    def hedges(rs):
+        return [(r.date, round(o.quantity, 6)) for r in rs for o in r.plan.orders if o.symbol == "EURUSD"]
+
+    assert hedges(reports) == hedges(plain_reports)
+    assert reports[0].row["fx_hedge_order"] == 0.0           # the first day: no ghost order
+
+
+# -- the carry is on the capital, not on the account's other cash --------------------------------------
+def test_the_carry_is_on_the_capitals_base_part_not_on_the_whole_accounts_cash(tmp_path):
+    _r, _reports, big = _run_account(tmp_path, "big", SimAccount, n=6, cash=1_000_000.0, base_currency="EUR",
+                                     fx_policy="hedged", capital=110_000.0)
+    days = (pd.to_datetime(big["date"]).diff().dt.days).iloc[1]
+    diff = (RATES["EUR"] - RATES["USD"]) / 100.0
+    # the first night: the capital (110 000 EUR) earns the differential, the other 890 000 EUR do not
+    assert big["carry_base"].iloc[1] == pytest.approx(-110_000.0 * diff * days / 360.0, rel=1e-9)
+    _r, _reports, small = _run_account(tmp_path, "small", SimAccount, n=6, cash=110_000.0, base_currency="EUR",
+                                       fx_policy="hedged", capital=110_000.0)
+    np.testing.assert_allclose(big["carry_base"], small["carry_base"], rtol=1e-6, atol=1e-6)
+    # a reference saved before this fix (no "outside"): the capital's part is found again
+    book = FxBook.from_dict({"base": 1_000_000.0, "usd": 0.0, "pending": 0.0, "last": "2026-11-24"})
+    assert book.outside == 0.0 and book.carried == 1_000_000.0
+
+
+# -- fx_hedge_rebalance: never -------------------------------------------------------------------------
+def test_never_makes_no_currency_trade_and_leaves_no_fx_term(tmp_path):
+    _runner, reports, journal = _run(tmp_path, "never", base_currency="EUR", fx_policy="hedged",
+                                     fx_hedge_rebalance="never", capital=100_000.0)
+    assert not [o for r in reports for o in r.plan.orders if o.symbol == "EURUSD"]
+    assert (journal["fx_hedge_order"] == 0).all() and (journal["fx_hedge_order_expected"] == 0).all()
+    _assert_terms_add_up(journal)
+    nav = journal["nav_base"].to_numpy()
+    assert np.abs(journal["fx_base"]).max() < 1e-6 * nav.max()
+    # the dollar exposure is the strategies' P&L since the start, on both sides, never sold
+    pnl = journal["expected_change"].cumsum()
+    np.testing.assert_allclose(journal["fx_exposure_expected"], pnl, atol=1e-6)
+    assert np.abs(journal["fx_exposure"] - journal["fx_exposure_expected"]).max() < 1e-6 * nav.max() * 1.1
+    # the capital stays in EUR and earns the differential
+    assert (journal["carry_base"].iloc[1:] > 0).all()
+    with open(reports[-1].proposal_md, encoding="utf-8") as fh:
+        assert "(never)" in fh.read()
+    policy = FxPolicy("EUR", "hedged", "never")
+    book = FxBook()
+    assert book.decide(policy, 1.1, "2026-12-01", 0.0) == 0.0 and book.last == "2026-12-01"
+    assert policy.order(1e9, 1.1, day="2027-01-04", last="2026-12-01", capital_usd=0.0) == 0.0
+    assert policy.order(1e9, 1.1, day="2027-01-04", last=None, capital_usd=0.0) == 0.0
+    with pytest.raises(ValueError, match="never goes with fx_policy hedged"):
+        FxPolicy("EUR", "unhedged", "never")
+    meta = MetaPortfolio.from_dict({"sleeves": [{"slug": "a", "weight": 1.0}], "base_currency": "EUR",
+                                    "fx_policy": "hedged", "fx_hedge_rebalance": "never"})
+    assert meta.currency_policy().trades_never
+
+
+# -- the short rates: a descriptive agent, a timeout, and an alert when a series is not read ----------
+class _FakeFred:
+    """A local server that answers like FRED: only to a descriptive User-Agent; a bare name
+    (or the ``SLOW`` series) hangs."""
+
+    def __init__(self):
+        import http.server
+        import threading
+
+        seen = self.seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                ua = self.headers.get("User-Agent", "")
+                seen.append((self.path, ua))
+                if "SLOW" in self.path or not (ua.startswith("tradewind/") and "(+https://" in ua):
+                    import time
+
+                    time.sleep(1.5)
+                    return
+                body = b"observation_date,DFF\n2026-11-20,3.89\n2026-11-23,3.88\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/graph/fredgraph.csv?id={{id}}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def fake_fred(monkeypatch):
+    from tradewind.live.daily import fxpolicy
+
+    server = _FakeFred()
+    monkeypatch.setattr(fxpolicy, "FRED_CSV", server.url)
+    yield server
+    server.close()
+
+
+def test_short_rates_are_downloaded_with_a_descriptive_agent(tmp_path, fake_fred):
+    import time
+    import urllib.request
+
+    import tradewind
+    from tradewind.live.daily.fxpolicy import user_agent
+
+    assert user_agent() == f"tradewind/{tradewind.__version__} (+https://github.com/paperswithbacktest/tradewind)"
+    rates = ShortRates({"USD": "fred:DFF", "EUR": 2.0}, str(tmp_path / "rates"), log=lambda *a: None, timeout=1.0)
+    assert rates.rate("USD", "2026-11-23") == 3.88 and not rates.warnings
+    assert rates.differential("EUR", "2026-11-23") == pytest.approx(2.0 - 3.88)
+    assert fake_fred.seen[0][1] == user_agent()
+    # the agent this replaces gets no answer from the server
+    req = urllib.request.Request(fake_fred.url.format(id="DFF"), headers={"User-Agent": "tradewind"})
+    t0 = time.monotonic()
+    with pytest.raises(OSError):
+        urllib.request.urlopen(req, timeout=0.5)
+    assert time.monotonic() - t0 < 1.4
+
+
+def test_a_short_rate_not_read_is_an_explicit_warning_never_a_silent_zero(tmp_path, fake_fred):
+    import time
+
+    logged = []
+    rates = ShortRates({"USD": "fred:SLOW", "EUR": 2.0}, str(tmp_path / "rates"), log=logged.append, timeout=0.5)
+    t0 = time.monotonic()
+    assert rates.differential("EUR", "2026-11-23") == 0.0
+    assert time.monotonic() - t0 < 1.4                       # the timeout, not 30 s
+    assert len(rates.warnings) == 2 and all(w.startswith("fx: ") for w in rates.warnings)
+    assert "short rate USD (fred:SLOW) not downloaded" in rates.warnings[0] and "no cached copy" in rates.warnings[0]
+    assert "no short rate for USD (fred:SLOW: " in rates.warnings[1] and "carry is taken as 0" in rates.warnings[1]
+    assert logged
+    # a copy cached on an earlier day is used, and said so
+    with open(tmp_path / "rates" / "fred_SLOW.csv", "w") as fh:
+        fh.write("observation_date,DFF\n2026-11-20,3.89\n")
+    os.utime(tmp_path / "rates" / "fred_SLOW.csv", (0, 86_400 * 20_000))
+    cached = ShortRates({"USD": "fred:SLOW", "EUR": 2.0}, str(tmp_path / "rates"), log=lambda *a: None, timeout=0.5)
+    assert cached.differential("EUR", "2026-11-23") == pytest.approx(2.0 - 3.89)
+    assert len(cached.warnings) == 1 and "the cached copy of 2024-" in cached.warnings[0]
+
+
+def test_the_session_raises_an_fx_policy_alert_when_a_rate_is_not_read(tmp_path, fake_fred):
+    import datetime as _dt
+
+    from tradewind.calendars import NYSE
+    from tradewind.live.daily.session import EXIT_ALERT, AlertConfig, DailySession
+
+    inner = _provider()
+    inner._prices = _prices
+    replay = ReplayProvider(inner, UNTIL, 4)
+    d1, d2 = [x for x in replay.dates() if NYSE.is_trading_day(x)][-2:]
+    meta = _meta(base_currency="EUR", fx_policy="hedged", capital=100_000.0,
+                 fx_rates={"USD": "fred:SLOW", "EUR": 2.0})
+    directory = str(tmp_path / "paper")
+
+    def account(send=False):
+        return SimAccount(os.path.join(directory, "sim.json"), cash=100_000.0, currency="EUR")
+
+    DailyRunner(meta, replay, account(), directory, log=lambda *a: None,
+                rates=ShortRates(meta.fx_rates, timeout=0.5, log=lambda *a: None)).run_day(d1)
+    out = DailySession(meta, directory, provider_factory=lambda: replay, account_factory=account, session=d2,
+                       now=_dt.datetime.combine(_dt.date.fromisoformat(d2), _dt.time(23, 0), tzinfo=_dt.timezone.utc),
+                       alerts=AlertConfig(max_gap=1.0, max_gap_day=1.0, max_loss=1.0), log=lambda *a: None).run()
+    assert out.code == EXIT_ALERT
+    fx_alerts = [a["message"] for a in out.report["alerts"] if a["code"] == "fx_policy"]
+    assert any("not downloaded" in m for m in fx_alerts) and any("carry is taken as 0" in m for m in fx_alerts)

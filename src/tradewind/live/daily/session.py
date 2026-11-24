@@ -131,7 +131,7 @@ class Alert:
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
     #                     fills_mismatch, orders_working, notify_failed, symbol_watch, short_borrow,
     #                     stale_symbol, out_of_universe, universe_age, sleeve_skipped,
-    #                     public_series_gap
+    #                     public_series_gap, fx_policy
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -365,6 +365,8 @@ class DailySession:
                 alerts.append(Alert("stale_prices", w))
             elif w.startswith("watch: "):           # a delisted name, a hard-to-borrow short, a note
                 alerts.append(Alert("symbol_watch", w[len("watch: "):]))
+            elif w.startswith("fx: "):              # the currency policy: a short rate not read, an exposure unexplained
+                alerts.append(Alert("fx_policy", w[len("fx: "):]))
         for x in alert_lines(report.borrow):        # the day's borrow data (borrow.py)
             alerts.append(Alert("short_borrow", f"{x['symbol']}: {x['status'].replace('_', ' ')} ({x['why']}); "
                                                 f"short {x['short_quantity']:,.0f}"))

@@ -44,7 +44,7 @@ from .books import SleeveBook
 from .borrow import alert_lines, borrow_report
 from .borrow import markdown as borrow_markdown
 from .brokers import estimated_commission
-from .fxpolicy import FxBook, ShortRates
+from .fxpolicy import UNEXPLAINED_TOLERANCE, FxBook, ShortRates, account_split
 from .instruments import FX_CAUTION, fx_pair, is_fx, substitute_books
 from .meta import MetaPortfolio
 from .tracking import Journal, ex_fx, track_day
@@ -528,11 +528,13 @@ class DailyRunner:
         closes.setdefault(pair, rate)
         return opens, closes
 
-    def _hedge_state(self, policy, prev: dict | None, fills: list, snap, held: dict[str, float]) -> dict:
+    def _hedge_state(self, policy, prev: dict | None, fills: list, snap, held: dict[str, float],
+                     closes: dict[str, float], rate: float) -> dict:
         """The hedge's units at the close (the previous ones plus the fills of the hedge orders
         sent), the books' view of the positions (the hedge taken out of the pair) and the
-        account's base units: its base cash, plus the hedge unless the broker settles the
-        pair into the base cash (``hedge_in_base_cash``)."""
+        account's split read off its items by currency (``fxpolicy.account_split``): its base
+        units (base cash and accrued interest, plus the hedge unless the broker settles the
+        pair into the base cash, ``hedge_in_base_cash``) and its dollar exposure."""
         pair = policy.pair
         last = (prev or {}).get("fx_hedge") or {}
         pending = {str(k): float(v) for k, v in (last.get("pending") or {}).items()}
@@ -554,15 +556,16 @@ class DailyRunner:
                     out[pair] = q
             return out
 
-        base_cash = float(getattr(snap, "base_cash", 0.0) or 0.0)
+        split = account_split(snap, policy.base_currency, float(rate), marks=closes, pair=pair,
+                              hedge_units=units, hedge_in_base_cash=in_cash)
         prev_t = None
         if prev is not None:
             u_prev = float(last.get("units", 0.0))
             prev_t = dict(prev, held=book_view(prev.get("held", {}), u_prev),
                           base_cash=prev.get("base_units", prev.get("base_cash", 0.0)))
         return {"units": units, "pending": pending, "fills": hedge_fills, "held": book_view(held, units),
-                "base_units": base_cash + (0.0 if in_cash else units), "prev": prev_t, "order": None,
-                "pending_units": sum(pending.values())}
+                "base_units": split.base_units, "split": split, "prev": prev_t, "order": None,
+                "pending_units": sum(pending.values()), "warnings": []}
 
     def _track_base(self, policy, hedge: dict, prev: dict | None, row: dict, snap, fx: dict, opens: dict,
                     day: str, capital: float) -> None:
@@ -579,14 +582,28 @@ class DailyRunner:
                 if k in row:
                     row[k] -= fill_fx
         nav_base = snap.nav / x
-        live_usd = snap.nav - hedge["base_units"] * x
+        split = hedge["split"]
+        live_usd = split.usd                       # the dollar exposure, from the items by currency
+        tolerance = max(policy.min_notional, UNEXPLAINED_TOLERANCE * abs(snap.nav))
+        explained = abs(split.unexplained) <= tolerance
+        if not explained:
+            hedge["warnings"].append(
+                f"fx: the account's items by currency leave {split.unexplained:+,.0f} USD of its NAV unexplained "
+                f"(over {tolerance:,.0f})" + (f" [{'; '.join(split.notes[:6])}]" if split.notes else "")
+                + ": its dollar exposure is uncertain, no hedge order is proposed")
+        capital_base = capital / x                 # the meta-portfolio's capital, in base units
         terms = ("rounding", "untraded", "timing", "costs", "carry", "fx", "residual")
         if prev is None or "fx_ref" not in prev:
-            ref = FxBook(base=hedge["base_units"], usd=live_usd)
+            # the reference starts as the account: the same dollar exposure, the rest in base;
+            # the base units beyond the capital are the account's other cash (no carry on them)
+            ref_base = nav_base - live_usd / x
+            ref = FxBook(base=ref_base, usd=live_usd, outside=max(0.0, ref_base - capital_base))
             row.update({f"{k}_base": 0.0 for k in terms})
             row.update(nav_expected_base=nav_base, gap_day_base=0.0, gap_cum_base=0.0)
         else:
             ref = FxBook.from_dict(prev["fx_ref"])
+            if "outside" not in prev["fx_ref"]:     # a reference saved before the carry was on the capital
+                ref.outside = max(0.0, ref.base - capital_base)
             x_prev = float(prev["fx_rate"])
             days = (_dt.date.fromisoformat(day) - _dt.date.fromisoformat(prev["date"])).days
             if self.rates is None:
@@ -606,12 +623,13 @@ class DailyRunner:
         # the policy's decision at the close, on both sides from the same date
         last = ref.last
         live_exposure = live_usd - hedge["pending_units"] * x
-        hedge["live_order"] = policy.order(live_exposure, x, day=day, last=last, capital_usd=capital)
+        live_order = policy.order(live_exposure, x, day=day, last=last, capital_usd=capital)
+        hedge["live_order"] = live_order if explained else 0.0
         q_ref = ref.decide(policy, x, day, capital)
         hedge["ref"] = ref
         row.update(fx_policy=policy.policy, base_currency=policy.base_currency, fx_exposure=live_usd,
                    fx_exposure_expected=ref.usd, fx_hedge_order=hedge["live_order"], fx_hedge_order_expected=q_ref,
-                   fx_hedge_units=hedge["units"])
+                   fx_hedge_units=hedge["units"], fx_unexplained=split.unexplained)
         hedge["report"] = {"base_currency": policy.base_currency, "policy": policy.policy,
                            "rebalance": policy.rebalance, "pair": policy.pair, "exposure": live_usd,
                            "exposure_expected": ref.usd, "order": hedge["live_order"], "order_expected": q_ref,
@@ -694,7 +712,7 @@ class DailyRunner:
         snap = self.account.snapshot(closes)
         held = {s: q for s, q in snap.positions.items() if q}
         held_raw = held
-        hedge = self._hedge_state(policy, prev, fills, snap, held) if policy.active else None
+        hedge = self._hedge_state(policy, prev, fills, snap, held, closes, fx["rate"]) if policy.active else None
         if hedge is not None:
             held = hedge["held"]
         if snap.open_orders:
@@ -729,7 +747,7 @@ class DailyRunner:
         if hedge is not None:
             self._track_base(policy, hedge, prev, row, snap, fx, opens, day, capital)
             self._hedge_order(policy, hedge, plan, held_raw, fx)
-            warnings += self.rates.warnings if self.rates is not None else []
+            warnings += hedge["warnings"] + (self.rates.warnings if self.rates is not None else [])
         stale_rows, stale_warnings = self._stale_report(stale, plan, held)
         warnings += stale_warnings
         outside_rows = out_of_universe_rows(plan)
