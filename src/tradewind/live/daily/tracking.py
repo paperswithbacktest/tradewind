@@ -76,6 +76,12 @@ def _sub(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
     return out
 
 
+# a currency policy declared (spec/13, fxpolicy.py): the reference and the gap in the base currency
+COLUMNS += ["base_currency", "fx_policy", "nav_expected_base", "rounding_base", "untraded_base", "timing_base",
+            "costs_base", "carry_base", "fx_base", "residual_base", "fx_exposure", "fx_exposure_expected",
+            "fx_hedge_order", "fx_hedge_order_expected", "fx_hedge_units", "fx_hedge_fee_expected"]
+
+
 def track_day(prev: dict, books: dict[str, SleeveBook], books_prev: dict[str, SleeveBook],
               held: dict[str, float], nav_real: float, fills: list, fx_rate: float | None = None) -> dict:
     """The tracking row of the day of ``books`` against ``prev`` (the previous day's state).
