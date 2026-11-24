@@ -130,7 +130,8 @@ class Alert:
     code: str           # stale_prices, run_failed, broker_unreachable, tracking_gap, daily_loss,
     message: str        # orders_rejected, missed_open, send_interrupted, kill_switch,
     #                     fills_mismatch, orders_working, notify_failed, symbol_watch, short_borrow,
-    #                     stale_symbol, out_of_universe, universe_age, sleeve_skipped
+    #                     stale_symbol, out_of_universe, universe_age, sleeve_skipped,
+    #                     public_series_gap
 
 
 def check_day(row: dict, sent: list[dict], cfg: AlertConfig) -> list[Alert]:
@@ -337,6 +338,8 @@ class DailySession:
         if callable(getattr(provider, "price_report", None)) and getattr(provider, "fresh_prices", None):
             with contextlib.suppress(Exception):    # a report line, never a reason to fail
                 prices = provider.price_report()
+        for _sym, msg in sorted(((prices or {}).get("public_alerts") or {}).items()):
+            alerts.append(Alert("public_series_gap", msg))
         if report is None:
             return self._finish(session, None, alerts, code, status, errors=errors, stale=stale,
                                 extra={"universe": universe, "prices": prices})
@@ -491,7 +494,10 @@ class DailySession:
         mode = "send" if extra.get("sent") else ("propose (send refused)" if self.send else "propose")
         if report is not None:
             summary = (f"{session} {status.upper()} | NAV {nav:,.0f} ({day_ret:+.2%}) | gap to backtest "
-                       f"{row.get('gap_cum', 0.0):+,.0f} ({(row.get('gap_cum', 0.0) / nav if nav else 0.0):+.2%}) | orders "
+                       f"{row.get('gap_cum', 0.0):+,.0f} ({(row.get('gap_cum', 0.0) / nav if nav else 0.0):+.2%}"
+                       + (f"; without fx {row['gap_cum_ex_fx']:+,.0f} ({row['gap_cum_ex_fx'] / nav:+.2%})"
+                          if nav and _finite(row.get("gap_cum_ex_fx")) and row.get("fx_cum") else "")
+                       + f") | orders "
                        f"{len(proposed)} proposed, {len(sent)} sent, {len(fills)} filled | alerts: "
                        f"{', '.join(codes) or 'none'}"
                        + (f" | {len(skipped)} sleeve(s) skipped ("
@@ -512,7 +518,8 @@ class DailySession:
                           "cash": extra.get("cash")},
             "tracking": {k: row.get(k) for k in ("gap_day", "gap_cum", "rounding", "untraded", "timing", "costs",
                                                  "fx", "residual", "expected_change", "costs_paid", "costs_backtest",
-                                                 "gap_day_base", "gap_cum_base")},
+                                                 "gap_day_base", "gap_cum_base", "fx_cum", "gap_day_ex_fx",
+                                                 "gap_cum_ex_fx")},
             "account": dict(report.fx, nav_base=row.get("nav_base")) if report is not None and report.fx else {},
             "orders": {"proposed": proposed, "sent": sent, "filled": fills,
                        "skipped": len(plan.skipped) if plan else 0},
@@ -599,6 +606,10 @@ def out_of_universe_message(rows: list[dict]) -> str:
         + f"; books want {x['wanted_total']:+.4g}, held {x['held']:+g}, target {x['target']:+g}" for x in rows])
 
 
+def _finite(x) -> bool:
+    return isinstance(x, (int, float)) and math.isfinite(x)
+
+
 def prices_line(p: dict) -> str:
     """Who served the fresh prices: ``fresh prices (ibkr,alphavantage): 1 224 symbols, IB 1 199
     (98.0%), AlphaVantage 21 (1.7%), stale 4 (0.3%); IB collection 41 s``."""
@@ -620,9 +631,16 @@ def prices_line(p: dict) -> str:
     if kr.get("error"):
         tail += f"; Kraken not reached: {kr['error']}"
     kraken = f", Kraken {p['kraken_served']}{pct('kraken')}" if p.get("kraken_served") else ""
+    public = f", public {p['public']}{pct('public')}" if p.get("public") else ""
+    pub = p.get("public_series") or {}
+    if pub:
+        tail += "; signals from FRED: " + ", ".join(
+            f"{s} ({v.get('series')}, {v.get('status')}, to {v.get('last_after')}"
+            + (f", median gap {v['median_gap']:.2%}" if isinstance(v.get("median_gap"), float)
+               and math.isfinite(v["median_gap"]) else "") + ")" for s, v in sorted(pub.items()))
     return (f"fresh prices ({','.join(p.get('sources') or [])}): {p.get('n', 0)} symbol(s), IB {p.get('ibkr', 0)}"
-            f"{pct('ibkr')}{kraken}, AlphaVantage {p.get('alphavantage', 0)}{pct('alphavantage')}, stale {p.get('stale', 0)}"
-            f"{pct('stale')}{tail}")
+            f"{pct('ibkr')}{kraken}, AlphaVantage {p.get('alphavantage', 0)}{pct('alphavantage')}{public}, "
+            f"stale {p.get('stale', 0)}{pct('stale')}{tail}")
 
 
 def render_markdown(d: dict) -> str:
@@ -648,6 +666,9 @@ def render_markdown(d: dict) -> str:
                (f"- gap to the backtest: day {money(t['gap_day'])}, cumulative {money(t['gap_cum'])} = rounding "
                 f"{money(t['rounding'])} + untraded {money(t['untraded'])} + timing {money(t['timing'])} + costs "
                 f"{money(t['costs'])} + fx {money(t.get('fx'))} + residual {money(t['residual'])} (USD)"),
+               (f"- gap to the backtest without the account's currency (the fx term taken out): day "
+                f"{money(t.get('gap_day_ex_fx'))}, cumulative {money(t.get('gap_cum_ex_fx'))} (USD; fx cumulative "
+                f"{money(t.get('fx_cum'))})"),
                (f"- orders: {len(o['proposed'])} proposed, {len(o['sent'])} sent, {len(o['filled'])} filled at "
                 f"today's open, {o['skipped']} under the minimum"),
                f"- proposal: `{d['proposal']}`"]

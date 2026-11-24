@@ -6,7 +6,10 @@ One call of ``DailyRunner.run_day`` after the US close:
    target book; the symbols still stale after the fresh-price top-up are put under the
    meta-portfolio's ``stale_symbol_policy`` (``hold`` by default: no order on them; ``close``:
    sold; ``block``: nothing proposed), and a sleeve with more than ``stale_symbol_max_weight``
-   of its gross on them is in error;
+   of its gross on them is in error -- a symbol the meta-portfolio never trades
+   (``MetaPortfolio.refusal``: a currency without an IDEALPRO pair, an index without a
+   substitute, ``exclude_symbols``) is listed but not counted in that share: no order is ever
+   proposed on it, stale or not, and its effect stays in the tracking's ``untraded`` term;
    a sleeve in error (its run failed, too much of it stale, no close for the session) is
    under ``sleeve_error_policy``: ``skip`` (the default) sets it aside for the day -- it is
    given its book of the day before and its units are kept, so what the account holds for it
@@ -43,7 +46,7 @@ from .borrow import markdown as borrow_markdown
 from .brokers import estimated_commission
 from .instruments import FX_CAUTION, fx_pair, is_fx, substitute_books
 from .meta import MetaPortfolio
-from .tracking import Journal, track_day
+from .tracking import Journal, ex_fx, track_day
 
 #: a held name whose close has not moved over this many closes is flagged (prices frozen or
 #: delisted); fewer would flag the end of a monthly dataset, carried forward for a few days
@@ -79,6 +82,14 @@ class DayReport:
     stale: list = field(default_factory=list)   # the stale symbols and what was done with them
     out_of_universe: list = field(default_factory=list)  # names held outside a PIT universe (aggregate.py)
     skipped: list = field(default_factory=list)  # the sleeves set aside for the day (sleeve_error_policy: skip)
+
+
+def untradable(meta: MetaPortfolio, symbol: str) -> str | None:
+    """Why the meta-portfolio never trades ``symbol`` (``MetaPortfolio.refusal``), or None. An
+    index with a substitute is traded (through it): None."""
+    if symbol in meta.substitutes:
+        return None
+    return meta.refusal(symbol)
 
 
 def stale_share(book: SleeveBook, symbols) -> float:
@@ -140,7 +151,9 @@ class DailyRunner:
         sleeves, shares, plan_symbol}}``, under the meta-portfolio's policy; raises
         ``StaleData`` under ``block``. A sleeve with more than ``stale_symbol_max_weight`` of
         its gross on them is put in error: added to ``skipped`` (``sleeve_error_policy:
-        skip``, its symbols then left out unless another sleeve has them), or ``StaleData``."""
+        skip``, its symbols then left out unless another sleeve has them), or ``StaleData``.
+        The share counts only the symbols the meta-portfolio trades (``untradable``): a stale
+        symbol it never trades is listed (``traded: False``) and left out of the share."""
         meta = self.meta
         by_sleeve = {k: dict(v) for k, v in (getattr(self.provider, "stale", None) or {}).items()
                      if v and k not in (skipped or {})}
@@ -151,7 +164,8 @@ class DailyRunner:
         for slug, syms in sorted(by_sleeve.items()):
             for sym, why in sorted(syms.items()):
                 d = out.setdefault(sym, {"symbol": sym, "last": "", "cause": "", "reason": str(why), "dataset": "",
-                                         "sleeves": [], "shares": {}})
+                                         "sleeves": [], "shares": {}, "traded": untradable(meta, sym) is None,
+                                         "refusal": untradable(meta, sym) or ""})
                 d.update({k: v for k, v in (details.get(slug, {}).get(sym) or {}).items()
                           if k in ("last", "cause", "reason", "dataset")})
                 d["sleeves"].append(slug)
@@ -166,11 +180,11 @@ class DailyRunner:
             dates = [d for d in h if as_of is None or d <= as_of]
             if not dates:
                 continue
-            share = stale_share(h[max(dates)], syms)
+            share = stale_share(h[max(dates)], [s for s in syms if untradable(meta, s) is None])
             for sym in syms:
                 out[sym]["shares"][slug] = share
             if share > meta.stale_symbol_max_weight:
-                over.append((slug, share, sorted(syms)))
+                over.append((slug, share, sorted(s for s in syms if untradable(meta, s) is None)))
         if over:
             errors = getattr(self.provider, "errors", None)
             lines = []
@@ -200,7 +214,10 @@ class DailyRunner:
         for sym, d in sorted(stale.items()):
             ps = d["plan_symbol"]
             have, want = held.get(ps, 0.0), plan.exact.get(ps, 0.0)
-            if policy == "hold":
+            if not d.get("traded", True):
+                action = (f"never traded ({d.get('refusal') or 'refused'}): no order, not counted in the "
+                          "sleeve's stale share")
+            elif policy == "hold":
                 action = (f"held at {have:+g}, no order" if have else "not held, not bought") + (
                     f" (the strategies' book wanted {want:+.4g})" if abs(want - have) > 1e-9 else "")
             else:
@@ -565,6 +582,7 @@ class DailyRunner:
         row.update(account_currency=fx["currency"], currency_origin=fx["origin"], fx_rate=rate,
                    fx_source=fx["source"], nav_base=snap.nav / rate, gap_day_base=row["gap_day"] / rate,
                    gap_cum_base=row["gap_cum"] / rate)
+        row.update(ex_fx(row, 0.0 if prev is None else self.journal.fx_before(day)))
 
         plan = plan_day(meta, books, held, capital, day,
                         units=None if prev is None else prev["units"],
@@ -663,7 +681,8 @@ class DailyRunner:
               (f"- backtest NAV {r['nav_expected']:,.2f}; gap today {r['gap_day']:+,.2f}, "
                f"cumulative {r['gap_cum']:+,.2f} (rounding {r['rounding']:+,.2f}, untraded {r['untraded']:+,.2f}, "
                f"timing {r['timing']:+,.2f}, costs {r['costs']:+,.2f}, fx {r.get('fx', 0.0):+,.2f}, "
-               f"residual {r['residual']:+,.2f})"),
+               f"residual {r['residual']:+,.2f}); without fx: today {r.get('gap_day_ex_fx', r['gap_day']):+,.2f}, "
+               f"cumulative {r.get('gap_cum_ex_fx', r['gap_cum']):+,.2f}"),
               *self._currency_lines(report, snap, capital),
               (f"- units: {'reset (' + plan.reason + ')' if plan.rebalanced else 'kept'}; "
                f"gross cap scale {plan.cap_scale:.4f}"),
@@ -762,4 +781,4 @@ def last_session(today: _dt.date | None = None) -> str:
 
 
 __all__ = ["AccountCurrencyError", "DailyRunner", "DayReport", "SleevesInError", "StaleData", "last_session",
-           "out_of_universe_line", "out_of_universe_rows", "skipped_line", "stale_share"]
+           "out_of_universe_line", "out_of_universe_rows", "skipped_line", "stale_share", "untradable"]

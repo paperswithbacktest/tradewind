@@ -532,12 +532,14 @@ def universe(cache_dir: str, session: str, books_dir: str | None, slugs: list[st
 
 
 def summarize(served: dict[str, set], stale: set) -> dict:
-    """``{n, ibkr, kraken_served, alphavantage, stale, shares}`` over the unique symbols the workers
-    filled (``kraken``: crypto symbols served by Kraken's public data)."""
+    """``{n, ibkr, kraken_served, alphavantage, public, stale, shares}`` over the unique symbols the
+    workers filled (``kraken``: crypto symbols served by Kraken's public data; ``public``: signal
+    series continued from a public daily source and current, ``public_prices.py``)."""
     ib = set(served.get("ibkr", set()))
     kr = set(served.get("kraken", set())) - ib
     av = set(served.get("alphavantage", set())) - ib - kr
-    every = ib | kr | av | set(stale)
+    pub = set(served.get("public", set())) - ib - kr - av - set(stale)
+    every = ib | kr | av | pub | set(stale)
     n = len(every)
 
     def share(x):
@@ -548,6 +550,9 @@ def summarize(served: dict[str, set], stale: set) -> dict:
     if kr:
         out["kraken_served"] = len(kr)
         out["shares"]["kraken"] = share(kr)
+    if pub:
+        out["public"] = len(pub)
+        out["shares"]["public"] = share(pub)
     return out
 
 

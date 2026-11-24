@@ -271,18 +271,26 @@ class PwbProvider:
         stale: set = set()
         fallbacks: dict[str, str] = {}
         cross: dict[str, dict] = {}
+        public: dict[str, dict] = {}
+        public_alerts: dict[str, str] = {}
         for fresh in self.fresh.values():
             for src, syms in (fresh.get("served") or {}).items():
                 served.setdefault(src, set()).update(syms)
             stale.update(fresh.get("stale") or {})
             fallbacks.update(fresh.get("ib_fallbacks") or {})
             cross.update(fresh.get("crosscheck") or {})
+            public.update(fresh.get("public") or {})
+            public_alerts.update(fresh.get("public_alerts") or {})
         out = summarize(served, stale)
         gaps = sorted((abs(v["gap"]), s) for s, v in cross.items() if isinstance(v.get("gap"), (int, float)))
         out.update(sources=list(self.fresh_sources), ib=dict(self.ib_stats), kraken=dict(self.kraken_stats),
                    ib_fallbacks=len([s for s in fallbacks if s in served.get("alphavantage", set()) | stale]),
                    crosscheck={"n": len(gaps), "max": (gaps[-1][1], gaps[-1][0]) if gaps else None,
-                               "over_0.5%": [s for g, s in gaps if g > 0.005]})
+                               "over_0.5%": [s for g, s in gaps if g > 0.005]},
+                   public_series={s: {k: v.get(k) for k in ("series", "status", "anchor", "last_after", "factor",
+                                                             "median_gap", "max_gap", "yield_gap_bp", "reason")}
+                                  for s, v in sorted(public.items())},
+                   public_alerts=dict(sorted(public_alerts.items())))
         return out
 
     def _note_stale(self, slug: str, payload: dict) -> None:

@@ -184,7 +184,8 @@ def main(argv=None) -> int:
         account.close()
     r = report.row
     print(f"{report.date}: {len(report.plan.orders)} order(s) {'SENT' if args.send else 'proposed'}; "
-          f"NAV {r['nav_real']:,.2f}, backtest {r['nav_expected']:,.2f}, gap {r['gap_cum']:+,.2f} (USD)")
+          f"NAV {r['nav_real']:,.2f}, backtest {r['nav_expected']:,.2f}, gap {r['gap_cum']:+,.2f} (USD), "
+          f"without fx {r.get('gap_cum_ex_fx', r['gap_cum']):+,.2f}")
     fx = report.fx
     if fx and fx["currency"] != "USD":
         print(f"account in {fx['currency']} ({fx['origin']}), {fx['rate']:.6g} USD per {fx['currency']} "

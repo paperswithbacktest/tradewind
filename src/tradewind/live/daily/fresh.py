@@ -10,7 +10,9 @@ How a series is continued (the rule of the data pipeline's vendor tail):
 * the bars come from ``TIME_SERIES_DAILY_ADJUSTED`` (``outputsize=compact``, the last 100
   sessions) for stocks and ETFs, ``FX_DAILY`` for currency pairs, ``DIGITAL_CURRENCY_DAILY``
   for crypto. A share class written with a dot (``PBR.A``) is asked as AlphaVantage writes it
-  (``PBR-A``) first. Commodities and bonds have no source here; an index has one only through
+  (``PBR-A``) first. Commodities have no source here; a bond or an index has one only through
+  a public daily series of the same quantity (``public_prices.py``: ``US10Y`` from FRED's
+  ``DGS10``, ``VIX`` from ``VIXCLS``; off with ``fresh_public_series: false``) or through
   its *proxy* ETF (below);
 * the chain factor ``k`` is the ratio of the two adjusted closes on the *anchor*, the last
   common day before the dataset's last bar (that bar may be a partial one: the monthly source
@@ -118,6 +120,7 @@ CAUSES = {
     "silent": "AlphaVantage has no bar after it either (a silent source: halted, renamed?)",
     "no_source": "no fresh source for this dataset",
     "fetch_error": "AlphaVantage could not be read",
+    "lagged": "the public daily source publishes a day's value the next business day (public_prices.py)",
 }
 
 
@@ -617,6 +620,8 @@ class FreshPrices:
     served: dict = field(default_factory=dict)         # symbol -> "ibkr" | "alphavantage"
     ib_fallbacks: dict = field(default_factory=dict)   # symbol -> why IB did not serve it
     crosscheck: dict = field(default_factory=dict)     # symbol -> {date, ib, av, gap}: both sources at hand
+    fred: object | None = None                         # public_prices.FredClient: public daily signal series
+    public: dict = field(default_factory=dict)         # symbol -> public_prices.PublicSplice
     _market: str | None = None
     _memo: dict = field(default_factory=dict)
     _listing: dict | None = None
@@ -624,8 +629,10 @@ class FreshPrices:
     @classmethod
     def from_env(cls, cache_dir: str, session: str | None = None, log=print, *, strict: bool = True,
                  tolerance: dict | None = None, proxies: dict | None = None, approximate=(),
-                 sources=("alphavantage",), grace: dict | None = None, **client_kwargs) -> FreshPrices:
+                 sources=("alphavantage",), grace: dict | None = None, public: bool = True,
+                 **client_kwargs) -> FreshPrices:
         from .ib_prices import IBPriceCache
+        from .public_prices import FredClient
 
         session = session or last_close_session()
         sources = tuple(sources or ("alphavantage",))
@@ -639,7 +646,8 @@ class FreshPrices:
         av_grace.update({k[3:]: v for k, v in (grace or {}).items() if k.startswith("av_")})
         return cls(AlphaVantage(cache_dir, session, log=log, grace=av_grace, **client_kwargs), session, log=log,
                    strict=strict, tolerance=dict(tolerance or {}), proxies=dict(proxies or {}),
-                   approximate=set(approximate), ib=ib, av="alphavantage" in sources, kraken=kraken)
+                   approximate=set(approximate), ib=ib, av="alphavantage" in sources, kraken=kraken,
+                   fred=FredClient(cache_dir, session, log=log) if public else None)
 
     def _ib(self, kind: str, symbol: str) -> pd.DataFrame | None:
         """IB's bars for ``symbol`` when the run collected them and they reach the session."""
@@ -738,8 +746,47 @@ class FreshPrices:
                                  f"the ticker was listed anew on {ipo} (AlphaVantage LISTING_STATUS: "
                                  f"{row.get('name', '')}), another series: {info['reason']}")
 
+    def _public(self, repo: str, frame: pd.DataFrame, s: str, lasts, parts: list, replaced: set) -> bool:
+        """``s`` continued with its public daily series (``public_prices.py``) when it has one;
+        False when it has none, or the public source could not be read or has nothing newer
+        (the next source is tried)."""
+        from .public_prices import public_series, splice_public
+
+        spec = public_series(repo, s) if self.fred is not None else None
+        if spec is None:
+            return False
+        last = str(lasts[s])[:10]
+        start = (_dt.date.fromisoformat(last) - _dt.timedelta(days=120)).isoformat()
+        try:
+            series = self.fred.daily(spec.series, start)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 - the next source is tried, said in the log
+            self.log(f"[prices] {s}: FRED {spec.series} not read: {exc}")
+            return False
+        new_rows, done = splice_public(frame[frame["symbol"] == s], series, spec, self.session)
+        self.public[s] = done
+        if done.status == "current":
+            return False
+        if done.alert:
+            self.log(f"[prices] {done.alert}")
+        if done.status == "refused":
+            self._mark_stale(s, repo, last, "diverged", done.reason)
+            return True
+        parts.append(new_rows)
+        replaced.add(s)
+        self.served[s] = "public"
+        self.log(f"[prices] {s}: continued with FRED {spec.series} since {done.anchor} (factor {done.factor:.6f}, "
+                 f"median gap {done.median_gap:.3%} over {done.checked_days} days)")
+        if done.last_after < self.market_close():
+            self._mark_stale(s, repo, done.last_after, "lagged",
+                             f"FRED {spec.series} ends on {done.last_after} (a day's value is published the next "
+                             "business day)")
+        return True
+
     def _index(self, repo: str, frame: pd.DataFrame, behind: list[str], lasts) -> tuple[list, set]:
-        """The indices behind, continued through their proxy ETF when they have one."""
+        """The indices and bonds behind: IB's own index levels, then a public daily series
+        (``public_prices.py``), then a proxy ETF."""
+        from .public_prices import NO_PUBLIC_DAILY
+
         parts, replaced = [], set()
         for s in behind:
             levels = self._ib("index", s) if repo == INDEX_REPO else None
@@ -757,10 +804,14 @@ class FreshPrices:
                 if done.status == "refused":        # the levels disagree with the dataset's
                     self._mark_stale(s, repo, done.last_after, "diverged", f"IB index levels: {done.reason}")
                     continue
+            if self._public(repo, frame, s, lasts, parts, replaced):
+                continue
             proxy = self.proxies.get(s) if repo == INDEX_REPO else None
             if not proxy:
                 self.not_covered[s] = repo
-                self._mark_stale(s, repo, str(lasts[s]), "no_source", "no fresh source for this dataset")
+                why = NO_PUBLIC_DAILY.get((repo, s)) if self.fred is not None else None
+                self._mark_stale(s, repo, str(lasts[s]), "no_source",
+                                 "no fresh source for this dataset" + (f" ({why})" if why else ""))
                 continue
             tracks = proxy in TRACKING_PROXIES.get(s, ())
             if not tracks and s not in self.approximate:
@@ -870,10 +921,14 @@ class FreshPrices:
             "not_covered": dict(sorted(self.not_covered.items())),
             "inactive": len(self.inactive),
             "served": {src: sorted(s for s, v in self.served.items() if v == src)
-                       for src in ("ibkr", "kraken", "alphavantage") if src != "kraken" or self.kraken is not None},
+                       for src in ("ibkr", "kraken", "alphavantage", "public")
+                       if (src != "kraken" or self.kraken is not None)
+                       and (src != "public" or "public" in self.served.values())},
             "ib_fallbacks": dict(sorted(self.ib_fallbacks.items())),
             "crosscheck": dict(sorted(self.crosscheck.items())),
             "splices": {name: asdict(done) for name, done in self.splices.items()},
+            "public": {name: asdict(done) for name, done in sorted(self.public.items())},
+            "public_alerts": {name: done.alert for name, done in sorted(self.public.items()) if done.alert},
         }
 
 

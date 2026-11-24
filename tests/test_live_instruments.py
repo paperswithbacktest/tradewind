@@ -470,9 +470,14 @@ def test_a_eur_account_is_sized_in_usd_and_its_fx_effect_is_isolated(tmp_path):
     assert journal["gap_cum"].iloc[-1] == pytest.approx(journal["fx"].sum(), abs=1e-6 * nav.max())
     assert abs(journal["residual"]).max() < 1e-6 * nav.max()
     assert journal["gap_cum_base"].iloc[-1] == pytest.approx(journal["gap_cum"].iloc[-1] / journal["fx_rate"].iloc[-1])
+    # the gap without the account's currency: the fx terms taken out, nothing left
+    assert journal["fx_cum"].to_numpy() == pytest.approx(journal["fx"].cumsum().to_numpy())
+    assert abs(journal["gap_cum_ex_fx"]).max() < 1e-6 * nav.max() < abs(journal["gap_cum"]).max()
+    assert journal["gap_day_ex_fx"].to_numpy() == pytest.approx((journal["gap_day"] - journal["fx"]).to_numpy())
     with open(reports[-1].proposal_md, encoding="utf-8") as fh:
         text = fh.read()
     assert "account currency **EUR** (simulated account)" in text and "- in EUR: NAV" in text
+    assert "without fx: today" in text
 
 
 def test_a_gbp_account_falls_back_on_the_rate_given(tmp_path):

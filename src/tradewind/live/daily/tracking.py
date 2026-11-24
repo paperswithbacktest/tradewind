@@ -31,6 +31,11 @@ prices, so that with no other effect they add up to the gap exactly:
   valued in USD, moves with the rate: ``base_cash(t-1) x (rate(t) - rate(t-1))``;
 * ``residual`` -- the rest: interest, dividends and corporate actions the account books, data
   revised between two runs, sleeves whose fills are not at the open, prices missing.
+
+**The gap without the account's currency.** ``fx`` is not a tracking error of the strategies:
+it is the account's own currency against the books' USD. ``gap_day_ex_fx = gap_day - fx`` and
+``gap_cum_ex_fx = gap_cum - fx_cum`` (``fx_cum``: the ``fx`` terms summed over the journal up
+to the day) are the gap the replication itself makes, in USD.
 """
 
 from __future__ import annotations
@@ -47,7 +52,8 @@ from .books import SleeveBook
 COLUMNS = ["date", "nav_real", "nav_expected", "gap_day", "gap_cum", "rounding", "untraded", "timing", "costs",
            "fx", "residual", "real_change", "expected_change", "costs_paid", "costs_backtest", "gross", "net",
            "positions", "orders", "fills", "rebalanced", "cap_scale", "data_date", "notes",
-           "account_currency", "fx_rate", "fx_source", "nav_base", "gap_day_base", "gap_cum_base"]
+           "account_currency", "fx_rate", "fx_source", "nav_base", "gap_day_base", "gap_cum_base",
+           "fx_cum", "gap_day_ex_fx", "gap_cum_ex_fx"]
 
 
 def _dot(book: dict[str, float], move: dict[str, float]) -> tuple[float, list[str]]:
@@ -157,6 +163,14 @@ class Journal:
         return pd.read_csv(self.csv, dtype={"date": str, "data_date": str, "notes": str},
                            keep_default_na=False, na_values=[""])
 
+    def fx_before(self, date: str) -> float:
+        """The ``fx`` terms of the journal's days before ``date``, summed (0 without a journal)."""
+        frame = self.frame()
+        if frame.empty or "fx" not in frame.columns:
+            return 0.0
+        before = frame[frame["date"].astype(str) < str(date)]
+        return float(pd.to_numeric(before["fx"], errors="coerce").fillna(0.0).sum())
+
     def write_row(self, row: dict) -> pd.DataFrame:
         frame = self.frame()
         frame = frame[frame["date"].astype(str) != str(row["date"])]
@@ -214,4 +228,13 @@ class Journal:
         return path
 
 
-__all__ = ["COLUMNS", "Journal", "track_day"]
+def ex_fx(row: dict, earlier_fx: float) -> dict:
+    """``fx_cum``, ``gap_day_ex_fx`` and ``gap_cum_ex_fx`` of a tracking row (module doc);
+    ``earlier_fx``: the ``fx`` terms of the journal's days before it, summed."""
+    fx = float(row.get("fx") or 0.0)
+    fx_cum = float(earlier_fx) + fx
+    return {"fx_cum": fx_cum, "gap_day_ex_fx": float(row["gap_day"]) - fx,
+            "gap_cum_ex_fx": float(row["gap_cum"]) - fx_cum}
+
+
+__all__ = ["COLUMNS", "Journal", "ex_fx", "track_day"]

@@ -37,6 +37,8 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     fresh_index_proxies:       # an index continued with an ETF's returns (default: the ETF
       SPX: SPY                 #   substitutes); {} for none
     fresh_index_proxy_approximate: [VIX]   # chained although VIXY does not track the VIX (unchecked)
+    fresh_public_series: true  # signals continued with a public daily series (FRED: US10Y from
+                               #   DGS10, VIX from VIXCLS; public_prices.py); false: not asked
     stale_symbol_policy: hold  # a symbol still stale after the top-up: hold (default), close, block
     stale_symbol_max_weight: 0.2   # a sleeve with more of its gross on stale symbols stays in error
     out_of_universe_policy: no_new # a name a sleeve holds outside its point-in-time universe: kept,
@@ -113,6 +115,7 @@ class MetaPortfolio:
     fresh_price_tolerance: dict = field(default_factory=dict)   # {kind or symbol: fraction}, or a number
     fresh_index_proxies: dict | None = None     # {index: ETF}; None: the ETF substitutes
     fresh_index_proxy_approximate: list[str] = field(default_factory=list)
+    fresh_public_series: bool = True            # public daily series for signals (public_prices.py)
     stale_symbol_policy: str = "hold"   # hold: no order on it; close: target 0; block: nothing proposed
     stale_symbol_max_weight: float = 0.2    # of a sleeve's gross: above it, the sleeve stays in error
     out_of_universe_policy: str = "no_new"  # no_new: never opened nor added to live; follow: the books
@@ -203,7 +206,7 @@ class MetaPortfolio:
         return {"strict": self.stale_symbol_policy == "block", "tolerance": dict(self.fresh_price_tolerance),
                 "proxies": self.index_proxies, "approximate": list(self.fresh_index_proxy_approximate),
                 "sources": [x for x in self.fresh_prices.split(",") if x] or ["alphavantage"],
-                "grace": dict(self.fresh_close_grace)}
+                "grace": dict(self.fresh_close_grace), "public": bool(self.fresh_public_series)}
 
     def is_index(self, symbol: str) -> bool:
         return is_index(symbol, self.indices)
