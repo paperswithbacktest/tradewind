@@ -15,7 +15,8 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
                                #   the reference backtest is then computed in it (spec/13)
     fx_policy: hedged          # unhedged (default): the dollar exposure is suffered; hedged: the
                                #   net value's dollar exposure is sold against the base currency
-    fx_hedge_rebalance: monthly    # hedged: daily, weekly or monthly (default)
+    fx_hedge_rebalance: monthly    # hedged: daily, weekly, monthly (default), or never: no currency
+                               #   trade at all (capital in the base currency, positions financed in USD)
     fx_hedge_half_spread: 0.000025 # the pair's half-spread, a fraction of the notional
     fx_rates: {USD: fred:DFF, EUR: fred:ECBESTRVOLWGTTRMDMNRT}   # the carry's short rates (defaults)
     min_order_notional: 200    # smaller orders are not sent (an order closing a line always is)
@@ -108,7 +109,7 @@ class MetaPortfolio:
     account_currency: str = ""          # "": read off the account; set: the run stops if the account differs
     base_currency: str = ""             # "": USD (the books'); else the account's currency (spec/13)
     fx_policy: str = "unhedged"         # unhedged or hedged (spec/13)
-    fx_hedge_rebalance: str = "monthly" # hedged: when the dollar exposure is sold again
+    fx_hedge_rebalance: str = "monthly" # hedged: when the dollar exposure is sold again (never: not at all)
     fx_hedge_half_spread: float = 0.000025
     fx_rates: dict = field(default_factory=dict)        # {currency: fred:ID | ecb:FLOW/KEY | path | number}
     papers_dir: str = "~/dev/pwb/papers"

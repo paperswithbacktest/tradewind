@@ -126,7 +126,7 @@ the same rule the account follows:
 ```yaml
 base_currency: EUR          # USD by default: nothing changes
 fx_policy: hedged           # unhedged (default) or hedged
-fx_hedge_rebalance: monthly # hedged: daily, weekly or monthly
+fx_hedge_rebalance: monthly # hedged: daily, weekly, monthly, or never (no currency trade at all)
 fx_hedge_half_spread: 0.000025
 fx_rates: {USD: fred:DFF, EUR: fred:ECBESTRVOLWGTTRMDMNRT}   # the carry (the defaults)
 ```
@@ -137,7 +137,20 @@ fx_rates: {USD: fred:DFF, EUR: fred:ECBESTRVOLWGTTRMDMNRT}   # the carry (the de
   the **net value** is sold against EUR (the gross of a leveraged book is financed in USD and
   adds no exposure). The reference earns or pays the short-rate differential on what it holds
   in EUR (`fx_rates`: public dated series, % a year, ACT/360) and pays the pair's commission
-  and half-spread.
+  and half-spread. The carry is on the **capital's** part held in EUR: an account's other EUR
+  cash (beyond `capital`) is in the value but earns no carry in the reference.
+- **hedged, `fx_hedge_rebalance: never`**: no currency order, on either side, ever. The
+  reference is an account whose capital stays in EUR and whose positions are financed in USD
+  (a USD loan): only their P&L is exposed to the dollar. This is how to declare the structure
+  "EUR capital + USD overdraft" of an IBKR account that never converts its capital.
+- The account's dollar exposure is read **currency by currency** off its items: the cash
+  balances and the accrued interest of each currency (IB's `CashBalance` and `AccruedCash`;
+  interest accrued in EUR is EUR, not dollars), plus the positions at the closes. What the
+  items leave unexplained in the NAV is `fx_unexplained` (USD); above 0.1 % of the NAV (and
+  `min_order_notional`) no hedge order is proposed and the `fx_policy` alert says why.
+- A short rate that cannot be read (download failed, no cached copy, no observation) gives no
+  carry **and the `fx_policy` alert** naming the series and the cause; downloads time out
+  after 10 s and identify themselves as `tradewind/<version> (+project URL)`.
 - The hedge's order is proposed with the strategies' orders; its units are kept apart from the
   books' (by the ids of the orders sent). Before sending a hedge at IBKR, check on the paper
   account how the pair is reported (base cash, position).
@@ -639,6 +652,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 | `universe_age` | the point-in-time universe a sleeve uses ends more than `universe_max_age_days` (35) calendar days before the session: its last composition is carried forward, entries and exits since are not seen ("The age of the universe"); the sleeves are listed |
 | `short_borrow` | a short with a fee at or above `borrow_fee_alert`, or with no or too few shares to borrow ("The cost of borrowing the shorts") |
 | `public_series_gap` | proposed: a signal continued from a public daily series has a day more than 2 % away from the dataset's in the checked window (the splice is kept: the median agrees); one alert per symbol with the days ("Fresh prices") |
+| `fx_policy` | a currency policy is declared and a short rate of the carry was not read (the carry is taken as 0 until it is), or the account's items by currency leave too much of its NAV unexplained (no hedge order proposed) ("The currency policy") |
 
 | exit code | |
 |---|---|

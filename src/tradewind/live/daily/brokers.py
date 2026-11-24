@@ -85,6 +85,14 @@ class Snapshot:
     fx_rate: float = 1.0                # USD per unit of base_currency
     nav_base: float | None = None       # the NAV in base_currency
     base_cash: float = 0.0              # cash held in base_currency (its value moves with fx_rate)
+    # the account's items by currency (spec/13: the dollar exposure is read off them, not off
+    # the NAV): cash and accrued interest in each currency's own units, the USD price of one
+    # unit of each currency, and the positions' values in USD as the account marks them
+    balances: dict[str, float] = field(default_factory=dict)
+    accrued: dict[str, float] = field(default_factory=dict)
+    fx_rates: dict[str, float] = field(default_factory=dict)
+    values: dict[str, float] | None = None
+    fx_in_balances: bool = False        # forex pairs settle into ``balances`` (IBKR): not counted twice
 
 
 class SimAccount:
@@ -204,14 +212,20 @@ class SimAccount:
         rate = self.fx_rate or 1.0
         cash = st["cash"] + base_cash * rate
         value = cash
+        values = {}
         for sym, q in st["positions"].items():
             if sym not in marks:
                 raise ValueError(f"no price to mark {sym} in the simulated account")
-            value += q * marks[sym]
+            values[sym] = q * marks[sym]
+            value += values[sym]
+        balances = {"USD": float(st["cash"])}
+        if self.currency != "USD":
+            balances[self.currency] = base_cash
         return Snapshot(cash=cash, nav=value, positions=dict(st["positions"]),
                         fills=[Fill(**f) for f in st.get("fills", [])],
                         open_orders=[(o["symbol"], o["quantity"]) for o in st["pending"]], account="SIM",
-                        base_currency=self.currency, fx_rate=rate, nav_base=value / rate, base_cash=base_cash)
+                        base_currency=self.currency, fx_rate=rate, nav_base=value / rate, base_cash=base_cash,
+                        balances=balances, fx_rates={"USD": 1.0, self.currency: rate}, values=values)
 
     def place(self, orders: list[ProposedOrder], date: str) -> list[dict]:
         out = []
@@ -367,12 +381,23 @@ class IBPaperAccount:
             working.append((name, rest))
         ad = self.adapter
         rate = float(ad.fx_used) if ad.base_currency != ad.currency else 1.0
+        # the items by currency: IB's cash balances and accrued interest per currency, its
+        # rates (base units per unit) turned into USD per unit; the positions other than forex
+        # (whose pairs are the cash balances) valued at the closes given
+        fx_rates = {cur: r * rate for cur, r in (getattr(ad, "currency_rates", None) or {}).items()}
+        fx_rates.setdefault(ad.base_currency, rate)
+        fx_rates["USD"] = 1.0
+        values = {s: q * float((closes or {})[s]) for s, q in positions.items()
+                  if fx_pair(s) is None and (closes or {}).get(s)}
         return Snapshot(cash=float(snap.cash), nav=float(snap.net_liquidation), positions=positions,
                         fills=list(getattr(self, "_fills", [])), open_orders=working,
                         account=self.account, currency=snap.currency, base_currency=ad.base_currency,
                         fx_rate=rate, nav_base=(ad.nav_base if ad.nav_base is not None
                                                 else float(snap.net_liquidation) / rate),
-                        base_cash=float(ad.base_cash or 0.0) if ad.base_currency != ad.currency else 0.0)
+                        base_cash=float(ad.base_cash or 0.0) if ad.base_currency != ad.currency else 0.0,
+                        balances=dict(getattr(ad, "balances", None) or {}),
+                        accrued=dict(getattr(ad, "accrued", None) or {}), fx_rates=fx_rates, values=values,
+                        fx_in_balances=True)
 
     def request(self, client_id: str, order: ProposedOrder) -> OrderRequest:
         """The IB order of a proposed order: a stock market-on-open, a forex pair on IDEALPRO in
