@@ -74,6 +74,7 @@ fresh_close_grace: {equity: 15, fx: 15}   # minutes after the close before the d
 fresh_ib: {client_id: 957}  # the read-only price connection: never the account's client id
 fresh_price_tolerance: {}  # by kind (equity, fx, fx_minor, crypto, index) or symbol ("Fresh prices")
 fresh_index_proxy_approximate: []   # indices continued with a proxy that does not track them
+fresh_public_series: true  # US10Y and VIX continued from a public daily series (FRED, "Fresh prices")
 sleeves:
   - {slug: dynamic_versus_static_asset_allocation_from_theory_halfway_to_practice, weight: 0.128}
   - {slug: protective_asset_allocation_paa_a_simple_momentum_based_alternative_for_term_deposits, weight: 0.075}
@@ -109,6 +110,12 @@ used for Phase 1 is in EUR). The run never assumes it:
   that currency) is worth more or fewer USD as the rate moves; the tracking isolates it,
   `fx = base_cash(t-1) x (rate(t) - rate(t-1))`, instead of leaving it in the residual. A USD
   account has no fx term: its run is unchanged.
+- **The gap without the account's currency.** The fx term is the account's currency, not a
+  replication error. The proposal, the day's report (and its summary line) and `tracking.csv`
+  give the gap with it taken out, in USD, next to the total gap: `gap_day_ex_fx = gap_day -
+  fx`, `gap_cum_ex_fx = gap_cum - fx_cum` (`fx_cum`: the fx terms summed over the journal).
+  This is the tracking error of the strategies themselves. The `tracking_gap` alert still
+  reads the total gap.
 
 ### Spot forex (IDEALPRO)
 
@@ -429,6 +436,28 @@ chain it anyway, list it: `fresh_index_proxy_approximate: [VIX]` -- only for a s
 reads the index's returns, or whose gate is far from its thresholds; the bars are then
 unchecked and the log says they are an approximation.
 
+**Signals from a public daily series.** Some symbols only feed a signal and have a public
+daily equivalent of the same quantity: `US10Y` (`Bonds-Daily-Price`, a price index of the
+10-year yield) from FRED's `DGS10`, turned into the dataset's unit `100 / (1 + y)^10`, and
+`VIX` from FRED's `VIXCLS` (the same level). They are asked before a proxy ETF (after IB's
+own index levels when the run has them), without a key, cached per session
+(`prices/DATE/public/`). The junction (`public_prices.py`): the factor is the *median* of the
+ratio dataset / public over the last 20 common days up to the anchor, so one bad day in either
+series does not move it; the splice is refused (cause `diverged`) when the factor is more
+than 0.5 % from 1 for an index level (2 % for a 10-year price, about 20 bp of yield) or when
+the median gap is above 0.5 %; a single day beyond 2 % keeps the splice and raises the
+`public_series_gap` alert with the days. For a yield the report also gives the gap in basis
+points. Measured on 2026-11-24: `US10Y` against `DGS10`, median 0.65 bp (largest 4.2 bp) over
+the 20 days to 2026-10-29, factor 1.00019; `VIX` against `VIXCLS`, factor 1.000000 and a median
+gap of 0, but the dataset's VIX differs from the published close on several Thursdays
+(2026-10-15: 19.99 against 16.46, 21 %), hence an alert. FRED publishes a day's value the next
+business day: at the evening run the series usually ends the session before, and the symbol
+stays stale with the cause `lagged` (a signal one day old, instead of frozen at the monthly
+refresh). The other 10-year yields of the catalogue (`DE10Y`, `JP10Y`, `GB10Y`, `AU10Y`,
+`CA10Y`, `CH10Y`) have no public daily series at FRED -- only the monthly OECD long-term rate
+(`IRLTLT01DEM156N` ...) -- and stay `no_source`, with that reason. `fresh_public_series:
+false` turns the public series off.
+
 **Stale symbols.** A symbol is *live* when its last bar is within 45 days of the session.
 Older ones are delisted names and are left as they are. The market's last close is SPY's
 last AlphaVantage bar, so a holiday is not counted as a missing day. A live symbol still
@@ -441,8 +470,9 @@ ending before that close after the top-up is *stale*, with a cause:
 | `silent` | AlphaVantage's series stops too and the name is not delisted (WPRT: active, no bar after 2026-10-23) |
 | `diverged` | the two sources disagree beyond the tolerance (CHGG 0.80 %, SID 0.94 %) |
 | `unknown` | AlphaVantage does not know the symbol (IDRUSD) |
-| `no_source` | no source for the dataset, or an index whose proxy is not chained (VIX) |
+| `no_source` | no source for the dataset, or an index whose proxy is not chained; a 10-year yield with no public daily series (DE10Y) |
 | `fetch_error` | AlphaVantage could not be read |
+| `lagged` | continued from a public daily series that publishes the day's value the next business day (US10Y to the session before) |
 
 `LISTING_STATUS` is read once a session (cached with the bars), and only when a stock is
 stale. What happens next is the meta-portfolio's `stale_symbol_policy`:
@@ -466,7 +496,14 @@ account): that freezes the substitute for every sleeve that trades it.
 symbols -- each line counted at the larger of its position and its target, at the book's
 close -- is in error: under `sleeve_error_policy: skip` (the default) it is set aside for the
 day and the others are proposed ("A sleeve in error"); under `block` the run proposes nothing
-(exit code 3). The report gives the share and the symbols. A sleeve that only reads a stale
+(exit code 3). The report gives the share and the symbols. **A symbol the meta-portfolio
+never trades is not counted in that share**: a currency without an IDEALPRO pair (BRLUSD,
+CLPUSD, ISKUSD), an index without a substitute, `exclude_symbols`. No order is ever proposed
+on it, stale or not; it is still listed among the stale symbols (`never traded (...): no
+order, not counted in the sleeve's stale share`) and its effect stays in the tracking's
+`untraded` term. Before, the three Latin-American and Icelandic pairs made 37.8 % of the gross
+of `business_cycles_and_currency_returns` and set the sleeve aside every evening, because
+their fresh bar is not out yet at the run. A sleeve that only reads a stale
 index (SPX for the free-lunch sleeve, without a proxy) has no close at the session and is in
 error the same way.
 
@@ -568,6 +605,7 @@ python -m tradewind.live.daily.session --meta meta.yaml --dir ~/pwb-paper --brok
 | `out_of_universe` | proposed: a name a sleeve holds outside its point-in-time universe was not bought, or not added to, for it (`out_of_universe_policy`, "Names outside a point-in-time universe"); one line each with the sleeves (legs), what the books want, what is held and the target kept |
 | `universe_age` | the point-in-time universe a sleeve uses ends more than `universe_max_age_days` (35) calendar days before the session: its last composition is carried forward, entries and exits since are not seen ("The age of the universe"); the sleeves are listed |
 | `short_borrow` | a short with a fee at or above `borrow_fee_alert`, or with no or too few shares to borrow ("The cost of borrowing the shorts") |
+| `public_series_gap` | proposed: a signal continued from a public daily series has a day more than 2 % away from the dataset's in the checked window (the splice is kept: the median agrees); one alert per symbol with the days ("Fresh prices") |
 
 | exit code | |
 |---|---|
@@ -656,7 +694,11 @@ terms computed from the same prices, which add up to the gap when nothing else h
 | `untraded` | planned book against the strategies' backtests: an order a strategy's backtest refused at the open (its cash check) that the account executed, and the excluded symbols |
 | `timing` | execution against the open the backtest fills at: `Σ fills quantity × (open − fill price)` |
 | `costs` | the backtests' costs at the units minus the commissions and spreads paid |
+| `fx` | an account in another currency than USD: its cash in that currency valued at the day's rate (`base_cash(t-1) × (rate(t) − rate(t-1))`) |
 | `residual` | everything else: interest, dividends and corporate actions the account books, data revised between two runs, a strategy whose fills are not at the open |
+
+`gap_cum_ex_fx` (and `gap_day_ex_fx`) is the gap with the `fx` term taken out: the tracking
+error of the replication itself, in USD, next to the total gap in the report.
 
 On the simulated account with no costs and fractional shares, the gap is zero to the cent:
 the tests check it over 20 closes. With lots, costs and slippage, the residual stays at

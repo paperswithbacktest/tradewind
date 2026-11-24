@@ -256,9 +256,9 @@ def test_the_meta_portfolio_options():
     m = MetaPortfolio([Sleeve("a", 1.0)], substitutes={"VIX": "VIXY"})
     assert m.stale_symbol_policy == "hold" and m.stale_symbol_max_weight == 0.2
     assert m.fresh_config() == {"strict": False, "tolerance": {}, "proxies": {"SPX": "SPY", "VIX": "VIXY"},
-                                "approximate": [], "sources": ["alphavantage"], "grace": {}}
+                                "approximate": [], "sources": ["alphavantage"], "grace": {}, "public": True}
     m2 = MetaPortfolio([Sleeve("a", 1.0)], stale_symbol_policy="BLOCK", fresh_price_tolerance=0.01,
-                       fresh_index_proxies={}, fresh_index_proxy_approximate=["VIX"])
+                       fresh_index_proxies={}, fresh_index_proxy_approximate=["VIX"], fresh_public_series=False)
     conf = m2.fresh_config()
     assert conf["strict"] and conf["proxies"] == {} and conf["approximate"] == ["VIX"]
     assert conf["tolerance"]["fx_minor"] == 0.01 and conf["tolerance"]["equity"] == 0.01
@@ -267,8 +267,9 @@ def test_the_meta_portfolio_options():
         with pytest.raises(ValueError):
             MetaPortfolio([Sleeve("a", 1.0)], **bad)
     assert fresh_options(json.dumps(conf)) == {"strict": True, "tolerance": conf["tolerance"], "proxies": {},
-                                               "approximate": ["VIX"], "sources": ("alphavantage",), "grace": {}}
-    assert fresh_options(None)["strict"] is True
+                                               "approximate": ["VIX"], "sources": ("alphavantage",), "grace": {},
+                                               "public": False}
+    assert fresh_options(None)["strict"] is True and fresh_options(None)["public"] is True
 
 
 def test_the_provider_keeps_books_that_come_with_stale_symbols(tmp_path, monkeypatch):
@@ -395,6 +396,39 @@ def test_a_stale_index_is_frozen_under_its_substitute():
     assert plan.target["VIXY"] == 1.0 and [o.symbol for o in plan.orders] == ["SPY"]
     with pytest.raises(ValueError):
         plan_day(meta, {}, {}, 100.0, "2026-11-18", frozen={"VIXY": "sell"})
+
+
+def test_a_symbol_never_traded_is_not_counted_in_the_stale_share():
+    """BRLUSD, CLPUSD, ISKUSD have no IDEALPRO pair: stale or not, no order is ever proposed on
+    them, so they do not put their sleeve in error; a stale symbol the account trades still does."""
+    meta = MetaPortfolio([Sleeve("fx", 0.5), Sleeve("other", 0.5)], stale_symbol_max_weight=0.2)
+    book = SleeveBook("2026-11-18", 100.0,
+                      positions={"BRLUSD": 120.0, "CLPUSD": 9000.0, "ISKUSD": 1000.0, "EURUSD": 30.0, "AUDUSD": 40.0},
+                      target={"BRLUSD": 120.0, "CLPUSD": 9000.0, "ISKUSD": 1000.0, "EURUSD": 30.0, "AUDUSD": 40.0},
+                      close={"BRLUSD": 0.18, "CLPUSD": 0.0011, "ISKUSD": 0.0075, "EURUSD": 1.09, "AUDUSD": 0.65})
+    stale = {"BRLUSD": "silent", "CLPUSD": "silent", "ISKUSD": "silent"}
+    provider = types.SimpleNamespace(stale={"fx": dict(stale)}, stale_info={}, errors={})
+    runner = DailyRunner.__new__(DailyRunner)
+    runner.meta, runner.provider = meta, provider
+    assert stale_share(book, set(stale)) > 0.2                          # the share the run used to see
+    skipped: dict[str, str] = {}
+    out = runner._stale_symbols({"fx": {"2026-11-18": book}}, "2026-11-18", skipped)
+    assert not skipped and "fx" not in provider.errors                 # the sleeve is proposed
+    assert set(out) == set(stale) and all(not d["traded"] for d in out.values())
+    assert out["BRLUSD"]["refusal"].startswith("no spot pair on IDEALPRO") and out["BRLUSD"]["shares"]["fx"] == 0.0
+    plan = plan_day(meta, {"fx": book}, {}, 100.0, "2026-11-18",
+                    frozen={d["plan_symbol"]: "hold" for d in out.values()})
+    assert not {o.symbol for o in plan.orders} & set(stale) and set(stale) <= set(plan.refused)
+    rows, warnings = runner._stale_report(out, plan, {})
+    assert all("never traded" in r["action"] for r in rows) and len(warnings) == 3
+
+    provider2 = types.SimpleNamespace(stale={"fx": dict(stale, EURUSD="silent")}, stale_info={}, errors={})
+    runner.provider = provider2
+    skipped = {}
+    out = runner._stale_symbols({"fx": {"2026-11-18": book}}, "2026-11-18", skipped)
+    eur = 30.0 * 1.09 / (120 * 0.18 + 9000 * 0.0011 + 1000 * 0.0075 + 30 * 1.09 + 40 * 0.65)
+    assert out == {} and "fx" in skipped                                # EURUSD alone is over 20 %
+    assert f"{eur:.1%} of its gross on stale symbols (EURUSD)" in provider2.errors["fx"]
 
 
 # -- the session --------------------------------------------------------------------------------------
