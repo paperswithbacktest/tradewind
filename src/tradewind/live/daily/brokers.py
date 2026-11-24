@@ -94,6 +94,7 @@ class SimAccount:
     the open for buys and taken from it for sells (0: fill at the open)."""
 
     kind = "sim"
+    hedge_in_base_cash = False          # the hedge's pair is a position, apart from base_cash
 
     def __init__(self, path: str, cash: float = 110_000.0, *, half_spread=0.0, default_half_spread: float = 0.0,
                  commission: str = "none", slippage: float = 0.0, use_book_spreads: bool = False,
@@ -243,6 +244,10 @@ class IBPaperAccount:
     """
 
     kind = "ibkr"
+    #: a trade on the base currency's pair (the hedge of spec/13) settles into the base
+    #: currency's cash balance at IBKR (CashBalance); to check with one paper order before a
+    #: hedge is ever sent
+    hedge_in_base_cash = True
 
     def __init__(self, host: str = "127.0.0.1", port: int = 7497, client_id: int = 31, *, account: str = "",
                  send: bool = False, ack_wait: float = 15.0, base_fx: float | None = None,

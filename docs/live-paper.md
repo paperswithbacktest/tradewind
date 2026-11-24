@@ -110,6 +110,39 @@ used for Phase 1 is in EUR). The run never assumes it:
   `fx = base_cash(t-1) x (rate(t) - rate(t-1))`, instead of leaving it in the residual. A USD
   account has no fx term: its run is unchanged.
 
+### The currency policy: base currency, hedged or not (spec/13)
+
+An investor who counts in EUR does not want the gap to the backtest to be EUR/USD. Declare
+the currency once in the meta-portfolio, and the reference backtest is computed in it under
+the same rule the account follows:
+
+```yaml
+base_currency: EUR          # USD by default: nothing changes
+fx_policy: hedged           # unhedged (default) or hedged
+fx_hedge_rebalance: monthly # hedged: daily, weekly or monthly
+fx_hedge_half_spread: 0.000025
+fx_rates: {USD: fred:DFF, EUR: fred:ECBESTRVOLWGTTRMDMNRT}   # the carry (the defaults)
+```
+
+- **unhedged**: the allocated capital is converted to USD on the first day (an `EURUSD` order,
+  `EUR.USD` on IDEALPRO); the value is then the USD value at the day's rate.
+- **hedged**: on the first day and at each `fx_hedge_rebalance` date, the dollar exposure of
+  the **net value** is sold against EUR (the gross of a leveraged book is financed in USD and
+  adds no exposure). The reference earns or pays the short-rate differential on what it holds
+  in EUR (`fx_rates`: public dated series, % a year, ACT/360) and pays the pair's commission
+  and half-spread.
+- The hedge's order is proposed with the strategies' orders; its units are kept apart from the
+  books' (by the ids of the orders sent). Before sending a hedge at IBKR, check on the paper
+  account how the pair is reported (base cash, position).
+- `tracking.csv` then has the reference in EUR (`nav_expected_base`) and the gap's terms in
+  EUR: `rounding_base`, `untraded_base`, `timing_base`, `costs_base` (with the reference's
+  hedge fee), `carry_base` (the reference's carry; the account books its interest in the
+  residual), `fx_base` (the account's translation minus the reference's: about zero when the
+  policy is applied on both sides) and `residual_base`; they add up to `gap_day_base`. Also
+  `fx_exposure` / `fx_exposure_expected` (USD) and the hedge orders.
+- For a backtest's NAV series: `tradewind.live.daily.apply_fx_policy(nav_usd, eurusd,
+  FxPolicy("EUR", "hedged"), rates=ShortRates())`, the same arithmetic as the runner.
+
 ### Spot forex (IDEALPRO)
 
 A strategy that trades PWB's forex series (`AUDUSD`, `JPYUSD` ...: the USD price of one unit

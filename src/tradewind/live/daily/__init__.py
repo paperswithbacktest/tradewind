@@ -19,6 +19,7 @@ from .aggregate import Plan, ProposedOrder, plan_day
 from .books import BookRecorder, SleeveBook, record_books
 from .borrow import AutoBorrowSource, HubBorrowSource, IBShortableSource, borrow_report
 from .brokers import IBPaperAccount, KrakenAccount, SimAccount, ibkr_tiered_commission
+from .fxpolicy import FxBook, FxPolicy, ShortRates, apply_fx_policy
 from .meta import MetaPortfolio, Sleeve
 from .providers import EngineProvider, PwbProvider, ReplayProvider
 from .runner import DailyRunner, DayReport, StaleData, last_session
@@ -30,6 +31,8 @@ __all__ = [
     "DailyRunner",
     "DayReport",
     "EngineProvider",
+    "FxBook",
+    "FxPolicy",
     "HubBorrowSource",
     "IBPaperAccount",
     "IBShortableSource",
@@ -40,10 +43,12 @@ __all__ = [
     "ProposedOrder",
     "PwbProvider",
     "ReplayProvider",
+    "ShortRates",
     "SimAccount",
     "Sleeve",
     "SleeveBook",
     "StaleData",
+    "apply_fx_policy",
     "borrow_report",
     "ibkr_tiered_commission",
     "last_session",

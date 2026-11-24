@@ -11,6 +11,13 @@ it is, its ``leverage_meta`` column giving the leverage. YAML / JSON carry the o
     capital: 110000            # the capital the weights apply to (default: the account's NAV) ...
     capital_currency: USD      # ... in USD, or by default in the account's currency
     account_currency: EUR      # optional check: the run stops unless the account is in EUR
+    base_currency: EUR         # the currency the investor counts in (default USD: nothing changes);
+                               #   the reference backtest is then computed in it (spec/13)
+    fx_policy: hedged          # unhedged (default): the dollar exposure is suffered; hedged: the
+                               #   net value's dollar exposure is sold against the base currency
+    fx_hedge_rebalance: monthly    # hedged: daily, weekly or monthly (default)
+    fx_hedge_half_spread: 0.000025 # the pair's half-spread, a fraction of the notional
+    fx_rates: {USD: fred:DFF, EUR: fred:ECBESTRVOLWGTTRMDMNRT}   # the carry's short rates (defaults)
     min_order_notional: 200    # smaller orders are not sent (an order closing a line always is)
     papers_dir: ~/dev/pwb/papers
     python: /path/to/venv/bin/python      # the environment that has pwb-toolbox
@@ -97,6 +104,11 @@ class MetaPortfolio:
     capital: float | None = None        # the capital the weights apply to; None: the account's NAV
     capital_currency: str = ""          # the currency of `capital`: "" the account's, or USD
     account_currency: str = ""          # "": read off the account; set: the run stops if the account differs
+    base_currency: str = ""             # "": USD (the books'); else the account's currency (spec/13)
+    fx_policy: str = "unhedged"         # unhedged or hedged (spec/13)
+    fx_hedge_rebalance: str = "monthly" # hedged: when the dollar exposure is sold again
+    fx_hedge_half_spread: float = 0.000025
+    fx_rates: dict = field(default_factory=dict)        # {currency: fred:ID | ecb:FLOW/KEY | path | number}
     papers_dir: str = "~/dev/pwb/papers"
     python: str = ""
     exclude_symbols: list[str] = field(default_factory=list)
@@ -181,10 +193,26 @@ class MetaPortfolio:
         self.fresh_index_proxy_approximate = [str(x) for x in (self.fresh_index_proxy_approximate or [])]
         self.account_currency = (self.account_currency or "").upper()
         self.capital_currency = (self.capital_currency or "").upper()
-        for name in ("account_currency", "capital_currency"):
+        self.base_currency = (self.base_currency or "").upper()
+        self.fx_rates = dict(self.fx_rates or {})
+        self.fx_policy = str(self.fx_policy or "unhedged").lower()
+        self.fx_hedge_rebalance = str(self.fx_hedge_rebalance or "monthly").lower()
+        if self.fx_policy == "hedged" and self.base_currency in ("", "USD"):
+            raise ValueError("fx_policy hedged needs a base_currency other than USD (the books' currency)")
+        self.currency_policy()                          # checked here, used by the runner
+        for name in ("account_currency", "capital_currency", "base_currency"):
             v = getattr(self, name)
             if v and not (len(v) == 3 and v.isalpha()):
                 raise ValueError(f"{name} is a currency code (EUR, USD, GBP ...), not {v!r}")
+
+    def currency_policy(self):
+        """The ``fxpolicy.FxPolicy`` this meta-portfolio declares (USD and unhedged by
+        default: inactive)."""
+        from .fxpolicy import FxPolicy
+
+        return FxPolicy(base_currency=self.base_currency or "USD", policy=self.fx_policy,
+                        rebalance=self.fx_hedge_rebalance, half_spread=self.fx_hedge_half_spread,
+                        rates=self.fx_rates, min_notional=self.min_order_notional)
 
     @property
     def weights(self) -> dict[str, float]:
