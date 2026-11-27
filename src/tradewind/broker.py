@@ -507,8 +507,9 @@ class BackBroker(BrokerBase):
         return self.positions[data]
 
     def get_value(self, datas=None, mkt=False, lever=False):
-        # Observed on the oracle: with ``datas`` the result is the value of those
-        # positions alone, without the cash -- and asking for it applies any pending
+        # Observed on the oracle: with ``datas`` of one feed the result is the value of that
+        # position alone, without the cash (two feeds or more: ``_listed_value``; an empty
+        # list: the whole book) -- and asking for it applies any pending
         # ``add_cash`` on the spot (``getcash`` reflects it from then on), which is how a
         # same-bar ``order_target_value`` after ``add_cash`` gets its batch checked against
         # the new cash while a plain ``sell`` does not (probe ``add_cash_timing``).
@@ -517,9 +518,16 @@ class BackBroker(BrokerBase):
             # bar, after that bar's fills and cash additions -- a same-bar ``add_cash`` or a
             # ``get_value(datas=...)`` that applied one does not move it until the next bar.
             return self.cash if self._value is None else self._value
+        if not datas:
+            # Observed on the oracle (probe ``get_value_feeds``): an empty list asks for the
+            # whole book -- the pending additions land, the portfolio is marked again and
+            # the plain ``getvalue()`` reads that value for the rest of the bar
+            return self._get_value()
         if self._cash_addition:
             self._land_additions()
         value = 0.0
+        if len(datas) > 1:
+            return self._listed_value(datas)
         if isinstance(datas, (list, tuple)) and len(datas) == 1:
             # the common read (``order_target_value``): one position, no scan of the book
             data = datas[0]
@@ -550,6 +558,31 @@ class BackBroker(BrokerBase):
         return value
 
     getvalue = get_value
+
+    def _listed_value(self, datas):
+        """``get_value(datas)`` with two feeds or more. Observed on the oracle (probe
+        ``get_value_feeds``; corpus ``the_risk_and_return_characteristics_of_the_buy_write…``,
+        which calls ``get_value(self.datas)`` after ``add_cash`` to settle its option P&L
+        inside the bar): the answer is the cash **plus** the listed feeds' positions (each
+        listing counted, a flat feed adds nothing, an unlisted position is left out) --
+        not the positions alone as with one feed -- and the plain ``getvalue()`` reads that
+        same value for the rest of the bar. The pending additions landed in ``get_value``."""
+        terms = 0.0
+        for data in datas:
+            pos = self.positions.get(data)
+            if pos is None or not pos.size or len(data) == 0:
+                continue
+            e, u = _mark_terms(self.getcommissioninfo(data), pos, data.close[0])
+            m = self._security(data).properties.contract_multiplier
+            if m != 1.0:
+                e, u = e * m, u * m
+            if self._foreign:
+                r = self.fx_rates([data.security.id])[0]
+                e, u = e * r, u * r
+            terms += e
+            terms += u
+        self._value = (self._cash_total() if self._multi_cash else self.cash) + terms
+        return self._value
 
     def _get_value(self, datas=None, lever=False):
         """The broker's own revaluation, which four published corpus strategies call right
