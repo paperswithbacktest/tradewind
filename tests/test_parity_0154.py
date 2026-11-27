@@ -125,3 +125,41 @@ def test_nextforce_turns_the_runonce_prepass_off_for_the_whole_run():
         assert _nextforce_run(where) == live, where
     for where in ("after", "strategy"):
         assert _nextforce_run(where) == frozen, where
+
+
+def test_get_value_of_several_feeds_is_cash_plus_those_positions_and_moves_the_value():
+    rows = []
+
+    class S(tw.Strategy):
+        def next(self):
+            n = len(self)
+            b, ds = self.broker, self.datas
+            if n == 1:
+                self.buy(data=ds[0], size=10)
+            if n == 3:
+                b.add_cash(100.0)
+                rows.append(("one", b.get_value([ds[0]]), b.getvalue(), b.getcash()))
+            if n == 5:
+                b.add_cash(100.0)
+                rows.append(("all", b.get_value(ds), b.getvalue(), b.getcash()))
+            if n == 6:
+                rows.append(("next bar", b.getvalue()))
+                rows.append(("other", b.get_value(ds[1:]), b.getvalue()))
+            if n == 7:
+                rows.append(("twice", b.get_value([ds[0], ds[0]])))
+                rows.append(("empty", b.get_value([]), b.getvalue()))
+
+    engine = tw.Engine(stdstats=False)
+    engine.adddata(tw.feeds.PandasData(dataname=frame([10.0] * 9)), name="A")
+    engine.adddata(tw.feeds.PandasData(dataname=frame([20.0] * 9)), name="B")
+    engine.adddata(tw.feeds.PandasData(dataname=frame([30.0] * 9)), name="C")
+    engine.addstrategy(S)
+    engine.broker.set_cash(1000.0)
+    engine.run()
+    # filled at the open of bar 2 (10.5): cash 895, the position worth 100 at the close
+    assert rows == [("one", 100.0, 995.0, 995.0),       # one feed: the position alone, value unmoved
+                    ("all", 1195.0, 1195.0, 1095.0),    # several: cash + positions, value moved at once
+                    ("next bar", 1195.0),
+                    ("other", 1095.0, 1095.0),          # an unlisted position is left out
+                    ("twice", 1095.0 + 200.0),          # a feed listed twice counts twice
+                    ("empty", 1195.0, 1195.0)]          # an empty list: the whole book
