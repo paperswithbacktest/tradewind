@@ -16,7 +16,8 @@ Tradewind's own.
 * ``FuturesBook``: the broker's ledger of the open contracts -- the settlement reference of
   each position, the daily variation margin, the margin calls;
 * ``FutureExpiry`` / ``FutureExpiries``: no delivery -- a position still open after its
-  last trading date is closed at that day's settlement (a forced close, fee charged);
+  last trading date stops the run (``FutureExpiryError``), or, under ``at_expiry="close"``,
+  is closed at that day's settlement (a forced close, fee charged);
 * ``FutureChain``, ``RollOnDate``, ``RollOnVolume``, ``Roller``: which contract to hold, and
   the roll as two real orders (close the old contract, open the next), each paying its fee
   and slippage;
@@ -39,12 +40,26 @@ import pandas as pd
 
 from .comminfo import CommInfoBase
 from .dateutils import date2num, num2date
-from .feeds import PandasData
+from .feeds import PandasData, TimeFrame
 from .models import BatchState, BuyingPowerCheck, FillProposal
 from .securities import ACCOUNT_CURRENCY, SecurityId, SymbolProperties, Timestamp
 
 RATIO, DIFFERENCE, NONE = "ratio", "difference", "none"
 LIQUIDATE, RECORD = "liquidate", "record"
+RAISE, CLOSE = "raise", "close"
+
+
+INTRADAY_REFUSED = (
+    "intraday bars on futures are not supported yet (spec/09 § 10.3): the rule is that a "
+    "contract settles once a day, at the close of its session on the exchange calendar, and "
+    "that settlement is not modelled for intraday feeds; use daily bars")
+
+
+class FutureExpiryError(RuntimeError):
+    """A contract reached its last trading date with a position still open, under
+    ``at_expiry="raise"`` (the default of ``add_futures``, spec/09 § 5): the run stops
+    instead of closing it silently. Roll before (``Roller``), close before, or pass
+    ``at_expiry="close"`` to close it by force at its last settlement."""
 
 
 def _as_date(day) -> _dt.date:
@@ -65,9 +80,11 @@ class FutureContract:
     ``multiplier``: money per point of price (50 for an equity index mini, 1 000 for crude
     oil). ``tick_size``: the price increment; fill prices are rounded to it (0: no
     rounding). ``initial_margin`` / ``maintenance_margin``: money per contract, posted from
-    cash to open and to hold (maintenance defaults to the initial margin). No delivery is
-    modelled: a position still open after ``last_trade_date`` is closed at that day's
-    settlement."""
+    cash to open and to hold (maintenance defaults to the initial margin), fixed for the
+    life of the contract; every reader goes through ``margin`` (the extension point of a
+    dated schedule). No delivery is modelled: a position still open after
+    ``last_trade_date`` stops the run, or is closed at that day's settlement under
+    ``at_expiry="close"`` (spec/09 § 5)."""
 
     root: str
     symbol: str
@@ -91,6 +108,18 @@ class FutureContract:
             object.__setattr__(self, "maintenance_margin", float(self.initial_margin))
         if self.maintenance_margin > self.initial_margin:
             raise ValueError(f"{self.symbol}: the maintenance margin exceeds the initial margin")
+
+    def margin(self, kind: str = "initial", day=None) -> float:
+        """Margin per contract, ``"initial"`` or ``"maintenance"``. Fixed per root for now:
+        ``day`` is not read. It is the one place every margin read goes through, so a dated
+        schedule per root (exchanges move margins: crude's initial margin roughly doubled in
+        March 2020) replaces this body with a lookup at ``day`` once the reference tables
+        carry one (spec/09 § 10.2)."""
+        if kind == "initial":
+            return self.initial_margin
+        if kind == "maintenance":
+            return self.maintenance_margin
+        raise ValueError("margin kind is 'initial' or 'maintenance'")
 
     def days_to_last_trade(self, day) -> int:
         return (self.last_trade_date - _as_date(day)).days
@@ -121,10 +150,20 @@ class FutureData(PandasData):
         contract = self.p.contract
         if contract is None:
             raise ValueError("FutureData needs a contract")
+        if self.p.timeframe < TimeFrame.Days or _intraday(self.p.dataname):
+            raise ValueError(f"{contract.symbol}: {INTRADAY_REFUSED}")
         self.contract = contract
         self._tw_future = contract
         self.symbol_properties = contract.symbol_properties()
         self._tw_gate = False
+
+
+def _intraday(frame) -> bool:
+    """Whether a frame of bars carries a time of day (an intraday feed)."""
+    index = getattr(frame, "index", None)
+    if not isinstance(index, pd.DatetimeIndex) or not len(index):
+        return False
+    return bool((index != index.normalize()).any())
 
 
 class FuturesCommission(CommInfoBase):
@@ -155,14 +194,15 @@ class FuturesMargin:
     (or frees) plus its fee; at the fill (phase 6) the opening part is checked again against
     the cash left, and a reversal whose opening part does not fit fills its closing part
     only (Partial, then Margin). ``order_target_value`` and ``order_target_percent`` size on
-    the notional, ``price x multiplier`` per contract."""
+    the notional, ``price x multiplier`` per contract. The margin is posted from **cash
+    only**: stock positions in the same account are not collateral (spec/09 § 10.4)."""
 
     __slots__ = ()
 
     @staticmethod
     def _extra(contract, pos_size, size) -> float:
         """Initial margin blocked (+) or freed (-) by trading ``size`` against ``pos_size``."""
-        return (abs(pos_size + size) - abs(pos_size)) * contract.initial_margin
+        return (abs(pos_size + size) - abs(pos_size)) * contract.margin("initial")
 
     def check_order(self, security, order, check_price, state: BatchState) -> BuyingPowerCheck:
         broker = security._broker
@@ -215,10 +255,10 @@ class FuturesMargin:
         return 1.0
 
     def maintenance_margin(self, security, quantity, price) -> float:
-        return abs(quantity) * _contract(security).maintenance_margin
+        return abs(quantity) * _contract(security).margin("maintenance")
 
     def initial_margin(self, security, quantity, price) -> float:
-        return abs(quantity) * _contract(security).initial_margin
+        return abs(quantity) * _contract(security).margin("initial")
 
 
 def order_fee_of(security, order, size, price, time) -> float:
@@ -376,7 +416,7 @@ class FuturesBook:
             security = securities[sid]
             q = float(pf.quantity[sid])
             c = security.feed._tw_future
-            per = c.initial_margin if kind == "initial" else c.maintenance_margin
+            per = c.margin("initial" if kind == "initial" else "maintenance")
             amount = abs(q) * per
             if broker._foreign and security.properties.quote_currency != broker.cashbook.account_currency:
                 amount *= float(broker.fx_rates([sid])[0])
@@ -423,9 +463,12 @@ class FuturesBook:
 @dataclass(slots=True)
 class FutureExpiry:
     """The end of one contract, applied at phase 3 of the first slice after its last trading
-    date (before that slice's fills). Open orders on it end; a position still open is closed
-    at the last settlement on or before the last trading date (no delivery): its unsettled
-    P&L is paid, its fee charged, its trade closed. Filled in by ``apply_to``."""
+    date (before that slice's fills). Open orders on it end. A position still open there
+    stops the run with ``FutureExpiryError`` (``at_expiry="raise"``, the default): no
+    delivery is modelled, and a strategy that meant to stay exposed should have rolled.
+    Under ``at_expiry="close"`` it is closed at the last settlement on or before the last
+    trading date: its unsettled P&L is paid, its fee charged, its trade closed. Filled in
+    by ``apply_to``."""
 
     security: SecurityId
     time: Timestamp
@@ -434,6 +477,7 @@ class FutureExpiry:
     forced: bool = False
     cash: float = 0.0                   # variation paid at the forced close, fee deducted
     fee: float = 0.0
+    at_expiry: str = RAISE
     rank = 4                            # after symbol change, split, dividend, delisting
 
     def apply_to(self, broker) -> None:
@@ -458,6 +502,13 @@ class FutureExpiry:
         if not q:
             book.expiries.append(self)
             return
+        if self.at_expiry != CLOSE:
+            raise FutureExpiryError(
+                f"{contract.symbol}: {q:g} contract(s) still held after the last trading date "
+                f"{contract.last_trade_date} (no delivery is modelled). Roll before it with a Roller "
+                f"(whose rule must leave a session before that date), close the position, or pass "
+                f"add_futures(..., at_expiry='close') to close it by force at its last settlement "
+                f"({price:g}).")
         m = security.properties.contract_multiplier
         ccy = security.properties.quote_currency
         variation = book.unsettled(security.id, q, price, m)
@@ -489,9 +540,12 @@ def _last_close(feed, day: _dt.date) -> float:
 class FutureExpiries:
     """The ``CorporateActionProvider`` of a set of futures feeds: each contract's
     ``FutureExpiry`` is handed to the first slice at or after the day following its last
-    trading date."""
+    trading date, with the policy ``at_expiry`` (``"raise"`` or ``"close"``)."""
 
-    def __init__(self):
+    def __init__(self, at_expiry: str = RAISE):
+        if at_expiry not in (RAISE, CLOSE):
+            raise ValueError("at_expiry is 'raise' or 'close'")
+        self.at_expiry = at_expiry
         self._pending: list[tuple[float, int]] = []
         self._sorted = True
 
@@ -512,7 +566,7 @@ class FutureExpiries:
         out = []
         while self._pending and self._pending[0][0] <= now + 1e-9:
             _, sid = self._pending.pop(0)
-            out.append(FutureExpiry(sid, np.int64(time)))
+            out.append(FutureExpiry(sid, np.int64(time), at_expiry=self.at_expiry))
         return out
 
 
@@ -538,9 +592,12 @@ class RollOnDate:
 class RollOnVolume:
     """Move to the next contract on the first bar its volume exceeds the held contract's
     (read on that bar's close, traded at the next open; never back), and in any case once
-    the held contract is within ``days_before`` calendar days of its last trading date."""
+    the held contract is within ``days_before`` calendar days of its last trading date.
+    The default, 5, leaves a session to fill the roll before the last trading date across a
+    weekend and a holiday; a rule that decides on the last trading day itself fills after it,
+    and the position meets its expiry (``FutureExpiryError`` by default)."""
 
-    days_before: int = 2
+    days_before: int = 5
 
     def choose(self, chain: FutureChain, day: _dt.date, current: FutureContract | None) -> FutureContract | None:
         live = [c for c in chain.contracts if (c.last_trade_date - day).days > self.days_before
@@ -700,13 +757,20 @@ def future_table(frame: pd.DataFrame) -> pd.DataFrame:
     """A daily futures table in the engine's layout: one row per contract and session, with
     ``date``, ``symbol``, ``root``, ``open``, ``high``, ``low``, ``close``, ``volume``,
     ``last_trade_date`` and, when present, ``settlement`` and ``first_trade_date``. The close
-    becomes the settlement where one is given (kept as ``last`` the traded close)."""
+    becomes the settlement where one is given (kept as ``last`` the traded close). A table
+    with a time of day, or more than one row per contract and session, is refused
+    (intraday futures: spec/09 § 10.3)."""
     t = frame.copy()
     t.columns = [str(c).lower() for c in t.columns]
     missing = {"date", "symbol", "root", "close", "last_trade_date"} - set(t.columns)
     if missing:
         raise ValueError(f"futures table: missing columns {sorted(missing)}")
-    t["date"] = pd.to_datetime(t["date"]).dt.normalize()
+    date = pd.to_datetime(t["date"])
+    if (date != date.dt.normalize()).any():
+        raise ValueError(f"futures table: {INTRADAY_REFUSED}")
+    t["date"] = date
+    if t.duplicated(["symbol", "date"]).any():
+        raise ValueError(f"futures table: more than one row per contract and session; {INTRADAY_REFUSED}")
     t["last_trade_date"] = pd.to_datetime(t["last_trade_date"]).dt.normalize()
     if "first_trade_date" in t:
         t["first_trade_date"] = pd.to_datetime(t["first_trade_date"]).dt.normalize()
@@ -880,18 +944,24 @@ class FutureSpec:
 
 def add_futures(engine, table: pd.DataFrame, specs: Mapping[str, FutureSpec], roots: Sequence[str] | None = None,
                 continuous_adjust: str | None = None, continuous_rule=None,
-                on_margin_call: str = LIQUIDATE) -> dict[str, FutureChain]:
+                on_margin_call: str = LIQUIDATE, at_expiry: str = RAISE) -> dict[str, FutureChain]:
     """Add one ``FutureData`` per contract of a daily futures table (``future_table``
     layout) for each root of ``specs`` (or of ``roots``), the per-contract commission, the
     margin model and the expiries; returns the chain of each root. With
     ``continuous_adjust`` (``"ratio"``, ``"difference"``, ``"none"``), the root's continuous
     series is added too, as a ``ContinuousData`` feed named ``"<root>_cont"`` (``chain.continuous``),
-    rolled by ``continuous_rule`` (default ``RollOnDate()``)."""
+    rolled by ``continuous_rule`` (default ``RollOnDate()``).
+
+    ``at_expiry``: what happens to a position still open after its contract's last trading
+    date. ``"raise"`` (default) stops the run with ``FutureExpiryError`` -- a strategy holds
+    futures through a ``Roller`` or closes them itself; ``"close"`` closes it by force at
+    the last settlement, fee charged, as an explicit choice. Initial and maintenance margins
+    are posted from cash only: other positions of the account are not collateral."""
+    expiries = FutureExpiries(at_expiry)
     t = future_table(table)
     broker = engine.broker
     book = broker.futures
     book.on_margin_call = on_margin_call
-    expiries = FutureExpiries()
     chains = {}
     for root in (roots if roots is not None else list(specs)):
         spec = specs[root]
