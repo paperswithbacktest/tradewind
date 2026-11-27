@@ -145,6 +145,24 @@ class _PositionBook(dict):
         return pos
 
 
+def _special_kind(data) -> bool:
+    """A futures contract or a continuous futures series (spec/09): its own buying power."""
+    return getattr(data, "_tw_future", None) is not None or getattr(data, "_tw_continuous", False)
+
+
+def _kind_models(data, models: ModelSet) -> ModelSet:
+    """``models`` with the buying power a futures contract (``FuturesMargin``) or a continuous
+    series (``NotTradable``) needs; any other feed gets ``models`` itself."""
+    if not _special_kind(data):
+        return models
+    from .futures import FuturesMargin, NotTradable
+
+    cls = FuturesMargin if getattr(data, "_tw_future", None) is not None else NotTradable
+    if isinstance(models.buying_power, cls):
+        return models
+    return models.replace(buying_power=cls())
+
+
 def _plain_comminfo(ci) -> bool:
     """A stock-like scheme valued by the base formulas: the mark can vectorise it."""
     cls = type(ci)
@@ -232,6 +250,9 @@ class BackBroker(BrokerBase):
         self._fx_sources: dict = {}          # currency -> (feed, invert)
         self._foreign = False                # a security is quoted outside the account currency
         self._multi_cash = False             # the mark adds foreign balances and unsettled cash
+        # futures (spec/09): the ledger of settlement references, variation margin and margin
+        # calls, created with the first ``FutureData``; None keeps every path as before
+        self._tw_futures = None
 
     # -- cash (the account currency's balance of the cash book) -------------------------
     @property
@@ -251,6 +272,16 @@ class BackBroker(BrokerBase):
     def open_orders(self) -> list[Order]:
         return list(self.submitted) + list(self.pending)
 
+    @property
+    def futures(self):
+        """The ``FuturesBook`` of the account (spec/09): settlement references, variation
+        margin, margin calls, expiries and rolls; created on first use."""
+        if self._tw_futures is None:
+            from .futures import FuturesBook
+
+            self._tw_futures = FuturesBook()
+        return self._tw_futures
+
     # -- securities ---------------------------------------------------------------------
     def register(self, data) -> Security:
         """The security of ``data``, created (next ``SecurityId``) on first sight."""
@@ -258,7 +289,11 @@ class BackBroker(BrokerBase):
         if security is not None and security._broker is self:
             return security
         sid = len(self.securities)
-        models = self._model_overrides.get(id(data), self.models)
+        models = self._model_overrides.get(id(data))
+        if models is None:
+            models = _kind_models(data, self.models)
+        if getattr(data, "_tw_future", None) is not None:
+            _ = self.futures                          # the ledger exists from now on
         name = getattr(data, "_name", "") or f"data{sid}"
         # a feed may carry its contract terms (an option's multiplier of 100, spec/06 § 5)
         props = getattr(data, "symbol_properties", None)
@@ -308,8 +343,14 @@ class BackBroker(BrokerBase):
         old = self.models
         self.models = models
         for security in self.securities:
-            if security.models is old and id(security.feed) not in self._model_overrides:
-                security.models = models
+            feed = security.feed
+            if id(feed) in self._model_overrides:
+                continue
+            if security.models is old:
+                security.models = _kind_models(feed, models)
+            elif _special_kind(feed):
+                # a futures contract or a continuous series keeps its own buying power
+                security.models = _kind_models(feed, models)
         from .realistic import MarginAccount, MarginCallModel
 
         if margin_call is None:
@@ -607,7 +648,12 @@ class BackBroker(BrokerBase):
             for data, pos in self.positions.items():
                 if not pos.size or len(data) == 0:
                     continue
-                e, u = _mark_terms(self.getcommissioninfo(data), pos, data.close[0])
+                if getattr(data, "_tw_future", None) is not None:
+                    # a futures position adds its unsettled P&L, not its notional
+                    e, u = pos.size * (data.close[0] - self._tw_futures.reference.get(
+                        data.security.id, data.close[0])), 0.0
+                else:
+                    e, u = _mark_terms(self.getcommissioninfo(data), pos, data.close[0])
                 m = self._security(data).properties.contract_multiplier
                 if m != 1.0:
                     e, u = e * m, u * m
@@ -624,7 +670,7 @@ class BackBroker(BrokerBase):
         cache = self._mark_cache
         if cache is None or cache[0] != len(order) or cache[1] != self._comminfo_key():
             cache = self._mark_cache = self._build_mark_cache()
-        _, _, ids, mult, lev, scalar_idx, cmult = cache
+        _, _, ids, mult, lev, scalar_idx, cmult, fut = cache
         pf = self.portfolio
         q = pf.quantity[ids]
         live = (q != 0) & (market.length[ids] > 0)
@@ -644,6 +690,13 @@ class BackBroker(BrokerBase):
                     data = securities[ids[k]].feed
                     entry[k], pnl[k] = _mark_terms(self.getcommissioninfo(data), self.positions[data],
                                                    data.close[0])
+        if fut is not None:
+            # futures (spec/09 § 4): the unsettled P&L against the settlement reference, not
+            # the notional
+            refs = self._tw_futures.reference
+            ref = np.array([refs.get(int(i), 0.0) for i in ids[fut]])
+            entry[fut] = q[fut] * (price[fut] - ref)
+            pnl[fut] = 0.0
         if cmult is not None:
             # contract multipliers (options): value = quantity x price x multiplier
             entry = entry * cmult
@@ -667,8 +720,9 @@ class BackBroker(BrokerBase):
         lev = np.array([float(ci.get_leverage()) for ci in comminfos])
         scalar_idx = np.flatnonzero(~plain).tolist()
         cmult = np.array([securities[i].properties.contract_multiplier for i in order], dtype=np.float64)
+        fut = np.array([getattr(securities[i].feed, "_tw_future", None) is not None for i in order], dtype=bool)
         return (len(order), self._comminfo_key(), ids, mult, lev, scalar_idx,
-                cmult if (cmult != 1.0).any() else None)
+                cmult if (cmult != 1.0).any() else None, fut if fut.any() else None)
 
     def _comminfo_key(self):
         """Changes whenever a scheme is set, added or replaced (even in the dict directly)."""
@@ -1373,6 +1427,9 @@ class BackBroker(BrokerBase):
         comminfo = order.comminfo
         models = security.models
         size, price = proposal.quantity, proposal.price
+        future = getattr(data, "_tw_future", None)
+        if future is not None and future.tick_size:
+            price = future.round_price(price)
         pos = self.positions[data]
         now = self._now
         fee = models.fee
@@ -1402,7 +1459,29 @@ class BackBroker(BrokerBase):
         newsize, _newprice, opened, closed = pos.update(size, price)
         pnl = comminfo.profitandloss(-closed, oldprice, price) if closed else 0.0
         m = security.properties.contract_multiplier
-        if comminfo.stocklike:
+        if future is not None:
+            # a futures contract (spec/09 § 3): no notional changes hands; closing contracts
+            # moves their unsettled P&L (against the settlement reference), opening moves
+            # nothing; each part pays its own fee
+            pnl = pnl * m
+            settle(security, self._tw_futures.fill_flow(security.id, oldsize, closed, opened, newsize, price, m),
+                   now, cashbook)
+            if closed and opened:
+                closedcomm = order_fee(fee, security, order, closed, price, now)
+                openedcomm = order_fee(fee, security, order, opened, price, now)
+                cashbook.add(ccy, -closedcomm)
+                cashbook.add(ccy, -openedcomm)
+                closedcomm = confirm_fee(fee, security, order, closed, price)
+                openedcomm = confirm_fee(fee, security, order, opened, price)
+                comm_final = closedcomm + openedcomm
+                trade_parts = (closedcomm, openedcomm)
+            else:
+                cashbook.add(ccy, -comm)
+                comm_final = confirm_fee(fee, security, order, size, price)
+                closedcomm = comm_final if closed else 0.0
+                openedcomm = comm_final if opened else 0.0
+                trade_parts = None
+        elif comminfo.stocklike:
             if m != 1.0:
                 pnl = pnl * m
             # Observed on the oracle (probes ``reversal_fees``, ``close_cash``): a fill is
@@ -1443,7 +1522,7 @@ class BackBroker(BrokerBase):
         # observed on the oracle (probe ``executed_values``): the closed part is valued at
         # the position's entry price, the opened part at the fill price
         closed_value, opened_value = -closed * oldprice, opened * price
-        if m != 1.0 and comminfo.stocklike:
+        if m != 1.0 and (comminfo.stocklike or future is not None):
             closed_value, opened_value = closed_value * m, opened_value * m
         order.execute(dt, size, price, closed, closed_value, closedcomm, opened, opened_value,
                       openedcomm, 0.0, pnl)
@@ -1493,6 +1572,10 @@ class BackBroker(BrokerBase):
 
     # phase 8
     def mark(self, s: TimeSlice | None) -> None:
+        if self._tw_futures is not None and s is not None:
+            # the daily settlement of futures positions (spec/09 § 4): their unsettled P&L
+            # moves to the cash before the mark, which it leaves unchanged
+            self._tw_futures.settle(self, s)
         self._value = self._mark_value()
         if self._tw_receivables:
             # dividends entitled and not yet paid (``dividends="pay_date"``)
@@ -1505,6 +1588,8 @@ class BackBroker(BrokerBase):
         model = self.margin_call_model
         if model is not None:
             model.check(self, s)
+        if self._tw_futures is not None:
+            self._tw_futures.check(self, s)
 
     def _update_trade(self, order, data, size, price, opened, closed, pnl, comm, dt, newsize, parts=None):
         if opened and closed:

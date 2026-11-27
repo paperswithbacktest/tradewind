@@ -35,6 +35,10 @@ only by tradewind.live.ibkr when it connects.
   OptionFilterUniverse (Strikes, Expiration, CallsOnly, PutsOnly, FrontMonth), its
   Black-Scholes price model and the exercise of options at expiry. The code and the
   formulas (from their textbook definitions) are Tradewind's own.
+* spec/09-futures.md and src/tradewind/futures.py follow the concepts of Lean's Future
+  securities (contract multiplier, tick size), its futures margin model (initial and
+  maintenance margin per contract), the expiry of a contract and its continuous contracts
+  with their back-adjustment modes (ratio, difference). The code is Tradewind's own.
 * spec/08-typed-api-and-analyzers.md, src/tradewind/typed.py and src/tradewind/performance.py
   follow the shape of Lean's QCAlgorithm (Initialize, OnData, OnOrderEvent,
   OnSecuritiesChanged, OnEndOfAlgorithm, SetHoldings, Liquidate, IsWarmingUp, Schedule.On)
