@@ -1978,6 +1978,36 @@ def build(bt):
                 target = 0.9 if f > float(self.datas[1].close[-5]) else 0.3
                 self.order_target_percent(self.datas[0], target=target)
 
+    class GetValueFeeds(Recorder):
+        """``broker.get_value(<feeds>)`` after ``add_cash`` (parity 0.1.54, corpus
+        ``the_risk_and_return_characteristics_of_the_buy_write…`` settles its option P&L with
+        ``get_value(self.datas)``): what it returns with one feed, two, all, a feed listed
+        twice, an empty list, and what the plain ``getvalue`` / ``getcash`` read after it in
+        that bar and the next."""
+
+        def __init__(self):
+            super().__init__()
+            self.extra = {"rows": []}
+
+        def next(self):
+            super().next()
+            self.tw_step = getattr(self, "tw_step", 0) + 1  # ``next`` starts once S3 lists
+            n = self.tw_step
+            b, ds = self.broker, self.datas
+            if n == 2:
+                self.buy(data=ds[0], size=300)
+            calls = {5: [ds[0]], 7: ds[1:3], 9: ds, 11: [ds[0], ds[0]], 13: [], 15: list(ds[:2]),
+                     17: tuple(ds)}
+            if n in calls:
+                if n != 15:
+                    b.add_cash(123.25 * n)
+                r = b.get_value(calls[n])
+                self.extra["rows"].append((n, "ret", repr(r)))
+            if 4 <= n <= 18:
+                self.extra["rows"].append((n, repr(b.getvalue()), repr(b.getcash())))
+            if n == 9:
+                self.order_target_percent(ds[1], target=0.2)    # sized on the value just read
+
     return {
         "levered_negative_close": LeveredNegativeClose,
         "slippage_perc": SlippagePerc,
@@ -2049,4 +2079,5 @@ def build(bt):
         "line_delay": LineDelay,
         "target_value_price": TargetValuePrice,
         "nextforce": NextForce,
+        "get_value_feeds": GetValueFeeds,
     }
