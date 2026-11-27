@@ -14,7 +14,9 @@ import tradewind as tw
 from tradewind.futures import (
     ContinuousData,
     FutureContract,
+    FutureData,
     FutureExpiry,
+    FutureExpiryError,
     FuturesMargin,
     FutureSpec,
     Roller,
@@ -93,6 +95,11 @@ def test_contract_terms_and_tick():
         FutureContract("CL", "X", dt.date(2020, 5, 19), 1000.0, initial_margin=1.0, maintenance_margin=2.0)
     with pytest.raises(ValueError):
         future_table(pd.DataFrame({"date": [], "symbol": []}))
+    # every margin read goes through ``margin`` (the hook of a dated schedule)
+    c2 = FutureContract("CL", "CLM0", dt.date(2020, 5, 19), 1000.0, 0.01, 6000.0, 5000.0)
+    assert (c2.margin("initial"), c2.margin("maintenance", dt.date(2020, 3, 9))) == (6000.0, 5000.0)
+    with pytest.raises(ValueError):
+        c2.margin("variation")
 
 
 # -- P&L, settlement, margin ----------------------------------------------------------------------------
@@ -191,12 +198,27 @@ def test_fill_prices_round_to_the_tick():
 # -- expiry ---------------------------------------------------------------------------------------------
 
 
-def test_forced_close_at_the_last_trading_date():
+def _held_to_expiry():
     # last trading date 2020-01-08 (bar 4); held through it, no roll
     closes = [50.0, 50.0, 51.0, 52.0, 53.0]
-    t = _table({"CLG0": ("2020-01-08", closes, None),
-                "CLH0": ("2020-02-20", [60.0] * 8, None)})
-    engine, s, chain = _run(t, {0: [("CLG0", 2)], 4: [("CLG0", 1)]}, SPEC)
+    return _table({"CLG0": ("2020-01-08", closes, None),
+                   "CLH0": ("2020-02-20", [60.0] * 8, None)})
+
+
+def test_holding_to_the_last_trading_date_stops_the_run_by_default():
+    t = _held_to_expiry()
+    with pytest.raises(FutureExpiryError, match=r"CLG0: 2 contract\(s\) still held.*2020-01-08.*Roller.*at_expiry='close'"):
+        _run(t, {0: [("CLG0", 2)]}, SPEC)
+    # a position closed before its last trading date runs through
+    _engine, s, _chain = _run(t, {0: [("CLG0", 2)], 2: [("CLG0", -2)]}, SPEC)
+    assert len(s.values) == 8
+    with pytest.raises(ValueError, match="at_expiry"):
+        _run(t, {}, SPEC, at_expiry="deliver")
+
+
+def test_forced_close_at_the_last_trading_date_when_asked():
+    t = _held_to_expiry()
+    engine, s, chain = _run(t, {0: [("CLG0", 2)], 4: [("CLG0", 1)]}, SPEC, at_expiry="close")
     feed = chain.feed("CLG0")
     exp = [a for a in s.actions if isinstance(a, FutureExpiry) and a.security == feed.security.id]
     assert len(exp) == 1 and exp[0].forced
@@ -354,7 +376,7 @@ def test_negative_price_difference_adjustment_and_backtest():
 
     engine = tw.Engine()
     add_futures(engine, t, {"CL": FutureSpec(1000.0, 0.01, 0.0, commission=0.0)}, continuous_adjust="difference",
-                continuous_rule=rule)
+                continuous_rule=rule, at_expiry="close")
     engine.addstrategy(Hold)
     engine.broker.setcash(START)
     s = engine.run()[0]
@@ -367,3 +389,25 @@ def test_negative_price_difference_adjustment_and_backtest():
     assert len(exp) == 1 and exp[0].settle_price == 10.01
     assert min(s.values) == pytest.approx(START + (-37.63 - 18.27) * 1000.0)
     assert s.values[-1] == pytest.approx(START + (10.01 - 18.27) * 1000.0)
+
+
+# -- intraday: refused for now (settlement at the session close, spec/09 § 10.3) ---------------------------
+
+
+def test_intraday_futures_bars_are_refused():
+    t = _table({"CLM0": ("2020-03-31", [50.0] * 4, None)})
+    minutes = t.copy()
+    minutes["date"] = minutes["date"] + pd.Timedelta(hours=14, minutes=30)
+    with pytest.raises(ValueError, match="intraday"):
+        future_table(minutes)
+    twice = pd.concat([t, t], ignore_index=True)
+    with pytest.raises(ValueError, match="one row per contract and session"):
+        future_table(twice)
+    c = FutureContract("CL", "CLM0", dt.date(2020, 3, 31), 1000.0)
+    bars = pd.DataFrame({"open": 50.0, "high": 50.0, "low": 50.0, "close": 50.0, "volume": 1.0},
+                        index=pd.date_range("2020-01-02 09:30", periods=3, freq="min"))
+    with pytest.raises(ValueError, match="intraday"):
+        FutureData(dataname=bars, contract=c)
+    with pytest.raises(ValueError, match="intraday"):
+        FutureData(dataname=bars.set_axis(bars.index.normalize() + pd.to_timedelta([0, 1, 2], "D")),
+                   contract=c, timeframe=tw.TimeFrame.Minutes)
