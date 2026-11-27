@@ -4,7 +4,8 @@ Proposal and first implementation, 2026-11-27 (`src/tradewind/futures.py`,
 `tests/test_futures.py`). Concepts read from QuantConnect Lean's public documentation
 (Future securities, their margin model, continuous contracts and their adjustment modes);
 the code is Tradewind's own. No real chain is published yet: every test runs on synthetic
-contracts.
+contracts. Édouard's answers of 2026-11-27 to the questions of § 10 are applied (§ 10 now
+records them as decisions).
 
 ## 1. What this adds
 
@@ -25,7 +26,8 @@ exceed it. `FutureData` is a `PandasData` of the contract's daily bars in points
 the contract and its `SymbolProperties` (multiplier, tick). Its **close is the settlement
 price**: `future_table` puts the table's `settlement` column there when it has one (the
 traded close is kept as `last`). A contract lists when it first trades and does not hold a
-strategy in `prenext` (`_tw_gate = False`). `FuturesCommission(commission=c)` charges `c`
+strategy in `prenext` (`_tw_gate = False`). Daily bars only: a `FutureData` whose bars
+carry a time of day, or whose `timeframe` is under a day, is refused (`ValueError`, § 10.3). `FuturesCommission(commission=c)` charges `c`
 per contract and side. Fill prices are rounded to the tick (after slippage).
 
 ## 3. Fills and margin (`FuturesMargin`, the contract's buying-power model)
@@ -65,24 +67,38 @@ per contract and side. Fill prices are rounded to the tick (after slippage).
   profile's own margin-call model is set (`set_profile(..., margin_call=True)`), it already
   cuts the book, futures included: the futures call is recorded only.
 
-## 5. Expiry: no delivery, forced close (`FutureExpiry`)
+## 5. Expiry: no delivery; a position held to it stops the run (`FutureExpiry`)
 
 At phase 3 of the first slice after the last trading date, like an option's expiry
 (spec/06 § 5.4): open orders on the contract end (accepted: cancelled; waiting for
-acceptance: expired), the security is delisted, and a position still open is **closed by
-force** at the last settlement on or before the last trading date: its unsettled P&L is
-paid, the scheme's fee charged, its trade closed (trade list, `notify_trade`). The strategy
-hears of it through the opt-in `notify_corporate_action` (`forced`, `quantity`,
-`settle_price`, `cash`, `fee`). A strategy that means to stay exposed rolls before.
+acceptance: expired) and the security is delisted. What happens to a position still open
+is `add_futures(..., at_expiry=...)`:
+
+* `"raise"` (**default**): the run stops with `FutureExpiryError`, naming the contract, the
+  contracts held, the last trading date and the three ways out (roll with a `Roller`,
+  close before, or `at_expiry="close"`). Whether a strategy will hold a contract to its
+  end is only known when it does, so the error comes at the expiry, not at construction;
+  it comes whether or not a `Roller` placed the position: a `Roller` whose rule decides
+  on the last trading day itself fills after it (§ 6).
+* `"close"`, an explicit choice: the position is **closed by force** at the last
+  settlement on or before the last trading date: its unsettled P&L is paid, the scheme's
+  fee charged, its trade closed (trade list, `notify_trade`). The strategy hears of it
+  through the opt-in `notify_corporate_action` (`forced`, `quantity`, `settle_price`,
+  `cash`, `fee`).
+
+A position closed before its last trading date, or rolled, meets no expiry.
 
 ## 6. Explicit rolls (`FutureChain`, `RollOnDate`, `RollOnVolume`, `Roller`)
 
 * `RollOnDate(days_before=7)`: hold the nearest contract whose last trading date is more
   than `days_before` calendar days away (the rule of the catalogue's rolled series,
   data-api #81).
-* `RollOnVolume(days_before=2)`: move to the next contract on the first bar its volume
+* `RollOnVolume(days_before=5)`: move to the next contract on the first bar its volume
   exceeds the held one's, never back; in any case once the held contract is within
-  `days_before` days of its last trading date.
+  `days_before` days of its last trading date. The days are calendar days and the roll
+  fills at the next open: the default leaves a session before a Monday last trading date
+  across a weekend and a holiday (2 days would decide on the Monday itself and fill after
+  it, which § 5 refuses).
 * `Roller(strategy, chain, rule).target(n)` in `next()`: hold `n` contracts (signed) in the
   contract the rule picks on this bar. When the pick changes, **two market orders** are
   placed on this bar and filled at the next open: close the old contract, open the new.
@@ -113,33 +129,53 @@ status Margin): a back-adjusted level is not a price anyone trades at.
 
 `future_table` reads one row per contract and session -- `date`, `symbol`, `root`, OHLC,
 `settlement` (optional), `volume`, `last_trade_date`, `first_trade_date` (optional), the
-layout of data-api #81's daily table -- and drops rows after the last trading date.
-`add_futures(engine, table, {root: FutureSpec(multiplier, tick_size, initial_margin,
-maintenance_margin, commission, currency)})` adds one `FutureData` per contract, its
-commission scheme, the expiries, and returns the `FutureChain` of each root.
+layout of data-api #81's daily table -- and drops rows after the last trading date. A date
+with a time of day, or a second row for the same contract and session, is refused
+(intraday, § 10.3). `add_futures(engine, table, {root: FutureSpec(multiplier, tick_size,
+initial_margin, maintenance_margin, commission, currency)}, at_expiry="raise")` adds one
+`FutureData` per contract, its commission scheme, the expiries under the `at_expiry`
+policy (§ 5), and returns the `FutureChain` of each root.
 
-## 9. Tests (synthetic, `tests/test_futures.py`, 14)
+## 9. Tests (synthetic, `tests/test_futures.py`, 16)
 
 P&L with a multiplier of 1 000 and the daily variation adding up to the realised P&L;
 the settlement column as the mark; the initial margin refusing a third contract; the margin
 call after a settlement under both policies; notional sizing; tick rounding of a slipped
-fill; the forced close at the last trading date (fee, realised P&L, closed trade, the
-late order expired); a date roll paid as two orders with fees and slippage, reconciled to
+fill; a position held to its last trading date stopping the run by default
+(`FutureExpiryError`, its message), one closed before running through, an unknown
+`at_expiry` refused; the forced close under `at_expiry="close"` (fee, realised P&L, closed
+trade, the late order expired); a date roll paid as two orders with fees and slippage, reconciled to
 the cent; a volume roll decided on the right bar; ratio and difference series against the
 contracts' own returns and point changes; the continuous feed refusing orders; WTI April
 2020 -- a position held through -37.63 marked and closed by force without a NaN, the
-difference series finite, the ratio series refused.
+difference series finite, the ratio series refused; intraday tables and feeds refused; the
+`margin` reader.
 
-## 10. Questions for Édouard
+## 10. Decisions (Édouard, 2026-11-27)
 
-1. **Forced close or roll by default.** A contract held past its last trading date is
-   closed by force (proposed). Should `add_futures` instead refuse a run whose strategy
-   holds a contract without a `Roller`?
-2. **Margins through time.** Margins are fixed per root here. Exchanges change them
-   (crude's initial margin roughly doubled in March 2020). A dated schedule per root, once
-   the reference tables carry it?
-3. **Intraday.** Settlement runs at every bar of the contract's feed: right for daily bars;
-   on minute bars it would settle every minute (same value, more margin checks). Settle at
-   the session close from the exchange calendar when intraday futures arrive?
-4. **Margin from cash only.** Initial margin is posted from cash; stock positions in the
-   same account do not count as collateral. Enough for the catalogue's futures strategies?
+The four questions of the first draft, answered "recommendations 1 to 4: ok".
+
+1. **No silent forced close.** A backtest whose strategy holds a contract to its last
+   trading date is refused: `FutureExpiryError` at the expiry (§ 5), the earliest point at
+   which it is known. The forced close stays, as the explicit option
+   `add_futures(..., at_expiry="close")`. `RollOnVolume`'s default moved from 2 to 5
+   calendar days so that its rolls fill before a Monday expiry (§ 6).
+2. **Margins fixed per root, for now.** `FutureSpec` gives one initial and one maintenance
+   margin per root, for the life of every contract. Extension point: every margin read
+   (the batch check, the fill check, the book's requirement, the margin call, the
+   profile's `maintenance_margin`) goes through `FutureContract.margin(kind, day)`; a dated
+   schedule per root -- exchanges move margins: crude's initial margin roughly doubled in
+   March 2020 -- replaces its body with a lookup at `day` once the reference tables carry
+   one, and the callers pass the slice's day. Not built until such a table exists.
+3. **Intraday: settlement at the session close; refused for now.** The rule, when intraday
+   futures arrive: a contract settles once a day, at the close of its session on the
+   exchange's calendar (`tradewind.calendars`, CME), not at every bar; margin calls follow
+   that settlement. Implementing it needs the session close of each futures exchange and a
+   settlement price distinct from the last minute bar, which no table carries yet. Until
+   then intraday futures are refused: `future_table` rejects a date with a time of day or
+   two rows for one contract and session, and `FutureData` rejects intraday bars or a
+   timeframe under a day (`ValueError`).
+4. **Margin from cash only.** The initial and maintenance margins are posted from cash;
+   stock or option positions in the same account are not collateral (no cross-margining,
+   no haircut table). Enough for the catalogue's futures strategies, which hold futures
+   alone; documented on `FuturesMargin` and `add_futures`.
